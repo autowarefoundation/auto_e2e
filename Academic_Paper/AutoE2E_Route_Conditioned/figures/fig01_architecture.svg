@@ -1,0 +1,200 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="724" viewBox="0 0 1100 724" font-family="Helvetica, Arial, sans-serif" font-size="11">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#333"/></marker>
+<marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8A8A8A"/></marker>
+<marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#B8443F"/></marker>
+</defs>
+<rect x="0" y="0" width="1100" height="724" fill="white"/>
+<text x="1088" y="20" font-size="10.5" font-weight="bold" text-anchor="end" fill="#222" font-family="Helvetica, Arial, sans-serif">79.91 M parameters in total; 1.45 M trainable (1.8%) in the trajectory stages</text>
+<text x="110.0" y="22" font-size="12" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Camera inputs</text>
+<rect x="14" y="32" width="192" height="72" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="110.0" y="47" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Camera history (7 frames)</text>
+<text x="110.0" y="59.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">6 views x 512x512 each</text>
+<text x="110.0" y="71.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">t-3.5 s ... t-0.5 s, 0.5 s interval</text>
+<text x="110.0" y="83.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">512 px only; detached (no grad)</text>
+<rect x="14" y="116" width="192" height="50" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="110.0" y="131" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Current cameras (t = 0)</text>
+<text x="110.0" y="143.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">6 views x 512x512</text>
+<text x="110.0" y="155.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">long-range front + 5 surround</text>
+<rect x="14" y="178" width="192" height="50" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="110.0" y="193" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Native front camera (t = 0)</text>
+<text x="110.0" y="205.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">1 view x 1024x1024</text>
+<text x="110.0" y="217.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">additive high-res branch</text>
+<rect x="240" y="32" width="150" height="196" rx="6" fill="#EEF0F4" stroke="#6E7B8E" stroke-width="1.2" fill-opacity="1.0" />
+<text x="315.0" y="47" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">ResNet-50 + FPN</text>
+<text x="315.0" y="59.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">shared for all frames/views</text>
+<text x="315.0" y="71.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">BEVFormer V2 input profile</text>
+<text x="315.0" y="83.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">BatchNorm frozen</text>
+<text x="315.0" y="95.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif"></text>
+<text x="315.0" y="107.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">FPN: last 3 stages -&gt;</text>
+<text x="315.0" y="119.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">4 levels x 256 ch</text>
+<text x="315.0" y="131.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif"></text>
+<text x="315.0" y="143.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">23.51 M + 3.28 M params</text>
+<rect x="337" y="24" width="50" height="14" rx="7" fill="#444" />
+<text x="362.0" y="34.5" font-size="8.5" font-weight="bold" text-anchor="middle" fill="white" font-family="Helvetica, Arial, sans-serif">frozen</text>
+<rect x="424" y="32" width="196" height="118" rx="6" fill="#EEF0F4" stroke="#6E7B8E" stroke-width="1.2" fill-opacity="1.0" />
+<text x="522.0" y="47" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">BEVFormer V2 T1 encoder x6</text>
+<text x="522.0" y="59.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">BEV queries 300x200x256 (15.36 M)</text>
+<text x="522.0" y="71.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">+ row/col positional embeddings</text>
+<text x="522.0" y="83.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">layer: deformable self-attn (4 pts)</text>
+<text x="522.0" y="95.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">+ spatial cross-attn (8 heads x</text>
+<text x="522.0" y="107.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">4 levels x 8 pts) + FFN 512</text>
+<text x="522.0" y="119.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">view fusion 20.70 M (layers 4.94 M)</text>
+<rect x="567" y="24" width="50" height="14" rx="7" fill="#444" />
+<text x="592.0" y="34.5" font-size="8.5" font-weight="bold" text-anchor="middle" fill="white" font-family="Helvetica, Arial, sans-serif">frozen</text>
+<rect x="424" y="172" width="196" height="56" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="522.0" y="187" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Front residual branch (t = 0 only)</text>
+<text x="522.0" y="199.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">copy of layer-6 cross-attn (0.33 M, frozen)</text>
+<text x="522.0" y="211.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">content-only delta x tanh(gate); gate 256-d</text>
+<rect x="539" y="164" width="78" height="14" rx="7" fill="#444" />
+<text x="578.0" y="174.5" font-size="8.5" font-weight="bold" text-anchor="middle" fill="white" font-family="Helvetica, Arial, sans-serif">gate train</text>
+<rect x="654" y="32" width="176" height="118" rx="6" fill="#EEF0F4" stroke="#6E7B8E" stroke-width="1.2" fill-opacity="1.0" />
+<text x="742.0" y="47" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">T8 temporal fusion</text>
+<text x="742.0" y="59.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">in: 7 detached history BEVs + current</text>
+<text x="742.0" y="71.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">concat 8 BEVs (t-7 ... t0) = 2048 ch</text>
+<text x="742.0" y="83.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">3 ResNet BasicBlocks @ 512 ch</text>
+<text x="742.0" y="95.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Linear 512 -&gt; 256 + LayerNorm; 30.81 M</text>
+<text x="742.0" y="107.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif"></text>
+<text x="742.0" y="119.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Menlo, Consolas, monospace">B_img: 256 x 300 x 200 (0.6 m)</text>
+<rect x="777" y="24" width="50" height="14" rx="7" fill="#444" />
+<text x="802.0" y="34.5" font-size="8.5" font-weight="bold" text-anchor="middle" fill="white" font-family="Helvetica, Arial, sans-serif">frozen</text>
+<rect x="654" y="236" width="176" height="38" rx="6" fill="#FAFAFA" stroke="#9A9A9A" stroke-width="1.2" stroke-dasharray="5,3" fill-opacity="1.0" />
+<text x="742.0" y="251" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">BEV segmentation head (dormant)</text>
+<text x="742.0" y="263.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">8 classes from B_img; loss weight 0.0</text>
+<rect x="882" y="32" width="204" height="118" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="984.0" y="47" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Deformable navigation fusion</text>
+<text x="984.0" y="59.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">query: each B_img cell; values: B_nav</text>
+<text x="984.0" y="71.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">K = 8 sample points, 8 heads, 256 ch</text>
+<text x="984.0" y="83.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">pre-LN, FFN 256 -&gt; 512 -&gt; 256</text>
+<text x="984.0" y="95.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">out-proj + FFN zero-initialised</text>
+<text x="984.0" y="107.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">0.350 M params</text>
+<text x="984.0" y="119.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif"></text>
+<text x="984.0" y="131.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Menlo, Consolas, monospace">B_fused = B_img + F(B_img, B_nav)</text>
+<rect x="1040" y="24" width="43" height="14" rx="7" fill="#444" />
+<text x="1061.5" y="34.5" font-size="8.5" font-weight="bold" text-anchor="middle" fill="white" font-family="Helvetica, Arial, sans-serif">train</text>
+<path d="M 206 68 L 240 68" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 206 141 L 240 141" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 206 203 L 240 203" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 390 90 L 424 90" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="407.0" y="86.0" font-size="9" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">8 x FPN pyramids</text>
+<path d="M 390 200 L 424 200" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="407.0" y="196.0" font-size="9" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">front FPN</text>
+<path d="M 620 60 L 654 60" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 460 150 L 460 172" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="465" y="165" font-size="8.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">current BEV</text>
+<path d="M 620 200 L 678 200 L 678 150 L 678 150" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="684" y="172" font-size="8.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">current BEV</text>
+<text x="684" y="182" font-size="8.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">+ gated front delta</text>
+<path d="M 830 90 L 882 90" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="856.0" y="86.0" font-size="9" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">B_img (query)</text>
+<path d="M 806 150 L 806 236" fill="none" stroke="#8A8A8A" stroke-width="1.3" stroke-dasharray="4,3" marker-end="url(#arrow-gray)"/>
+<text x="110.0" y="292" font-size="12" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Navigation inputs</text>
+<rect x="14" y="302" width="192" height="74" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="110.0" y="317" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">HD Map raster M</text>
+<text x="110.0" y="329.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">14 ch x 450x300 @ 0.4 m/px</text>
+<text x="110.0" y="341.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">same extent as camera BEV</text>
+<text x="110.0" y="353.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">values in [0,1]; map_valid gate</text>
+<rect x="14" y="388" width="192" height="62" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="110.0" y="403" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Route raster R</text>
+<text x="110.0" y="415.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">2 ch x 450x300, binary</text>
+<text x="110.0" y="427.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">corridor 3.5 m / destination r = 2 m</text>
+<text x="110.0" y="439.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">route_valid gate</text>
+<rect x="424" y="302" width="196" height="74" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="522.0" y="317" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Map encoder E_map</text>
+<text x="522.0" y="329.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">fully convolutional semantic raster enc.</text>
+<text x="522.0" y="341.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">5x5 conv 96 -&gt; dw-stride 2 &amp; 4 -&gt; 1x1 256</text>
+<text x="522.0" y="353.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">resample to 300x200; 0.167 M</text>
+<rect x="574" y="294" width="43" height="14" rx="7" fill="#444" />
+<text x="595.5" y="304.5" font-size="8.5" font-weight="bold" text-anchor="middle" fill="white" font-family="Helvetica, Arial, sans-serif">train</text>
+<rect x="424" y="388" width="196" height="62" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="522.0" y="403" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Route encoder E_route</text>
+<text x="522.0" y="415.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">lightweight conv, 96 hidden ch</text>
+<text x="522.0" y="427.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">keeps thin corridor/destination</text>
+<text x="522.0" y="439.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">0.078 M</text>
+<rect x="574" y="380" width="43" height="14" rx="7" fill="#444" />
+<text x="595.5" y="390.5" font-size="8.5" font-weight="bold" text-anchor="middle" fill="white" font-family="Helvetica, Arial, sans-serif">train</text>
+<rect x="654" y="388" width="176" height="62" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="742.0" y="403" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Route gate</text>
+<text x="742.0" y="415.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">sigmoid(g), g in R^256, zero-init</text>
+<text x="742.0" y="427.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">route_contribution = gate * E_route(R)</text>
+<rect x="784" y="380" width="43" height="14" rx="7" fill="#444" />
+<text x="805.5" y="390.5" font-size="8.5" font-weight="bold" text-anchor="middle" fill="white" font-family="Helvetica, Arial, sans-serif">train</text>
+<circle cx="742.0" cy="339" r="12" fill="white" stroke="#333" stroke-width="1.3"/>
+<text x="742.0" y="343.5" font-size="15" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">+</text>
+<text x="742.0" y="319" font-size="9.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Menlo, Consolas, monospace">B_nav = E_map(M) + gate * E_route(R)</text>
+<path d="M 206 339 L 424 339" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 206 419 L 424 419" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 620 339 L 730.0 339" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 620 419 L 654 419" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 742.0 388 L 742.0 351" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 754.0 339 L 926 339 L 926 150 L 926 150" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="932" y="250" font-size="9.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">B_nav (values)</text>
+<rect x="882" y="302" width="204" height="128" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="984.0" y="317" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">GRU control planner</text>
+<text x="984.0" y="329.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">c_0 = P_ego(h_ego) + P_vis(h_vis), 256-d</text>
+<text x="984.0" y="341.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">for t = 1..64:</text>
+<text x="984.0" y="353.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">  q_t = detach(h_{t-1}) + e_query</text>
+<text x="984.0" y="365.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">  a_t = deformable lookup (16 pts) on B_fused</text>
+<text x="984.0" y="377.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">  h_t = GRU(a_t, h_{t-1});  u_t = W_u h_t</text>
+<text x="984.0" y="389.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">u_t = (acceleration, curvature); 0.835 M</text>
+<rect x="1040" y="294" width="43" height="14" rx="7" fill="#444" />
+<text x="1061.5" y="304.5" font-size="8.5" font-weight="bold" text-anchor="middle" fill="white" font-family="Helvetica, Arial, sans-serif">train</text>
+<path d="M 1042 150 L 1042 302" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="1048" y="230" font-size="9.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">B_fused</text>
+<text x="1048" y="242" font-size="8.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">(value_proj)</text>
+<rect x="882" y="452" width="204" height="58" rx="6" fill="#FFFFFF" stroke="#444444" stroke-width="1.2" fill-opacity="1.0" />
+<text x="984.0" y="467" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Semi-implicit unicycle rollout</text>
+<text x="984.0" y="479.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">dt = 0.1 s, v_0 = current speed</text>
+<text x="984.0" y="491.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">v, heading, XY integrated in float32</text>
+<path d="M 984.0 430 L 984.0 452" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="992.0" y="445" font-size="9" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">u_1..u_64 (64 x 2)</text>
+<rect x="882" y="532" width="204" height="52" rx="6" fill="#FBE5E3" stroke="#B8443F" stroke-width="1.2" fill-opacity="1.0" />
+<text x="984.0" y="547" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Ego-frame trajectory</text>
+<text x="984.0" y="559.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">64 x 2 (XY) @ 10 Hz = 6.4 s horizon</text>
+<path d="M 984.0 510 L 984.0 532" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<rect x="882" y="604" width="204" height="60" rx="6" fill="#FCEBF1" stroke="#B1407A" stroke-width="1.2" fill-opacity="1.0" />
+<text x="984.0" y="619" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Trajectory imitation loss (w = 1.0)</text>
+<text x="984.0" y="631.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Smooth-L1 (beta 1 m) on rolled-out XY</text>
+<text x="984.0" y="643.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">vs recorded XY, validity-masked</text>
+<path d="M 984.0 584 L 984.0 604" fill="none" stroke="#B1407A" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="110.0" y="510" font-size="12" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">History inputs</text>
+<rect x="14" y="520" width="192" height="60" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="110.0" y="535" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Egomotion history h_ego</text>
+<text x="110.0" y="547.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">64 steps x 4 @ 10 Hz = 6.4 s</text>
+<text x="110.0" y="559.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">speed/33, accel/8, yaw rate, curvature</text>
+<rect x="14" y="626" width="192" height="48" rx="6" fill="#FAFAFA" stroke="#9A9A9A" stroke-width="1.2" stroke-dasharray="5,3" fill-opacity="1.0" />
+<text x="110.0" y="641" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Visual history h_vis</text>
+<text x="110.0" y="653.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">896-d API input; zeros (no_memory)</text>
+<path d="M 206 550 L 848 550 L 848 400 L 882 400" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="500" y="545" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">h_ego -&gt; P_ego (Linear 256 -&gt; 256)</text>
+<path d="M 206 650 L 864 650 L 864 416 L 882 416" fill="none" stroke="#8A8A8A" stroke-width="1.3" stroke-dasharray="4,3" marker-end="url(#arrow-gray)"/>
+<text x="500" y="645" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#777" font-family="Helvetica, Arial, sans-serif">h_vis -&gt; P_vis (Linear 896 -&gt; 256); input is zero</text>
+<rect x="654" y="480" width="176" height="60" rx="6" fill="#FCF4DB" stroke="#B8860B" stroke-width="1.2" fill-opacity="1.0" />
+<text x="742.0" y="495" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Route reconstruction head</text>
+<text x="742.0" y="507.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">input: route_contribution</text>
+<text x="742.0" y="519.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">2 ch logits @ 450x300; 0.017 M</text>
+<rect x="784" y="472" width="43" height="14" rx="7" fill="#444" />
+<text x="805.5" y="482.5" font-size="8.5" font-weight="bold" text-anchor="middle" fill="white" font-family="Helvetica, Arial, sans-serif">train</text>
+<path d="M 742.0 450 L 742.0 480" fill="none" stroke="#B8860B" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="742.0" y="461.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#B8860B" font-family="Helvetica, Arial, sans-serif">route_contribution</text>
+<rect x="654" y="560" width="176" height="60" rx="6" fill="#FCEBF1" stroke="#B1407A" stroke-width="1.2" fill-opacity="1.0" />
+<text x="742.0" y="575" font-size="11" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Route reconstruction loss (w = 1.0)</text>
+<text x="742.0" y="587.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">corridor: 0.5 BCE + 0.5 soft Dice</text>
+<text x="742.0" y="599.5" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">destination: 0.25 x focal heatmap</text>
+<path d="M 742.0 540 L 742.0 560" fill="none" stroke="#B1407A" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="742.0" y="690" font-size="9.5" font-weight="normal" text-anchor="middle" fill="#555" font-family="Helvetica, Arial, sans-serif">BEV segmentation loss weight = 0.0 in all four reported checkpoints</text>
+<rect x="14" y="703" width="14" height="10" fill="#E3EEF9" stroke="#3F6FAE"/>
+<text x="32" y="712" font-size="10" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">data input</text>
+<rect x="108.0" y="703" width="14" height="10" fill="#EEF0F4" stroke="#6E7B8E"/>
+<text x="126.0" y="712" font-size="10" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">frozen (official BEVFormer V2 T8 init.)</text>
+<rect x="381.8" y="703" width="14" height="10" fill="#E2F3E4" stroke="#2E8B57"/>
+<text x="399.8" y="712" font-size="10" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">trainable in trajectory stages</text>
+<rect x="599.8" y="703" width="14" height="10" fill="#FAFAFA" stroke="#9A9A9A" stroke-dasharray="5,3"/>
+<text x="617.8" y="712" font-size="10" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">present, disabled</text>
+<rect x="737.1999999999999" y="703" width="14" height="10" fill="#FCF4DB" stroke="#B8860B"/>
+<text x="755.1999999999999" y="712" font-size="10" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">auxiliary head</text>
+<rect x="855.9999999999999" y="703" width="14" height="10" fill="#FBE5E3" stroke="#B8443F"/>
+<text x="873.9999999999999" y="712" font-size="10" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">output</text>
+<rect x="925.1999999999999" y="703" width="14" height="10" fill="#FCEBF1" stroke="#B1407A"/>
+<text x="943.1999999999999" y="712" font-size="10" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">loss</text>
+</svg>

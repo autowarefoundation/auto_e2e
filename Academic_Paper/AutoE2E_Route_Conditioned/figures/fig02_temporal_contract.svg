@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="360" viewBox="0 0 900 360" font-family="Helvetica, Arial, sans-serif" font-size="10.5">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#333"/></marker>
+<marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8A8A8A"/></marker>
+<marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#B8443F"/></marker>
+</defs>
+<rect x="0" y="0" width="900" height="360" fill="white"/>
+<text x="18" y="22" font-size="11" font-weight="bold" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">Temporal contract: camera history, egomotion, control output, and benchmark targets</text>
+<line x1="530.0" y1="35" x2="530.0" y2="312" stroke="#d62728" stroke-width="1.2" stroke-dasharray="4,3"/>
+<text x="536.0" y="48" font-size="9" font-weight="normal" text-anchor="start" fill="#d62728" font-family="Helvetica, Arial, sans-serif">now (t = 0)</text>
+<text x="18" y="82" font-size="10.5" font-weight="bold" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">Camera (T8)</text>
+<rect x="337.0625" y="58" width="14" height="32" rx="2" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2"/>
+<text x="344.0625" y="103" font-size="7.5" font-weight="normal" text-anchor="middle" fill="#3F6FAE" font-family="Helvetica, Arial, sans-serif">-3.5</text>
+<rect x="363.625" y="58" width="14" height="32" rx="2" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2"/>
+<text x="370.625" y="103" font-size="7.5" font-weight="normal" text-anchor="middle" fill="#3F6FAE" font-family="Helvetica, Arial, sans-serif">-3.0</text>
+<rect x="390.1875" y="58" width="14" height="32" rx="2" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2"/>
+<text x="397.1875" y="103" font-size="7.5" font-weight="normal" text-anchor="middle" fill="#3F6FAE" font-family="Helvetica, Arial, sans-serif">-2.5</text>
+<rect x="416.75" y="58" width="14" height="32" rx="2" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2"/>
+<text x="423.75" y="103" font-size="7.5" font-weight="normal" text-anchor="middle" fill="#3F6FAE" font-family="Helvetica, Arial, sans-serif">-2.0</text>
+<rect x="443.3125" y="58" width="14" height="32" rx="2" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2"/>
+<text x="450.3125" y="103" font-size="7.5" font-weight="normal" text-anchor="middle" fill="#3F6FAE" font-family="Helvetica, Arial, sans-serif">-1.5</text>
+<rect x="469.875" y="58" width="14" height="32" rx="2" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2"/>
+<text x="476.875" y="103" font-size="7.5" font-weight="normal" text-anchor="middle" fill="#3F6FAE" font-family="Helvetica, Arial, sans-serif">-1.0</text>
+<rect x="496.4375" y="58" width="14" height="32" rx="2" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2"/>
+<text x="503.4375" y="103" font-size="7.5" font-weight="normal" text-anchor="middle" fill="#3F6FAE" font-family="Helvetica, Arial, sans-serif">-0.5</text>
+<rect x="523.0" y="58" width="14" height="32" rx="2" fill="#FBE5E3" stroke="#d62728" stroke-width="1.2"/>
+<text x="530.0" y="103" font-size="7.5" font-weight="normal" text-anchor="middle" fill="#d62728" font-family="Helvetica, Arial, sans-serif">0</text>
+<text x="190" y="50" font-size="8.6" font-weight="normal" text-anchor="start" fill="#3F6FAE" font-family="Helvetica, Arial, sans-serif">7 history frames x 6 views @ 512 px; detached</text>
+<text x="548.0" y="72" font-size="8.6" font-weight="normal" text-anchor="start" fill="#d62728" font-family="Helvetica, Arial, sans-serif">6 views @ 512 px</text>
+<text x="548.0" y="84" font-size="8.6" font-weight="normal" text-anchor="start" fill="#d62728" font-family="Helvetica, Arial, sans-serif">+ front @ 1024 px (additive)</text>
+<text x="548.0" y="96" font-size="8.6" font-weight="normal" text-anchor="start" fill="#333" font-family="Helvetica, Arial, sans-serif">3.5 s visual span at 2 Hz</text>
+<text x="18" y="153" font-size="10.5" font-weight="bold" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">Egomotion</text>
+<rect x="190.0" y="126" width="127.5" height="34" rx="4" fill="#F5F5F5" stroke="#999"/>
+<text x="253.75" y="147" font-size="8.4" font-weight="normal" text-anchor="middle" fill="#666" font-family="Helvetica, Arial, sans-serif">zero pad in benchmark</text>
+<rect x="317.5" y="126" width="212.5" height="34" rx="4" fill="#E3EEF9" stroke="#3F6FAE"/>
+<text x="423.75" y="147" font-size="8.6" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">40 real steps (4.0 s) in benchmark</text>
+<text x="190" y="119" font-size="8.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">64 x [speed, acceleration, yaw rate, curvature] @ 10 Hz; training uses all 6.4 s</text>
+<text x="18" y="219" font-size="10.5" font-weight="bold" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">Planner output</text>
+<rect x="530.0" y="191" width="340.0" height="34" rx="4" fill="#E2F3E4" stroke="#2E8B57"/>
+<text x="700.0" y="212" font-size="8.6" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">64 x (acceleration, curvature) @ 10 Hz -&gt; rollout -&gt; 64 XY points</text>
+<text x="18" y="276" font-size="10.5" font-weight="bold" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">Targets</text>
+<rect x="530.0" y="248" width="265.625" height="34" rx="4" fill="#FCF4DB" stroke="#B8860B"/>
+<text x="662.8125" y="269" font-size="8.4" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">50 valid steps: ADE/FDE @ 1, 2, 3, 5 s; |lateral| / |longitudinal|</text>
+<rect x="795.625" y="248" width="74.375" height="34" rx="4" fill="#F5F5F5" stroke="#999"/>
+<text x="832.8125" y="269" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#666" font-family="Helvetica, Arial, sans-serif">no target</text>
+<text x="791.625" y="241" font-size="8.5" font-weight="normal" text-anchor="end" fill="#B8860B" font-family="Helvetica, Arial, sans-serif">valid coverage 50/64 = 78.125%</text>
+<line x1="190" y1="312" x2="870" y2="312" stroke="#333" stroke-width="1.1"/>
+<line x1="211.25000000000003" y1="308" x2="211.25000000000003" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="211.25000000000003" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">-6</text>
+<line x1="264.375" y1="308" x2="264.375" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="264.375" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">-5</text>
+<line x1="317.5" y1="308" x2="317.5" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="317.5" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">-4</text>
+<line x1="370.625" y1="308" x2="370.625" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="370.625" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">-3</text>
+<line x1="423.75" y1="308" x2="423.75" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="423.75" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">-2</text>
+<line x1="476.875" y1="308" x2="476.875" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="476.875" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">-1</text>
+<line x1="530.0" y1="308" x2="530.0" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="530.0" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">0</text>
+<line x1="583.125" y1="308" x2="583.125" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="583.125" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">+1</text>
+<line x1="636.25" y1="308" x2="636.25" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="636.25" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">+2</text>
+<line x1="689.375" y1="308" x2="689.375" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="689.375" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">+3</text>
+<line x1="742.5" y1="308" x2="742.5" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="742.5" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">+4</text>
+<line x1="795.625" y1="308" x2="795.625" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="795.625" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">+5</text>
+<line x1="848.75" y1="308" x2="848.75" y2="316" stroke="#333" stroke-width="1.0"/>
+<text x="848.75" y="329" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">+6</text>
+<text x="530.0" y="348" font-size="9" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">time relative to current frame [s]  (10 Hz base rate = 0.1 s per step)</text>
+<text x="888" y="22" font-size="9.5" font-weight="normal" text-anchor="end" fill="#555" font-family="Helvetica, Arial, sans-serif">benchmark: 40 history / 50 future steps; training: 64 / 64</text>
+</svg>

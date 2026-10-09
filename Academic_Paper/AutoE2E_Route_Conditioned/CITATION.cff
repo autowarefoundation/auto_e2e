@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this work, please cite the Zenodo record."
+title: "AutoE2E: Open-Loop Evaluation of a Map- and Oracle-Route-Conditioned Temporal BEV Planner"
+version: 1.0.0
+date-released: 2026-09-15
+authors:
+  - family-names: Yamada
+    given-names: Ryota
+    affiliation: Amazon Web Services, Inc.
+license: Apache-2.0
+repository-code: "https://github.com/autowarefoundation/auto_e2e"
+keywords:
+  - autonomous driving
+  - end-to-end driving
+  - BEVFormer
+  - HD map
+  - route conditioning
+  - KITScenes

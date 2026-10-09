@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="470" viewBox="0 0 780 470" font-family="Helvetica, Arial, sans-serif" font-size="10.5">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#333"/></marker>
+<marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8A8A8A"/></marker>
+<marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#B8443F"/></marker>
+</defs>
+<rect x="0" y="0" width="780" height="470" fill="white"/>
+<text x="14" y="22" font-size="11" font-weight="bold" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">Checkpoint lineage (top) and the two evaluation protocols (bottom)</text>
+<rect x="14" y="40" width="176" height="76" rx="6" fill="#EEF0F4" stroke="#6E7B8E" stroke-width="1.2" fill-opacity="1.0" />
+<text x="102.0" y="54.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Official BEVFormer V2 R50 T8</text>
+<text x="102.0" y="66.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">nuScenes-trained (epoch 24)</text>
+<text x="102.0" y="78.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">BEV queries/pos. embeddings resized</text>
+<text x="102.0" y="89.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">to 300 x 200; detector heads dropped</text>
+<rect x="214" y="40" width="176" height="76" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="302.0" y="54.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">nuPlan trajectory stage</text>
+<text x="302.0" y="66.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">8 GPU workers, seed 149, LR 1e-4</text>
+<text x="302.0" y="78.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">camera BEV frozen; traj w=1, route w=1</text>
+<text x="302.0" y="89.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">BEV seg w=0; 1,024 internal val samples</text>
+<rect x="414" y="40" width="156" height="76" rx="6" fill="#FFFFFF" stroke="#444444" stroke-width="1.2" fill-opacity="1.0" />
+<text x="492.0" y="54.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">nuPlan Epoch 4 / Epoch 5</text>
+<text x="492.0" y="66.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">ed00e072471a / ca8b43d7a777</text>
+<text x="492.0" y="78.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Epoch 5 = fine-tuning parent</text>
+<text x="492.0" y="89.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">(frozen Epoch-5 parent profile)</text>
+<rect x="594" y="40" width="172" height="76" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="680.0" y="54.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">KITScenes fine-tuning</text>
+<text x="680.0" y="66.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">8 workers, seed 149, LR 3e-5</text>
+<text x="680.0" y="78.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">38,847 samples / 364 scenes</text>
+<text x="680.0" y="89.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">frozen val 3,820 / 40 scenes; BF16</text>
+<path d="M 190 78 L 214 78" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 390 78 L 414 78" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 570 78 L 594 78" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<rect x="594" y="132" width="172" height="52" rx="6" fill="#FFFFFF" stroke="#444444" stroke-width="1.2" fill-opacity="1.0" />
+<text x="680.0" y="146.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">KITScenes Epoch 5 / Epoch 7</text>
+<text x="680.0" y="158.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">120a21639d97 / a1e6b1621018</text>
+<text x="680.0" y="170.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Ep. 5 marked best retained checkpoint</text>
+<path d="M 680 116 L 680 132" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="214" y="130" font-size="8.5" font-weight="normal" text-anchor="start" fill="#555" font-family="Helvetica, Arial, sans-serif">Optional BEV-only Stage A (unfrozen camera BEV, BEV seg. loss) exists in the code path;</text>
+<text x="214" y="142" font-size="8.5" font-weight="normal" text-anchor="start" fill="#555" font-family="Helvetica, Arial, sans-serif">its use as parent of the reported nuPlan checkpoints is not recorded in the available metadata.</text>
+<text x="14" y="130" font-size="8.5" font-weight="normal" text-anchor="start" fill="#555" font-family="Helvetica, Arial, sans-serif">all four checkpoints:</text>
+<text x="14" y="142" font-size="8.5" font-weight="normal" text-anchor="start" fill="#555" font-family="Helvetica, Arial, sans-serif">eval_gate_pass = false</text>
+<text x="14" y="200" font-size="10.5" font-weight="bold" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">Protocol A: checkpoint-internal validation (model executed)</text>
+<rect x="14" y="206" width="236" height="96" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="132.0" y="220.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Frozen internal validation splits</text>
+<text x="132.0" y="232.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">nuPlan: 1,024 samples</text>
+<text x="132.0" y="244.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">KITScenes: 3,820 samples / 40 scenes</text>
+<text x="132.0" y="255.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Camera + Map + Route (+ counterfactuals)</text>
+<text x="132.0" y="267.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">BF16 autocast</text>
+<rect x="270" y="206" width="236" height="96" rx="6" fill="#FCF4DB" stroke="#B8860B" stroke-width="1.2" fill-opacity="1.0" />
+<text x="388.0" y="220.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Metrics @ 6.4 s (64 steps)</text>
+<text x="388.0" y="232.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">ADE/FDE 6.4 s; route reconstruction IoU</text>
+<text x="388.0" y="244.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">route corridor compliance/success</text>
+<text x="388.0" y="255.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">route progress proxy; drivable compliance</text>
+<text x="388.0" y="267.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">comfort (nuPlan thresholds)</text>
+<path d="M 250 254 L 270 254" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="14" y="318" font-size="8.5" font-weight="normal" text-anchor="start" fill="#B8443F" font-family="Helvetica, Arial, sans-serif">Not comparable with Protocol B: different samples, horizon, and metric definitions.</text>
+<text x="14" y="334" font-size="10.5" font-weight="bold" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">Protocol B: external deterministic overlay replay (model NOT re-executed)</text>
+<rect x="14" y="340" width="236" height="96" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="132.0" y="354.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">KITScenes Val v3.5 (primary)</text>
+<text x="132.0" y="366.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">117 scenes, 11,035 samples (strict identity)</text>
+<text x="132.0" y="378.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">inputs: Camera + HD Map + Route</text>
+<text x="132.0" y="389.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Dashboard shows 140 shards / 13,525 samples</text>
+<rect x="270" y="340" width="236" height="96" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="388.0" y="354.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">KITScenes Test v1.0 (camera-only track)</text>
+<text x="388.0" y="366.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">206 scenes, 23,690 samples</text>
+<text x="388.0" y="378.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Map and Route unavailable by construction</text>
+<text x="388.0" y="389.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">different scene population from Val</text>
+<rect x="526" y="340" width="240" height="96" rx="6" fill="#FCF4DB" stroke="#B8860B" stroke-width="1.2" fill-opacity="1.0" />
+<text x="646.0" y="354.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Replay of published control overlays</text>
+<text x="646.0" y="366.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">64 x (a, kappa) + v0 per sample -&gt; rollout</text>
+<text x="646.0" y="378.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">ADE/FDE @ 1, 2, 3, 5 s; |lat|, |lon| error</text>
+<text x="646.0" y="389.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">50 valid steps (78.125 %); 0 nonfinite</text>
+<text x="646.0" y="401.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">no counterfactuals / gradients / route logits</text>
+<path d="M 250 388 L 270 388" fill="none" stroke="#8A8A8A" stroke-width="1.3" stroke-dasharray="3,3" marker-end="url(#arrow-gray)"/>
+<path d="M 506 388 L 526 388" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="260" y="452" font-size="8.5" font-weight="normal" text-anchor="start" fill="#B8443F" font-family="Helvetica, Arial, sans-serif">Val and Test are different scene populations: Test minus Val is not a Map/Route effect.</text>
+<rect x="526" y="327" width="14" height="10" fill="#EEF0F4" stroke="#6E7B8E"/>
+<text x="544" y="336" font-size="9.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">pretrained init</text>
+<rect x="651.0" y="327" width="14" height="10" fill="#E2F3E4" stroke="#2E8B57"/>
+<text x="669.0" y="336" font-size="9.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">training stage</text>
+<rect x="769.8" y="327" width="14" height="10" fill="#E3EEF9" stroke="#3F6FAE"/>
+<text x="787.8" y="336" font-size="9.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">data</text>
+<rect x="826.5999999999999" y="327" width="14" height="10" fill="#FCF4DB" stroke="#B8860B"/>
+<text x="844.5999999999999" y="336" font-size="9.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">metrics</text>
+</svg>

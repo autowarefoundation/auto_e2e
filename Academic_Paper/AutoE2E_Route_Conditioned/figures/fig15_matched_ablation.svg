@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="300" viewBox="0 0 760 300" font-family="Helvetica, Arial, sans-serif" font-size="10.5">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#333"/></marker>
+<marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8A8A8A"/></marker>
+<marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#B8443F"/></marker>
+</defs>
+<rect x="0" y="0" width="760" height="300" fill="white"/>
+<text x="14" y="22" font-size="11" font-weight="bold" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">Required (not yet run) same-scene matched ablation for a causal Map/Route claim</text>
+<rect x="14" y="44" width="220" height="70" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="124.0" y="58.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Fixed inputs for all conditions</text>
+<text x="124.0" y="70.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">same 11,035 KITScenes Val samples</text>
+<text x="124.0" y="82.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">same frozen checkpoint (e.g. KITScenes Ep. 5)</text>
+<text x="124.0" y="93.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">identical precomputed camera BEV B_img</text>
+<rect x="262" y="44" width="150" height="70" rx="6" fill="#FFFFFF" stroke="#444444" stroke-width="1.2" fill-opacity="1.0" />
+<text x="337.0" y="58.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">A: Camera only</text>
+<text x="337.0" y="70.3" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">map_valid = 0, route_valid = 0</text>
+<text x="337.0" y="81.6" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">B_nav = E_map(0) + 0</text>
+<path d="M 234 79 L 262 79" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<rect x="428" y="44" width="150" height="70" rx="6" fill="#FFFFFF" stroke="#444444" stroke-width="1.2" fill-opacity="1.0" />
+<text x="503.0" y="58.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">B: Camera + HD Map</text>
+<text x="503.0" y="70.3" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">map_valid = 1, route_valid = 0</text>
+<text x="503.0" y="81.6" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">(enable_route_conditioning off)</text>
+<rect x="594" y="44" width="150" height="70" rx="6" fill="#FFFFFF" stroke="#444444" stroke-width="1.2" fill-opacity="1.0" />
+<text x="669.0" y="58.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">C: Camera + Map + Route</text>
+<text x="669.0" y="70.3" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">map_valid = 1, route_valid = 1</text>
+<text x="669.0" y="81.6" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">= production contract</text>
+<path d="M 412 79 L 428 79" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 578 79 L 594 79" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<rect x="14" y="136" width="730" height="60" rx="6" fill="#FCF4DB" stroke="#B8860B" stroke-width="1.2" fill-opacity="1.0" />
+<text x="379.0" y="150.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Report per condition (paired, scene-level bootstrap CIs, distribution of per-scene deltas)</text>
+<text x="379.0" y="162.3" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">ADE/FDE @ 1, 2, 3, 5 s; mean |lat| / |lon| error; route corridor compliance &amp; success; route progress proxy;</text>
+<text x="379.0" y="173.60000000000002" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">drivable compliance &amp; success; comfort rate and each violation; failure rate &amp; nonfinite predictions; latency/memory</text>
+<rect x="14" y="214" width="730" height="62" rx="6" fill="#FFFDF2" stroke="#C9B458" stroke-width="1.2" fill-opacity="1.0" />
+<text x="379.0" y="228.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Controls and stratifications</text>
+<text x="379.0" y="240.3" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">shuffled-route control (another scene&#x27;s route); destination-marker removal; route-corridor removal; map-only corruption/dropout;</text>
+<text x="379.0" y="251.60000000000002" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">off-route / ambiguous-intersection subsets; valid-map vs invalid-map stratification</text>
+<text x="14" y="292" font-size="9.5" font-weight="bold" text-anchor="start" fill="#B8443F" font-family="Helvetica, Arial, sans-serif">No outcome of this experiment is reported in this paper.</text>
+</svg>

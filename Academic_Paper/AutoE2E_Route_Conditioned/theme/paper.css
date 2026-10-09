@@ -1,0 +1,183 @@
+/* Two-column academic paper theme for Vivliostyle (VFM). Adapted from the ipsj-tech sample
+   of "VFMで学会論文を書いてVivliostyleで組んで投稿する" (gihyo.jp, 2025). */
+:root {
+  counter-reset: section 0 subsection 0 subsubsection 0 figure 0 table 0 reference 0 equation 0 footnote 0;
+  --serif-font-family: "Times New Roman", "Hiragino Mincho ProN", "Yu Mincho", YuMincho, serif;
+  --serif-font-family-en: "Times New Roman", Times, serif;
+  --sans-serif-font-family: "Helvetica Neue", Helvetica, Arial, "Hiragino Kaku Gothic ProN", "Hiragino Sans", sans-serif;
+  --sans-serif-font-family-en: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --code-font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
+  font-family: var(--serif-font-family);
+  font-size: 8.5pt;
+  hyphens: auto;
+  line-break: strict;
+  --line-height: 1.42;
+  line-height: var(--line-height);
+  text-align: justify;
+  text-spacing: auto;
+  orphans: 2;
+  widows: 2;
+  --spacing-block: calc(var(--line-height) * 1rem);
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+:root:lang(en) { font-family: var(--serif-font-family-en); --line-height: 1.22; line-height: var(--line-height); }
+
+@media print {
+  :root { column-count: 2; column-gap: 18pt; column-fill: auto; }
+  @page {
+    size: A4 portrait;
+    margin-block-start: 16mm;
+    margin-block-end: 18mm;
+    margin-inline-start: 13mm;
+    margin-inline-end: 13mm;
+    @bottom-center { content: counter(page); font-family: var(--serif-font-family-en); font-size: 8pt; }
+  }
+}
+
+/* ---- header (title block spans both columns) ---- */
+header { float: block-start; float-reference: page; margin-block-end: 8mm; padding-inline: 6mm; }
+h1 {
+  font-family: var(--serif-font-family);
+  font-size: 18pt;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+  color: #111;
+  text-align: center;
+  margin-block-start: 7mm;
+  margin-block-end: 4mm;
+  padding-block-end: 0;
+  border-block-end: none;
+}
+:root:lang(en) h1 {
+  font-family: var(--serif-font-family-en);
+  font-weight: bold;
+  letter-spacing: 0;
+}
+h2.title:lang(en), h2.title-en {
+  font-family: var(--serif-font-family-en);
+  font-size: 10.5pt;
+  font-weight: normal;
+  font-style: italic;
+  line-height: 1.25;
+  color: #222;
+  text-align: center;
+  margin-block: 1mm 4mm;
+}
+h2.author { display: none; }
+section:has(> .author) { text-align: center; margin-block: 3mm 2mm; }
+section:has(> .author) > p { display: inline; margin: 0 0.6rem; font-size: 10pt; text-indent: 0; }
+p.affiliation { text-align: center; text-indent: 0; font-size: 8pt; margin-block: 0 4mm; }
+h2.abstract::before, h2.keyword::before { content: ""; display: block; margin: 0; padding: 0; }
+h2.abstract, h2.keyword { display: inline; text-indent: 0; margin-inline: 0; padding: 0; font-size: 8.5pt;
+  font-family: var(--sans-serif-font-family); font-weight: bold; }
+h2.abstract + p, h2.keyword + p { display: inline; text-indent: 0; }
+h2.abstract + p::after, h2.keyword + p::after { content: ""; display: block; margin: 0; padding: 0; }
+section:has(> h2.abstract), section:has(> h2.keyword) { font-size: 8.5pt; line-height: 1.45; margin-block-start: 1.2em; }
+section:has(> h2.abstract:lang(en)), section:has(> h2.abstract:lang(en)) > * ,
+section:has(> h2.keyword:lang(en)) > * { font-family: var(--serif-font-family-en); }
+
+/* ---- paragraphs / headings ---- */
+p { margin-block: 0; text-indent: 1rem; }
+p.noindent, li > p, figcaption p, td p, th p { text-indent: 0; }
+section > * { margin-break: discard; }
+h2 { margin-block: calc(var(--spacing-block) * 0.55) calc(var(--spacing-block) * 0.25); font-family: var(--sans-serif-font-family);
+     font-weight: bold; font-size: 10.5pt; text-align: start; counter-reset: subsection 0; break-after: avoid;
+     color: #123c69; border-inline-start: 3px solid #2a6f97; padding-inline-start: 0.45rem; }
+h2:not(.title, .title-en, .author, .abstract, .keyword, .acknowledgement, .reference, .appendix) { counter-increment: section; }
+h2:not(.title, .title-en, .author, .abstract, .keyword, .acknowledgement, .reference, .appendix)::before {
+  content: counter(section) ". "; }
+h3 { margin-block: calc(var(--spacing-block) * 0.4) 0; font-family: var(--sans-serif-font-family); font-size: 9.5pt;
+     counter-increment: subsection; counter-reset: subsubsection; break-after: avoid; }
+h3::before { content: counter(section) "." counter(subsection) " "; }
+h4 { margin-block: calc(var(--spacing-block) * 0.3) 0; font-family: var(--sans-serif-font-family); font-size: 9pt;
+     counter-increment: subsubsection; break-after: avoid; }
+h4::before { content: counter(section) "." counter(subsection) "." counter(subsubsection) " "; }
+h5 { display: inline; margin-inline-end: 0.6rem; font-family: var(--sans-serif-font-family); font-size: 9pt; }
+h5::before { content: ""; display: block; margin-block-start: 0.35em; }
+h5 + p { display: inline; text-indent: 0; }
+h5 + p::after { content: ""; display: block; }
+
+/* ---- figures ---- */
+figure { margin-block: 0 calc(var(--spacing-block) * 0.8); margin-inline: 0; float: block-start; float-reference: column; }
+figure.col-span-2, figure:has(> img.col-span-2) { float: block-start; float-reference: page; }
+figure.normal-flow { float: none; margin-block: calc(var(--spacing-block) * 0.6); }
+figure.fig, figure:has(> img.fig) { counter-increment: figure; break-inside: avoid; }
+figcaption { margin-block: calc(var(--spacing-block) * 0.3) 0; margin-inline: 0.4rem; font-size: 7.3pt; line-height: 1.28;
+  text-align: justify; text-indent: 0; border-inline-start: 2px solid #2a6f97; padding-inline-start: 0.45rem; color: #243746; }
+figure.fig figcaption::before, figure:has(> img.fig) figcaption::before { content: "図 " counter(figure) "  "; font-weight: bold; }
+:root:lang(en) figure.fig figcaption::before, :root:lang(en) figure:has(> img.fig) figcaption::before { content: "Fig. " counter(figure) ".  "; }
+img { width: 100%; }
+figure.fig img { display: block; margin-inline: auto; }
+
+/* ---- tables ---- */
+figure.table { counter-increment: table; float: block-start; float-reference: column; break-inside: avoid; }
+figure.table.col-span-2 { float-reference: page; }
+figure.table figcaption { margin-block: 0 calc(var(--spacing-block) * 0.3); caption-side: top; }
+figure.table figcaption::before { content: "表 " counter(table) "  "; font-weight: bold; }
+:root:lang(en) figure.table figcaption::before { content: "Table " counter(table) ".  "; }
+table { border-collapse: collapse; margin-inline: auto; width: 100%; font-size: 7.0pt; line-height: 1.18; }
+table thead th, table thead td { border-top: 1px solid #123c69; border-bottom: 1px solid #123c69; background: #eaf1f7; color: #123c69; }
+table tbody tr:nth-child(even) td { background: #f7f9fb; }
+table tbody tr:last-child th, table tbody tr:last-child td { border-bottom: 1px solid; }
+table th, table td { padding-inline: 0.28rem; padding-block: 0.12rem; border: none; vertical-align: top; }
+table th { font-family: var(--sans-serif-font-family); font-weight: bold; text-align: left; font-size: 7.0pt; }
+table td.num, table th.num { text-align: right; font-family: var(--serif-font-family-en); font-variant-numeric: tabular-nums; }
+table td.c, table th.c { text-align: center; }
+td.best { font-weight: bold; }
+td.second { text-decoration: underline; }
+table.small { font-size: 6.5pt; }
+tr.group td { border-top: 1px solid #aaa; }
+
+/* ---- references / equations ---- */
+a { text-decoration: none; color: inherit; }
+a.cite::before { content: "[" target-counter(attr(href url), reference) "]"; font-family: var(--serif-font-family-en); }
+a.figref::before { content: "図 " target-counter(attr(href url), figure); }
+a.tabref::before { content: "表 " target-counter(attr(href url), table); }
+a.eqref::before { content: "(" target-counter(attr(href url), equation) ")"; }
+a.secref::before { content: counter(section); }
+:root:lang(en) a.figref::before { content: "Fig. " target-counter(attr(href url), figure); }
+:root:lang(en) a.tabref::before { content: "Table " target-counter(attr(href url), table); }
+.equation { display: grid; grid-template-columns: 1fr auto; align-items: center; margin-block: 0.35em; break-inside: avoid; }
+.equation.number { counter-increment: equation; }
+.equation.number::after { content: "(" counter(equation) ")"; font-family: var(--serif-font-family-en); }
+.equation mjx-container { margin: 0 !important; text-align: left !important; }
+mjx-container { font-size: 95%; }
+
+h2.reference { font-size: 10pt; }
+section:has(> h2.reference) { --ref-padding-inline: 1.8em; padding-inline-start: var(--ref-padding-inline); }
+div.reference { counter-increment: reference; display: flow-root; break-inside: avoid; font-size: 7.6pt; line-height: 1.3;
+  margin-block-end: 0.15em; font-family: var(--serif-font-family-en); }
+div.reference::before { content: "[" counter(reference) "]"; float: left; margin-inline-start: calc(-1 * var(--ref-padding-inline));
+  min-inline-size: var(--ref-padding-inline); }
+
+/* ---- appendix ---- */
+h2.appendix { letter-spacing: 0.3rem; }
+section:has(> h2.appendix) { counter-reset: subsection 0 figure 0 table 0; }
+section:has(> h2.appendix) h3::before { content: "A." counter(subsection) " "; }
+section:has(> h2.appendix) h4::before { content: "A." counter(subsection) "." counter(subsubsection) " "; }
+section:has(> h2.appendix) figure.table figcaption::before { content: "表 A." counter(table) "  "; }
+section:has(> h2.appendix) figure.fig figcaption::before { content: "図 A." counter(figure) "  "; }
+:root:lang(en) section:has(> h2.appendix) figure.table figcaption::before { content: "Table A." counter(table) ".  "; }
+:root:lang(en) section:has(> h2.appendix) figure.fig figcaption::before { content: "Fig. A." counter(figure) ".  "; }
+
+/* ---- lists ---- */
+ul, ol { margin-block: 0.2em; padding-inline-start: 1.4em; font-size: inherit; }
+li { margin-block: 0.08em; }
+li::marker { font-family: var(--serif-font-family-en); }
+
+/* ---- misc ---- */
+code { font-family: var(--code-font-family); font-size: 88%; }
+.rq { font-family: var(--sans-serif-font-family); font-weight: bold; }
+.note { font-size: 8pt; color: #333; }
+h2.acknowledgement { display: inline-block; margin-inline-end: 0.6rem; margin-block-end: 0; font-size: 9.5pt; }
+h2.acknowledgement + p { display: inline; }
+.placeholder { background: #fff3c4; padding: 0 0.15em; }
+
+/* Special headings inside the title block do not use the section accent. */
+h2.title, h2.title-en, h2.author, h2.abstract, h2.keyword {
+  border-inline-start: none;
+  padding-inline-start: 0;
+  color: inherit;
+}

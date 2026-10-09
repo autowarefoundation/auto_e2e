@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="470" viewBox="0 0 760 470" font-family="Helvetica, Arial, sans-serif" font-size="10.5">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#333"/></marker>
+<marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8A8A8A"/></marker>
+<marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#B8443F"/></marker>
+</defs>
+<rect x="0" y="0" width="760" height="470" fill="white"/>
+<text x="14" y="22" font-size="11" font-weight="bold" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">Split navigation encoding and deformable navigation fusion (all trainable)</text>
+<rect x="20" y="40" width="230" height="40" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="135.0" y="54.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">M: 14 x 450 x 300</text>
+<text x="135.0" y="66.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">bilinear resample -&gt; 14 x 300 x 200</text>
+<rect x="20" y="92" width="230" height="62" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="135.0" y="106.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">E_map stem</text>
+<text x="135.0" y="118.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Conv 5x5, 14 -&gt; 96, GroupNorm(16), SiLU</text>
+<text x="135.0" y="130.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">local path: Conv 1x1, 96 -&gt; 256</text>
+<rect x="20" y="166" width="230" height="86" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="135.0" y="180.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">E_map context</text>
+<text x="135.0" y="192.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">depthwise 3x3 s2 + Conv 1x1 96 -&gt; 192, GN, SiLU</text>
+<text x="135.0" y="204.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">depthwise 3x3 s2 + Conv 1x1 192 -&gt; 192, GN, SiLU</text>
+<text x="135.0" y="215.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Conv 1x1 192 -&gt; 256, GN; bilinear x4 upsample</text>
+<rect x="20" y="264" width="230" height="40" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="135.0" y="278.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">E_map(M) = GN+SiLU(local + context)</text>
+<text x="135.0" y="290.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">256 x 300 x 200; 0.167 M params</text>
+<path d="M 135.0 80 L 135.0 92" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 135.0 154 L 135.0 166" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 135.0 252 L 135.0 264" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<rect x="270" y="40" width="230" height="40" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="385.0" y="54.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">R: 2 x 450 x 300 (binary)</text>
+<text x="385.0" y="66.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">bilinear resample -&gt; 2 x 300 x 200</text>
+<rect x="270" y="92" width="230" height="62" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="385.0" y="106.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">E_route stem</text>
+<text x="385.0" y="118.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Conv 3x3, 2 -&gt; 48, GN, SiLU</text>
+<text x="385.0" y="130.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Conv 3x3, 48 -&gt; 96, GN, SiLU</text>
+<rect x="270" y="166" width="230" height="86" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="385.0" y="180.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">E_route context</text>
+<text x="385.0" y="192.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">depthwise 3x3 s2 (96) + Conv 1x1 96 -&gt; 96, GN, SiLU</text>
+<text x="385.0" y="204.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">bilinear x2 upsample; sum with stem output</text>
+<text x="385.0" y="215.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Conv 1x1 96 -&gt; 256, GN, SiLU</text>
+<rect x="270" y="264" width="230" height="40" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="385.0" y="278.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">E_route(R)</text>
+<text x="385.0" y="290.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">256 x 300 x 200; 0.078 M params</text>
+<path d="M 385.0 80 L 385.0 92" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 385.0 154 L 385.0 166" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 385.0 252 L 385.0 264" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<rect x="270" y="318" width="230" height="40" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="385.0" y="332.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">x sigmoid(g)   g in R^256, zero-init -&gt; 0.5</text>
+<text x="385.0" y="344.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">route_contribution (-&gt; reconstruction head)</text>
+<path d="M 385.0 304 L 385.0 318" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<circle cx="145" cy="340" r="12" fill="white" stroke="#333" stroke-width="1.3"/>
+<text x="145" y="344.5" font-size="15" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">+</text>
+<path d="M 135.0 304 L 145 328" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 270 338 L 157 340" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="145" y="374" font-size="10" font-weight="bold" text-anchor="middle" fill="#222" font-family="Menlo, Consolas, monospace">B_nav: 256 x 300 x 200</text>
+<text x="145" y="388" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">validity gates: M *= map_valid, R *= route_valid (sample level)</text>
+<rect x="528" y="40" width="216" height="46" rx="6" fill="#EEF0F4" stroke="#6E7B8E" stroke-width="1.2" fill-opacity="1.0" />
+<text x="636.0" y="54.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">B_img (query)  256 x 300 x 200</text>
+<text x="636.0" y="66.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">frozen camera path output</text>
+<rect x="528" y="100" width="216" height="174" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="636.0" y="114.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Deformable cross-attention</text>
+<text x="636.0" y="126.3" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">q = LayerNorm(B_img cell)</text>
+<text x="636.0" y="137.6" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">offset_proj: Linear 256 -&gt; 2K (K = 8 points)</text>
+<text x="636.0" y="148.9" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">attn_proj: Linear 256 -&gt; 8 heads x K</text>
+<text x="636.0" y="160.20000000000002" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">sample B_nav bilinearly at cell + offsets</text>
+<text x="636.0" y="171.50000000000003" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">(grid_sample, border padding)</text>
+<text x="636.0" y="182.80000000000004" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">per-head softmax over K, weighted sum</text>
+<text x="636.0" y="194.10000000000005" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">out_proj: Linear 256 -&gt; 256 (zero-init)</text>
+<text x="636.0" y="205.40000000000006" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">residual add; then FFN 256-&gt;512-&gt;256</text>
+<text x="636.0" y="216.70000000000007" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">(GELU, dropout 0.1, last Linear zero-init)</text>
+<rect x="528" y="290" width="216" height="46" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="636.0" y="304.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">B_fused = B_img + F(B_img, B_nav)</text>
+<text x="636.0" y="316.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">0.350 M params; exact identity at init</text>
+<path d="M 636.0 86 L 636.0 100" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 636.0 274 L 636.0 290" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 205 370 L 490 370 L 490 200 L 528 200" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="492" y="300" font-size="9" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">B_nav (values)</text>
+<text x="636.0" y="372" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">chunked over 4096 queries; O(N x K) instead of O(N^2)</text>
+<text x="636.0" y="386" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">N = 60,000 BEV cells</text>
+<rect x="528" y="400" width="216" height="56" rx="6" fill="#FCF4DB" stroke="#B8860B" stroke-width="1.2" fill-opacity="1.0" />
+<text x="636.0" y="414.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Route reconstruction head</text>
+<text x="636.0" y="426.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Conv1x1 256-&gt;64, GN, SiLU, dw 3x3, SiLU, Conv1x1 64-&gt;2</text>
+<text x="636.0" y="438.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">bilinear to 450 x 300; 0.017 M</text>
+<path d="M 500 338 L 505 338 L 505 428 L 528 428" fill="none" stroke="#B8860B" stroke-width="1.3" marker-end="url(#arrow)"/>
+<rect x="20" y="453" width="14" height="10" fill="#E3EEF9" stroke="#3F6FAE"/>
+<text x="38" y="462" font-size="9.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">input</text>
+<rect x="83.0" y="453" width="14" height="10" fill="#EEF0F4" stroke="#6E7B8E"/>
+<text x="101.0" y="462" font-size="9.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">frozen</text>
+<rect x="152.2" y="453" width="14" height="10" fill="#E2F3E4" stroke="#2E8B57"/>
+<text x="170.2" y="462" font-size="9.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">trainable</text>
+<rect x="240.0" y="453" width="14" height="10" fill="#FCF4DB" stroke="#B8860B"/>
+<text x="258.0" y="462" font-size="9.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">auxiliary</text>
+</svg>
