@@ -65,7 +65,8 @@ export default function OccupancyPage() {
     if (!available.length) return;
     if (!available.some((entry) => entry.name === dataset)) {
       setDataset(
-        available.find((entry) => entry.name === "kitscenes")?.name ??
+        available.find((entry) => entry.name === "kitscenes-val")?.name ??
+          available.find((entry) => entry.name === "kitscenes")?.name ??
           available[0].name,
       );
     }
