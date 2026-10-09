@@ -2183,7 +2183,51 @@ func (s *S3Service) ReasoningPromptVersionsAtVersion(
 	ctx context.Context,
 	dataset, version string,
 ) ([]model.ReasoningPromptVersion, error) {
-	inventory, _, _, err := s.reasoningInventory(ctx, dataset, version)
+	resolvedVersion, err := s.publishedVersion(ctx, dataset, version)
+	if err != nil {
+		return nil, err
+	}
+	if requiresPublicationManifest(resolvedVersion) {
+		manifest, err := s.loadPublicationManifest(
+			ctx, dataset, resolvedVersion,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if manifest.ReasoningLabelCount == 0 {
+			return []model.ReasoningPromptVersion{}, nil
+		}
+	} else {
+		body, err := s.getObjectBytesFromBucket(
+			ctx,
+			s.bucket,
+			shardsPrefix(dataset, resolvedVersion)+"manifest.json",
+			maxPublicationManifestBytes,
+		)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		if err == nil {
+			var manifest struct {
+				ReasoningLabelCount *int `json:"reasoning_label_count"`
+			}
+			if err := json.Unmarshal(body, &manifest); err != nil {
+				return nil, fmt.Errorf(
+					"decode reasoning count for %s/%s: %w",
+					dataset,
+					resolvedVersion,
+					err,
+				)
+			}
+			if manifest.ReasoningLabelCount != nil &&
+				*manifest.ReasoningLabelCount == 0 {
+				return []model.ReasoningPromptVersion{}, nil
+			}
+		}
+	}
+	inventory, _, _, err := s.reasoningInventory(
+		ctx, dataset, resolvedVersion,
+	)
 	if err != nil {
 		return nil, err
 	}
