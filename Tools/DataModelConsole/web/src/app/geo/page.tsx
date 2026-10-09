@@ -22,6 +22,7 @@ import {
   listDatasets,
   listDatasetVersions,
 } from "@/lib/api";
+import { friendlyDataset } from "@/lib/format";
 import { fitGeoBounds } from "@/lib/geo";
 import type {
   Dataset,
@@ -351,7 +352,7 @@ function GeoPageInner() {
           >
             {datasets.map((item) => (
               <option key={item.name} value={item.name}>
-                {item.name}
+                {friendlyDataset(item.name)}
               </option>
             ))}
           </select>
