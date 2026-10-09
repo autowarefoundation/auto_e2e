@@ -24,6 +24,7 @@ import {
   listShardsForEpisode,
   listShardSemanticOccupancyModels,
 } from "@/lib/api";
+import { friendlyDataset } from "@/lib/format";
 import {
   parseSemanticOccupancy,
   resolveSemanticOccupancyRows,
@@ -302,7 +303,7 @@ export default function OccupancyPage() {
             {!datasets.data?.length && <option value="">Unavailable</option>}
             {(datasets.data ?? []).map((entry) => (
               <option key={entry.name} value={entry.name}>
-                {entry.name}
+                {friendlyDataset(entry.name)}
               </option>
             ))}
           </select>
