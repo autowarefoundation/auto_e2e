@@ -52,6 +52,24 @@ function perViewPair(
   return fallback;
 }
 
+function cameraImageSize(
+  rig: RigProjectionDocument,
+  view: number,
+): [number, number] {
+  const perCamera = rig.camera_image_sizes?.[view];
+  if (typeof perCamera === "number") return [perCamera, perCamera];
+  if (Array.isArray(perCamera) && perCamera.length === 2) {
+    return [
+      asNumber(perCamera[0], 256),
+      asNumber(perCamera[1], 256),
+    ];
+  }
+  if (typeof rig.image_size === "number") {
+    return [rig.image_size, rig.image_size];
+  }
+  return rig.image_size ?? [256, 256];
+}
+
 function multiplyPoint(matrix: Matrix, point: number[]): number[] {
   return matrix.map((row) =>
     row.reduce((sum, coefficient, index) => sum + coefficient * point[index], 0),
@@ -232,13 +250,10 @@ export function projectTrajectoryToCameras(
   const groundZ = trajectoryGroundZMeters(rig);
   const views =
     type === "ftheta" ? (transforms?.length ?? 0) : (matrices?.length ?? 0);
-  const size =
-    typeof rig.image_size === "number"
-      ? ([rig.image_size, rig.image_size] as [number, number])
-      : (rig.image_size ?? [256, 256]);
 
   const result: CameraProjectionPaths = {};
   for (let view = 0; view < views; view++) {
+    const size = cameraImageSize(rig, view);
     const paths: ScreenPoint[][] = [[]];
     for (const point of trajectory) {
       const projected = projectPoint(
@@ -271,14 +286,11 @@ export function projectTrajectoryRibbonToCameras(
   const groundZ = trajectoryGroundZMeters(rig);
   const views =
     type === "ftheta" ? (transforms?.length ?? 0) : (matrices?.length ?? 0);
-  const size =
-    typeof rig.image_size === "number"
-      ? ([rig.image_size, rig.image_size] as [number, number])
-      : (rig.image_size ?? [256, 256]);
   const boundaries = trajectoryBoundaries(trajectory, widthM);
 
   const result: CameraProjectionRibbons = {};
   for (let view = 0; view < views; view++) {
+    const size = cameraImageSize(rig, view);
     const ribbons: ScreenRibbon[] = [];
     let current: ScreenRibbon = { left: [], right: [] };
     for (const boundary of boundaries) {
