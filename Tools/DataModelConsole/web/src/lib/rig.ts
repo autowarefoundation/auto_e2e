@@ -86,11 +86,19 @@ const RIGS: Record<string, Record<string, RigCam>> = {
   l2d: L2D_RIG,
 };
 
+function isKITScenesDataset(dataset: string): boolean {
+  return (
+    dataset === "kitscenes" ||
+    dataset === "kitscenes-test" ||
+    dataset === "kitscenes-val"
+  );
+}
+
 function datasetRig(
   dataset: string,
   packedCameraCount?: number,
 ): Record<string, RigCam> | undefined {
-  if (dataset === "kitscenes") {
+  if (isKITScenesDataset(dataset)) {
     return packedCameraCount === 6
       ? KITSCENES_SIX_VIEW_RIG
       : KITSCENES_SEVEN_VIEW_RIG;
@@ -108,7 +116,11 @@ export function isHiddenCam(
 ): boolean {
   // Seven-view shards contain the redundant ring-front in slot 1. Six-view
   // shards already removed it and compacted front-left into slot 1.
-  return dataset === "kitscenes" && packedCameraCount !== 6 && cam === "cam_1";
+  return (
+    isKITScenesDataset(dataset) &&
+    packedCameraCount !== 6 &&
+    cam === "cam_1"
+  );
 }
 
 // rigCam returns the rig position + grid cell for a "cam_N" identifier.
@@ -140,11 +152,8 @@ export function camLabel(
 // other datasets to avoid changing their existing layout. The canvas still
 // object-contain-fits the real bitmap, so a stray off-ratio image is letterboxed
 // rather than stretched — this only sets the frame's shape.
-const DATASET_ASPECT_RATIO: Record<string, number> = {
-  kitscenes: 1,
-};
 export function displayAspectRatio(dataset: string): number {
-  return DATASET_ASPECT_RATIO[dataset] ?? 16 / 9;
+  return isKITScenesDataset(dataset) ? 1 : 16 / 9;
 }
 
 // gridDimensions returns the number of rows/cols spanned by a dataset's rig,
