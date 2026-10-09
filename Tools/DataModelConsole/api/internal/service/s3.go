@@ -260,7 +260,8 @@ func (s *S3Service) ListDatasets(ctx context.Context) []model.Dataset {
 	out := make([]model.Dataset, 0, len(knownDatasets))
 	for _, name := range knownDatasets {
 		version := s.resolveVersion(ctx, name)
-		if version == fallbackVersion {
+		if version == fallbackVersion &&
+			!s.versionHasShards(ctx, name, version) {
 			continue
 		}
 		out = append(out, model.Dataset{
