@@ -219,6 +219,7 @@ export interface RigProjectionDocument {
   dataset: string;
   geometry_type: "pinhole" | "rectified_pinhole" | "ftheta" | "pseudo";
   image_size?: number | [number, number];
+  camera_image_sizes?: Array<number | [number, number]>;
   projection: Record<string, unknown> | null;
 }
 
