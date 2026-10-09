@@ -103,6 +103,37 @@ test("pinhole rig projects ego points into normalized camera pixels", () => {
   expect(result.cam_0[0][1].v).toBeCloseTo(100 / 256, 12);
 });
 
+test("pinhole rig normalizes each camera with its encoded size", () => {
+  const matrix = [
+    [0, 0, 0, 256],
+    [0, 0, 0, 256],
+    [0, 0, 0, 1],
+  ];
+  const rig: RigProjectionDocument = {
+    schema_version: "v1",
+    dataset: "kitscenes",
+    geometry_type: "pinhole",
+    image_size: 1024,
+    camera_image_sizes: [1024, 512],
+    projection: {
+      type: "pinhole",
+      matrix: [matrix, matrix],
+    },
+  };
+  const trajectory = [
+    { x: 1, y: 0, heading: 0 },
+    { x: 2, y: 0, heading: 0 },
+  ];
+
+  const center = projectTrajectoryToCameras(rig, trajectory);
+  expect(center.cam_0[0][0]).toEqual({ u: 0.25, v: 0.25 });
+  expect(center.cam_1[0][0]).toEqual({ u: 0.5, v: 0.5 });
+
+  const ribbon = projectTrajectoryRibbonToCameras(rig, trajectory);
+  expect(ribbon.cam_0[0].left[0]).toEqual({ u: 0.25, v: 0.25 });
+  expect(ribbon.cam_1[0].left[0]).toEqual({ u: 0.5, v: 0.5 });
+});
+
 test("production KITScenes calibration projects ribbons onto the ground", () => {
   const rig: RigProjectionDocument = {
     schema_version: "v1",
