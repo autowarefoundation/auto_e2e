@@ -302,7 +302,7 @@ export function projectTrajectoryRibbonToCameras(
         boundary.left,
         groundZ,
         size,
-        false,
+        true,
       );
       const right = projectPoint(
         type,
@@ -312,7 +312,7 @@ export function projectTrajectoryRibbonToCameras(
         boundary.right,
         groundZ,
         size,
-        false,
+        true,
       );
       if (!left || !right) {
         if (current.left.length >= 2) ribbons.push(current);
