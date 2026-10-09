@@ -566,6 +566,23 @@ test("trajectory overlays and geographic views honor production contracts", asyn
         body: overlayBody(),
       });
     }
+    if (path.endsWith("/semantic-occupancy-models")) {
+      return json({
+        dataset: "kitscenes",
+        version: "v2.1",
+        shard: "train-000000.tar",
+        models: [
+          {
+            model_artifact_id: MODEL_ID,
+            display_name: "ConvNeXt-T occupancy",
+            model_family: "reactive",
+            artifact_kind: "native-semantic-occupancy",
+            artifact_schema: "v1",
+            sample_count: 3,
+          },
+        ],
+      });
+    }
     if (path.endsWith(`/semantic-occupancy/${MODEL_ID}`)) {
       return route.fulfill({
         status: 200,
