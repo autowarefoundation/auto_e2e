@@ -119,6 +119,7 @@ function GeoPageInner() {
     if (catalogLoading || catalogError || datasets.length === 0) return "";
     return (
       datasets.find((item) => item.name === urlDataset)?.name ??
+      datasets.find((item) => item.name === "kitscenes-val")?.name ??
       datasets.find((item) => item.name === "kitscenes")?.name ??
       datasets[0].name
     );
