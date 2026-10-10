@@ -98,3 +98,18 @@ The install check needs `make`, which you can get from a [package manager](https
 
 **3. Go further.** Read the [documentation and academic paper](https://autowarefoundation.github.io/auto_e2e/), explore the [Model](./Model/) folder, or follow the [Trial Guide](./TRIAL.md) to run inference on AWS EC2. Inference reaches up to **~76 FPS** (SwinV2-Tiny, feature-concat fusion, RTX 5080, batch 1); [BENCHMARKS.md](./Model/speed_benchmark/BENCHMARKS.md) has every GPU, backbone and batch size.
 
+<img src="./Media/readme/section-community.svg" alt="Join the community" width="100%">
+
+AutoE2E is developed in the Autoware Robotaxi working group, and new contributors are welcome. The [onboarding guide](./ONBOARDING.md) explains how to join the weekly meetings, and the community benchmark against other end-to-end models runs in [issue #210](https://github.com/autowarefoundation/auto_e2e/issues/210). If AutoE2E is useful to you, a ⭐ on GitHub helps the project grow.
+
+<p align="center">
+  <a href="https://discord.com/invite/Q94UsPvReQ"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://huggingface.co/AutowareFoundation/auto_e2e"><img src="https://img.shields.io/badge/Hugging_Face-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" alt="Hugging Face"></a>
+  <a href="https://www.linkedin.com/company/the-autoware-foundation"><img src="https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn"></a>
+  <a href="https://www.youtube.com/@autowarefoundation"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
+  <a href="https://autoware.org/"><img src="https://img.shields.io/badge/autoware.org-000000?style=for-the-badge&logo=About.me&logoColor=white" alt="Autoware website"></a>
+</p>
+
+<p align="center">
+  <img src="./Media/readme/footer.svg" alt="Built in the open by the Autoware Foundation" width="100%">
+</p>
