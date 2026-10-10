@@ -13,26 +13,17 @@
   </a>
 </p>
 
-<div align="center">
+<p align="center">
+  <b>An open-source, camera-first End-to-End driving model for highways, arterial roads and city streets.</b>
+</p>
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Discord](https://img.shields.io/discord/953808765935816715?label=Autoware%20Discord)](https://discord.com/invite/Q94UsPvReQ)
-![GitHub commit activity](https://img.shields.io/github/commit-activity/m/autowarefoundation/auto_e2e)
-![GitHub Repo stars](https://img.shields.io/github/stars/autowarefoundation/auto_e2e)
-
-![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/the-autoware-foundation)
-[![YouTube](https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/@autowarefoundation)
-[![Website](https://img.shields.io/badge/website-000000?style=for-the-badge&logo=About.me&logoColor=white)](https://autoware.org/)
-[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-AutoE2E-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co/AutowareFoundation/auto_e2e)
-[![Hugging Face downloads](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FAutowareFoundation%2Fauto_e2e&query=%24.downloads&label=downloads%2Fmonth&logo=huggingface&color=FFD21E&style=for-the-badge)](https://huggingface.co/AutowareFoundation/auto_e2e)
-</div>
-
-<div align="center">
-
-⭐ Star us on GitHub — your support motivates us a lot!
-
-</div>
+<p align="center">
+  <a href="https://huggingface.co/AutowareFoundation/auto_e2e"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FAutowareFoundation%2Fauto_e2e&query=%24.downloads&label=HF%20downloads%2Fmonth&logo=huggingface&color=FFD21E&labelColor=1b1400&style=for-the-badge" alt="Hugging Face downloads"></a>
+  <a href="https://github.com/autowarefoundation/auto_e2e/stargazers"><img src="https://img.shields.io/github/stars/autowarefoundation/auto_e2e?style=for-the-badge&logo=github&color=a24bf5&labelColor=140f2a" alt="GitHub stars"></a>
+  <a href="https://discord.com/invite/Q94UsPvReQ"><img src="https://img.shields.io/discord/953808765935816715?style=for-the-badge&logo=discord&logoColor=white&label=Discord&color=5865F2&labelColor=140f2a" alt="Autoware Discord"></a>
+  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-5ee0d6?style=for-the-badge&labelColor=0a2027" alt="Apache 2.0 license"></a>
+  <img src="https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white" alt="PyTorch">
+</p>
 
 ## Pretrained checkpoints on Hugging Face
 
