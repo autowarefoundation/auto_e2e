@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800" role="img" aria-labelledby="title desc">
+  <title id="title">AutoE2E architecture</title>
+  <desc id="desc">Three cooperating models. The 10 Hz Reactive model, shipped in v1.0, encodes six surround cameras with ResNet-50 and BEVFormer V2 into a bird's-eye-view grid, fuses an optional map raster through deformable cross-attention, and feeds a GRU planner together with 6.4 seconds of ego-motion history to predict a 6.4 second trajectory. The 1 Hz World Action model and Reasoning model are in development.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d0b1f"/>
+      <stop offset="1" stop-color="#071a22"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a24bf5"/>
+      <stop offset="1" stop-color="#5ee0d6"/>
+    </linearGradient>
+    <linearGradient id="planner" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1d1440"/>
+      <stop offset="1" stop-color="#0f3a3d"/>
+    </linearGradient>
+    <linearGradient id="out" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f3b2c"/>
+      <stop offset="1" stop-color="#14532d"/>
+    </linearGradient>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0H0V24" fill="none" stroke="#ffffff" stroke-opacity="0.035"/>
+    </pattern>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#7dd3c8"/>
+    </marker>
+    <marker id="ahd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#6b7591"/>
+    </marker>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+      .h { fill: #ffffff; font-size: 15px; font-weight: 700; }
+      .s { fill: #9aa7bf; font-size: 12px; }
+      .lane { font-size: 13px; font-weight: 800; letter-spacing: 2.5px; }
+      .box { fill: #111a2c; stroke: #2b3955; stroke-width: 1.4; }
+      .dev .box { fill: #12131f; stroke: #3a3550; stroke-dasharray: 5 4; }
+      .dev .h { fill: #c9c3e0; }
+      .wire { fill: none; stroke: #3d5a66; stroke-width: 2; }
+      .wired { fill: none; stroke: #4a4f66; stroke-width: 1.6; stroke-dasharray: 5 5; }
+      .flow { fill: none; stroke: #5ee0d6; stroke-width: 2.6; stroke-linecap: round; stroke-dasharray: 3 22; animation: flow 1.6s linear infinite; }
+      .flowd { fill: none; stroke: #a78bfa; stroke-width: 2.2; stroke-linecap: round; stroke-dasharray: 2 26; opacity: .7; animation: flow 2.6s linear infinite; }
+      .beat { animation: beat 2.4s ease-in-out infinite; }
+      .ring { fill: none; stroke: url(#brand); stroke-width: 2.4; animation: ring 2.4s ease-in-out infinite; }
+      @keyframes flow { to { stroke-dashoffset: -50; } }
+      @keyframes beat { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+      @keyframes ring { 0%, 100% { stroke-opacity: .5; } 50% { stroke-opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+    </style>
+  </defs>
+
+  <rect width="1200" height="800" rx="26" fill="url(#bg)"/>
+  <rect width="1200" height="800" rx="26" fill="url(#grid)"/>
+  <rect x="1" y="1" width="1198" height="798" rx="25" fill="none" stroke="url(#brand)" stroke-opacity="0.45" stroke-width="2"/>
+
+  <text x="40" y="52" fill="#ffffff" font-size="26" font-weight="800">AutoE2E architecture</text>
+  <text x="40" y="76" class="s" font-size="14">Three cooperating models. The v1.0 checkpoints ship the Reactive model, the part that drives.</text>
+  <g transform="translate(870 44)">
+    <line x1="0" y1="0" x2="34" y2="0" stroke="#5ee0d6" stroke-width="2.6"/>
+    <text x="42" y="4" class="s">in v1.0</text>
+    <line x1="120" y1="0" x2="154" y2="0" stroke="#6b7591" stroke-width="1.8" stroke-dasharray="5 5"/>
+    <text x="162" y="4" class="s">in development</text>
+  </g>
+
+  <!-- World Action Model -->
+  <rect x="24" y="96" width="1152" height="134" rx="18" fill="#a24bf5" fill-opacity="0.07" stroke="#a24bf5" stroke-opacity="0.35" stroke-dasharray="6 6"/>
+  <text x="44" y="124" class="lane" fill="#c4a5ff">WORLD ACTION MODEL · 1 Hz</text>
+  <g transform="translate(318 110)"><rect width="118" height="20" rx="10" fill="#a24bf5" fill-opacity="0.2"/><text x="59" y="14" text-anchor="middle" fill="#d8c4ff" font-size="11" font-weight="700">IN DEVELOPMENT</text></g>
+  <g class="dev">
+    <rect class="box" x="40" y="146" width="160" height="60" rx="12"/><text x="120" y="172" text-anchor="middle" class="h">Camera history</text><text x="120" y="191" text-anchor="middle" class="s">multi-view frames</text>
+    <rect class="box" x="228" y="146" width="150" height="60" rx="12"/><text x="303" y="181" text-anchor="middle" class="h">Vision backbone</text>
+    <rect class="box" x="406" y="146" width="150" height="60" rx="12"/><text x="481" y="181" text-anchor="middle" class="h">Feature embedding</text>
+    <rect class="box" x="584" y="146" width="180" height="60" rx="12" style="fill:#1e1640"/><text x="674" y="172" text-anchor="middle" class="h">Encoded visual</text><text x="674" y="191" text-anchor="middle" class="h">history</text>
+    <rect class="box" x="792" y="146" width="150" height="60" rx="12"/><text x="867" y="181" text-anchor="middle" class="h">Feature decoding</text>
+    <rect class="box" x="970" y="146" width="190" height="60" rx="12" style="fill:#1e1640"/><text x="1065" y="172" text-anchor="middle" class="h">Future features</text><text x="1065" y="191" text-anchor="middle" class="s">JEPA-style reconstruction</text>
+  </g>
+  <path class="wired" d="M200 176H226M378 176H404M556 176H582M764 176H790M942 176H968" marker-end="url(#ahd)"/>
+  <path class="flowd" d="M200 176H968"/>
+
+  <!-- Reasoning Model -->
+  <rect x="24" y="242" width="1152" height="104" rx="18" fill="#f5b041" fill-opacity="0.06" stroke="#f5b041" stroke-opacity="0.32" stroke-dasharray="6 6"/>
+  <text x="44" y="270" class="lane" fill="#f7c873">REASONING MODEL · 1 Hz</text>
+  <g transform="translate(284 256)"><rect width="118" height="20" rx="10" fill="#f5b041" fill-opacity="0.18"/><text x="59" y="14" text-anchor="middle" fill="#f9d79a" font-size="11" font-weight="700">IN DEVELOPMENT</text></g>
+  <g class="dev">
+    <rect class="box" x="792" y="266" width="150" height="60" rx="12"/><text x="867" y="292" text-anchor="middle" class="h">Edge-case</text><text x="867" y="311" text-anchor="middle" class="h">detection</text>
+    <rect class="box" x="970" y="266" width="190" height="60" rx="12" style="fill:#2a1f10"/><text x="1065" y="292" text-anchor="middle" class="h">Predicted scenario</text><text x="1065" y="311" text-anchor="middle" class="s">classification</text>
+  </g>
+  <path class="wired" d="M674 206V296H790M942 296H968" marker-end="url(#ahd)"/>
+  <path class="flowd" d="M674 206V296H790"/>
+
+  <!-- Reactive Model -->
+  <rect x="24" y="358" width="1152" height="418" rx="18" fill="#2dd4bf" fill-opacity="0.06" stroke="#2dd4bf" stroke-opacity="0.55" stroke-width="1.6"/>
+  <text x="44" y="388" class="lane" fill="#7ff0e3">REACTIVE MODEL · 10 Hz</text>
+  <g transform="translate(282 372)" class="beat"><rect width="112" height="22" rx="11" fill="#2dd4bf" fill-opacity="0.22"/><text x="56" y="15" text-anchor="middle" fill="#b8fff6" font-size="11" font-weight="800">SHIPS IN v1.0</text></g>
+
+  <!-- wires (static) -->
+  <path class="wire" d="M250 450H288M498 450H536M726 450H968" marker-end="url(#ahd)"/>
+  <path class="wire" d="M250 570H288M498 570H536M726 570H778M942 570H968" marker-end="url(#ah)"/>
+  <path class="wire" d="M631 486V532" marker-end="url(#ah)"/>
+  <path class="wire" d="M250 690H290V628H860V608" marker-end="url(#ah)"/>
+  <path class="wired" d="M744 206V520H818V532" marker-end="url(#ahd)"/>
+  <path class="wired" d="M900 326V532" marker-end="url(#ahd)"/>
+
+  <!-- wires (animated) -->
+  <path class="flow" d="M250 450H536"/>
+  <path class="flow" d="M631 486V532"/>
+  <path class="flow" d="M250 570H968"/>
+  <path class="flow" d="M250 690H290V628H860V608"/>
+  <path class="flow" d="M726 450H968" style="stroke:#94a3b8;opacity:.45"/>
+
+  <!-- row A: cameras -->
+  <rect class="box" x="40" y="410" width="210" height="80" rx="12"/>
+  <g transform="translate(54 422)">
+    <rect width="12" height="9" rx="2" fill="#5ee0d6"/><rect x="15" width="12" height="9" rx="2" fill="#5ee0d6"/><rect x="30" width="12" height="9" rx="2" fill="#5ee0d6"/>
+    <rect y="12" width="12" height="9" rx="2" fill="#5ee0d6" fill-opacity="0.55"/><rect x="15" y="12" width="12" height="9" rx="2" fill="#5ee0d6" fill-opacity="0.55"/><rect x="30" y="12" width="12" height="9" rx="2" fill="#5ee0d6" fill-opacity="0.55"/>
+  </g>
+  <text x="106" y="438" class="h">Surround cameras</text>
+  <text x="54" y="462" class="s">6 views · 512 × 512, front +1024²</text>
+  <text x="54" y="479" class="s">8 frames over 3.5 s</text>
+
+  <rect class="box" x="288" y="410" width="210" height="80" rx="12"/>
+  <text x="393" y="442" text-anchor="middle" class="h">ResNet-50 + BEVFormer V2</text>
+  <text x="393" y="463" text-anchor="middle" class="s">temporal fusion over 8 frames</text>
+  <text x="393" y="479" text-anchor="middle" class="s">frozen from official R50 T8</text>
+
+  <rect class="box" x="536" y="410" width="190" height="80" rx="12"/>
+  <g>
+    <rect x="548" y="420" width="44" height="60" rx="4" fill="#5ee0d6" fill-opacity="0.07" stroke="#5ee0d6" stroke-opacity="0.5"/>
+    <path d="M548 435H592M548 450H592M548 465H592M559 420V480M570 420V480M581 420V480" stroke="#5ee0d6" stroke-opacity="0.25"/>
+    <path d="M570 470l-6 -8h12z" fill="#ffffff"/>
+  </g>
+  <text x="604" y="442" class="h">Camera BEV</text>
+  <text x="604" y="463" class="s">300 × 200 grid</text>
+  <text x="604" y="479" class="s">180 m × 120 m</text>
+
+  <g class="dev">
+    <rect class="box" x="970" y="410" width="190" height="80" rx="12"/>
+    <text x="1065" y="442" text-anchor="middle" class="h">Auxiliary heads</text>
+    <text x="1065" y="463" text-anchor="middle" class="s">BEV segmentation, route</text>
+    <text x="1065" y="479" text-anchor="middle" class="s">training signals only</text>
+  </g>
+
+  <!-- row B: map -->
+  <rect class="box" x="40" y="530" width="210" height="80" rx="12"/>
+  <g transform="translate(54 542)">
+    <rect width="42" height="22" rx="3" fill="#a24bf5" fill-opacity="0.15" stroke="#a24bf5" stroke-opacity="0.6"/>
+    <path d="M3 18C12 10 20 16 28 6S38 4 40 3" stroke="#c4a5ff" stroke-width="2" fill="none"/>
+  </g>
+  <text x="106" y="558" class="h">Map raster</text>
+  <text x="54" y="582" class="s">14 semantic + 2 route channels</text>
+  <text x="54" y="599" class="s">450 × 300 at 0.4 m · optional</text>
+
+  <rect class="box" x="288" y="530" width="210" height="80" rx="12"/>
+  <text x="393" y="566" text-anchor="middle" class="h">Map encoder</text>
+  <text x="393" y="586" text-anchor="middle" class="s">semantic map features</text>
+
+  <rect class="box" x="536" y="530" width="190" height="80" rx="12"/>
+  <text x="631" y="562" text-anchor="middle" class="h">Map / BEV fusion</text>
+  <text x="631" y="582" text-anchor="middle" class="s">deformable</text>
+  <text x="631" y="597" text-anchor="middle" class="s">cross-attention</text>
+
+  <!-- planner -->
+  <rect x="780" y="534" width="162" height="72" rx="14" fill="url(#planner)" filter="url(#glow)"/>
+  <rect class="ring" x="780" y="534" width="162" height="72" rx="14"/>
+  <text x="861" y="563" text-anchor="middle" class="h">GRU planner</text>
+  <text x="861" y="582" text-anchor="middle" class="s" style="fill:#c7d2e4">deformable BEV lookup</text>
+  <text x="861" y="597" text-anchor="middle" class="s" style="fill:#c7d2e4">deterministic</text>
+
+  <!-- output -->
+  <rect x="970" y="530" width="190" height="80" rx="12" fill="url(#out)" stroke="#34d399" stroke-width="1.6"/>
+  <text x="1065" y="556" text-anchor="middle" class="h">Trajectory</text>
+  <text x="1065" y="577" text-anchor="middle" class="s" style="fill:#bbf7d0">64 × (accel, curvature)</text>
+  <text x="1065" y="594" text-anchor="middle" class="s" style="fill:#bbf7d0">6.4 s at 10 Hz → ego XY</text>
+
+  <!-- row C: ego-motion -->
+  <rect class="box" x="40" y="650" width="210" height="80" rx="12"/>
+  <path d="M56 672h26l6 -8h14l8 8h4v10H56z" fill="#5ee0d6" fill-opacity="0.75"/>
+  <circle cx="66" cy="683" r="4" fill="#0d0b1f" stroke="#5ee0d6" stroke-width="2"/><circle cx="100" cy="683" r="4" fill="#0d0b1f" stroke="#5ee0d6" stroke-width="2"/>
+  <text x="122" y="680" class="h">Ego-motion</text>
+  <text x="54" y="704" class="s">6.4 s at 10 Hz: speed, accel,</text>
+  <text x="54" y="720" class="s">yaw rate, curvature</text>
+
+  <!-- trajectory illustration -->
+  <g transform="translate(330 646)">
+    <rect width="560" height="94" rx="14" fill="#0b1322" stroke="#22304a"/>
+    <path d="M20 72H540" stroke="#2b3955" stroke-dasharray="10 10"/>
+    <path d="M20 24H540" stroke="#2b3955" stroke-dasharray="10 10"/>
+    <path d="M40 48C160 48 240 50 330 44S470 24 530 18" fill="none" stroke="#a24bf5" stroke-width="3" stroke-opacity="0.8"/>
+    <path d="M40 48C160 48 240 52 330 46S470 28 530 24" fill="none" stroke="#34d399" stroke-width="3" stroke-dasharray="1 10" stroke-linecap="round"/>
+    <g>
+      <rect x="-14" y="-10" width="28" height="20" rx="5" fill="#5ee0d6"/><rect x="6" y="-6" width="6" height="12" rx="2" fill="#0d0b1f" fill-opacity="0.5"/>
+      <animateMotion dur="4s" repeatCount="indefinite" rotate="auto" path="M40 48C160 48 240 52 330 46S470 28 530 24"/>
+    </g>
+    <text x="540" y="88" text-anchor="end" class="s" style="font-size:11px"><tspan fill="#c4a5ff">━ ground truth</tspan>   <tspan fill="#86efac">┅ prediction</tspan></text>
+  </g>
+
+  <text x="1160" y="764" text-anchor="end" class="s" style="font-size:11px">79.9 M parameters · v1.0 checkpoint configuration</text>
+</svg>
