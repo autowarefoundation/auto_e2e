@@ -51,18 +51,6 @@ AutoE2E is three cooperating models. The **Reactive model** runs at 10 Hz and dr
   <img src="./Media/auto_e2e_architecture.jpg" alt="Original AutoE2E design diagram" width="100%">
 </details>
 
-## Pretrained checkpoints on Hugging Face
-
-The [AutoE2E v1.0 release on Hugging Face](https://huggingface.co/AutowareFoundation/auto_e2e)
-provides two trajectory-planning checkpoints with their evaluation reports:
-
-- **nuPlan Epoch 5**, the baseline model trained on nuPlan;
-- **KITScenes Epoch 5**, the same model fine-tuned on KITScenes-Multimodal.
-
-The model card lists ADE/FDE on the KITScenes validation and official test splits and
-includes a loading example. The KITScenes validation shards used by the community
-benchmark are published in the same repository.
-
 <img src="./Media/readme/section-see-it-drive.svg" alt="See it drive" width="100%">
 
 <p align="center">
@@ -77,60 +65,36 @@ benchmark are published in the same repository.
 
 The read-only [DataModelConsole dashboard](https://d2itskdqq39tx1.cloudfront.net/) replays synchronized camera scenes with ground-truth and predicted trajectories in camera and bird's-eye views, next to dataset versions, MLflow models and Flyte executions.
 
-## Getting started
+<img src="./Media/readme/section-get-started.svg" alt="Get started" width="100%">
 
-Requires **Python 3.12** (the pinned PyTorch build has no wheels for 3.13+).
-
-### Using `make` tool ###
-<details open>
-  <summary>Toggle view</summary>
-
-1. **Clone and install dependencies**
-
-   ```bash
-   git clone https://github.com/autowarefoundation/auto_e2e.git
-   cd auto_e2e
-   make setup                      # CPU torch wheels
-   make setup TORCH_CHANNEL=cu118  # or a CUDA build (cu121, ... work too)
-   ```
-
-2. **Verify the install** (optional)
-
-   ```bash
-   make test
-   ```
-</details>
-
-### Using plain pip ###
-<details open>
-  <summary>Toggle view</summary>
-
-**Clone and install dependencies**
+**1. Install** with Python 3.12 (the pinned PyTorch build has no wheels for 3.13+).
 
 ```bash
 git clone https://github.com/autowarefoundation/auto_e2e.git
 cd auto_e2e
-pip install -r requirements.txt                      # CPU torch wheels
-pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118  # or a CUDA build (cu121, ... work too)
+make setup                      # CPU torch wheels
+make setup TORCH_CHANNEL=cu118  # or a CUDA build (cu121, ... work too)
+make test                       # optional: verify the install
 ```
 
-Without a `make` tool, you unfortunately cannot verify the install 
-using a `test` from the Makefile. It is highly recommended to install 
-the tool through a [package manager](https://chocolatey.org/).
+<details>
+  <summary>No <code>make</code>? Use plain pip</summary>
+
+```bash
+pip install -r requirements.txt                      # CPU torch wheels
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118  # or a CUDA build
+```
+
+The install check needs `make`, which you can get from a [package manager](https://chocolatey.org/).
 
 </details>
 
-### Documentation
+**2. Pick a checkpoint** from the [Hugging Face release](https://huggingface.co/AutowareFoundation/auto_e2e). The model card has the loading example, the evaluation reports and the KITScenes validation shards.
 
-Review our academic paper, access our knowledge base and read through our work on safety verification in our documentation pages, alongside more information about the AutoE2E model at [https://autowarefoundation.github.io/auto_e2e/](https://autowarefoundation.github.io/auto_e2e/)
+| Checkpoint | Trained on | Use it for |
+|---|---|---|
+| [`nuplan-epoch-5`](https://huggingface.co/AutowareFoundation/auto_e2e/tree/main/models/nuplan-epoch-5) | nuPlan v1.1 | Zero-shot driving in new cities and fine-tuning on your data |
+| [`kitscenes-epoch-5`](https://huggingface.co/AutowareFoundation/auto_e2e/tree/main/models/kitscenes-epoch-5) | nuPlan, then KITScenes-Multimodal | Karlsruhe roads and the KITScenes camera rig |
 
-### Next steps
-- Explore the [Model](./Model/) folder for the model components, training and inference.
-- Follow the [Trial Guide](./TRIAL.md) to run the inference test on AWS EC2.
+**3. Go further.** Read the [documentation and academic paper](https://autowarefoundation.github.io/auto_e2e/), explore the [Model](./Model/) folder, or follow the [Trial Guide](./TRIAL.md) to run inference on AWS EC2. Inference reaches up to **~76 FPS** (SwinV2-Tiny, feature-concat fusion, RTX 5080, batch 1); [BENCHMARKS.md](./Model/speed_benchmark/BENCHMARKS.md) has every GPU, backbone and batch size.
 
-## Performance
-
-Up to **~76 FPS** (SwinV2-Tiny, feature-concat fusion, RTX 5080, batch 1). Full per-GPU
-inference benchmarks covering latency, jitter and VRAM across backbones, fusion modes and
-batch sizes live in [BENCHMARKS.md](./Model/speed_benchmark/BENCHMARKS.md). Run the
-[benchmarking script](./Model/speed_benchmark) to add results for your own GPU.
