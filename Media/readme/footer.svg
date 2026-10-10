@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="120" viewBox="0 0 1000 120" role="img" aria-label="AutoE2E, built in the open by the Autoware Foundation">
+  <title>AutoE2E, built in the open by the Autoware Foundation</title>
+  <defs>
+    <linearGradient id="road" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a24bf5" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#7c6cf0" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#5ee0d6" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5ee0d6" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#5ee0d6" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a24bf5"/>
+      <stop offset="1" stop-color="#5ee0d6"/>
+    </linearGradient>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+      .lane { stroke-dasharray: 26 22; animation: lane .9s linear infinite; }
+      .car { animation: drive 9s ease-in-out infinite; }
+      @keyframes lane { to { stroke-dashoffset: 48; } }
+      @keyframes drive { 0% { transform: translateX(-120px); } 100% { transform: translateX(1080px); } }
+      @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+    </style>
+  </defs>
+  <rect x="0" y="44" width="1000" height="40" fill="url(#road)"/>
+  <path class="lane" d="M0 64H1000" stroke="#c7d2e4" stroke-opacity="0.45" stroke-width="2.5"/>
+  <g class="car">
+    <path d="M40 58l140 -10v32l-140 -10z" fill="url(#beam)"/>
+    <rect x="-14" y="52" width="56" height="24" rx="8" fill="url(#brand)"/>
+    <rect x="6" y="56" width="22" height="16" rx="4" fill="#0d0b1f" fill-opacity="0.55"/>
+    <circle cx="40" cy="57" r="2.2" fill="#ffffff"/><circle cx="40" cy="71" r="2.2" fill="#ffffff"/>
+  </g>
+  <text x="500" y="112" text-anchor="middle" fill="#8b97ad" font-size="13" font-weight="600" letter-spacing="2">BUILT IN THE OPEN BY THE AUTOWARE FOUNDATION</text>
+</svg>

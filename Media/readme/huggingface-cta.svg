@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="140" viewBox="0 0 1000 140" role="img" aria-labelledby="title desc">
+  <title id="title">AutoE2E v1.0 on Hugging Face</title>
+  <desc id="desc">Download the nuPlan and KITScenes checkpoints, evaluation reports and validation shards from Hugging Face.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14102a"/>
+      <stop offset="0.55" stop-color="#101a2e"/>
+      <stop offset="1" stop-color="#0b2430"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a24bf5"/>
+      <stop offset="0.5" stop-color="#ffd21e"/>
+      <stop offset="1" stop-color="#5ee0d6"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffd21e" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffd21e" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="card"><rect x="2" y="2" width="996" height="136" rx="22"/></clipPath>
+    <style>
+      .t { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+      .shine { animation: sweep 4.5s ease-in-out infinite; }
+      .halo { animation: breathe 3s ease-in-out infinite; transform-origin: 92px 70px; }
+      .face { animation: bob 3s ease-in-out infinite; transform-origin: 92px 70px; }
+      .pill { animation: pulse 2.4s ease-in-out infinite; transform-origin: 868px 70px; }
+      .arrow { animation: nudge 1.2s ease-in-out infinite; }
+      .edge { stroke-dasharray: 60 18; animation: march 6s linear infinite; }
+      @keyframes sweep { 0% { transform: translateX(-420px); } 60%, 100% { transform: translateX(1100px); } }
+      @keyframes breathe { 0%, 100% { opacity: .55; transform: scale(.92); } 50% { opacity: 1; transform: scale(1.08); } }
+      @keyframes bob { 0%, 100% { transform: translateY(0) rotate(0deg); } 50% { transform: translateY(-3px) rotate(-4deg); } }
+      @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+      @keyframes nudge { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(5px); } }
+      @keyframes march { to { stroke-dashoffset: -780; } }
+      @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+    </style>
+  </defs>
+
+  <rect x="2" y="2" width="996" height="136" rx="22" fill="url(#bg)"/>
+  <g clip-path="url(#card)">
+    <rect class="shine" x="0" y="0" width="320" height="140" fill="url(#shine)" transform="skewX(-20)"/>
+    <circle cx="960" cy="-10" r="120" fill="#5ee0d6" opacity="0.07"/>
+    <circle cx="640" cy="160" r="90" fill="#a24bf5" opacity="0.08"/>
+  </g>
+  <rect class="edge" x="2" y="2" width="996" height="136" rx="22" fill="none" stroke="url(#edge)" stroke-width="2.5"/>
+
+  <circle class="halo" cx="92" cy="70" r="58" fill="url(#glow)"/>
+  <g class="face">
+    <circle cx="92" cy="70" r="36" fill="#ffd21e"/>
+    <path d="M70 50 q6-8 13-1" stroke="#3a2a00" stroke-width="3.2" fill="none" stroke-linecap="round"/>
+    <path d="M101 49 q7-7 13 1" stroke="#3a2a00" stroke-width="3.2" fill="none" stroke-linecap="round"/>
+    <circle cx="77" cy="62" r="4.2" fill="#3a2a00"/>
+    <circle cx="107" cy="62" r="4.2" fill="#3a2a00"/>
+    <path d="M73 76 q19 18 38 0 q-19 6 -38 0z" fill="#7a1f1f" stroke="#3a2a00" stroke-width="2.4" stroke-linejoin="round"/>
+    <circle cx="66" cy="74" r="5" fill="#ff9d00" opacity="0.6"/>
+    <circle cx="118" cy="74" r="5" fill="#ff9d00" opacity="0.6"/>
+    <ellipse cx="62" cy="96" rx="11" ry="8" fill="#ffb800" stroke="#3a2a00" stroke-width="2" transform="rotate(-25 62 96)"/>
+    <ellipse cx="122" cy="96" rx="11" ry="8" fill="#ffb800" stroke="#3a2a00" stroke-width="2" transform="rotate(25 122 96)"/>
+  </g>
+
+  <text class="t" x="168" y="52" fill="#ffd21e" font-size="13" font-weight="700" letter-spacing="3">NOW ON HUGGING FACE · v1.0</text>
+  <text class="t" x="168" y="86" fill="#ffffff" font-size="30" font-weight="800">AutoE2E pretrained checkpoints</text>
+  <text class="t" x="168" y="112" fill="#a9b6cc" font-size="15">nuPlan Epoch 5 · KITScenes Epoch 5 · evaluation reports · validation shards</text>
+
+  <g class="pill">
+    <rect x="770" y="46" width="196" height="48" rx="24" fill="#ffd21e"/>
+    <text class="t" x="806" y="77" fill="#1b1400" font-size="17" font-weight="800">Get the model</text>
+    <g class="arrow"><path d="M930 62 l10 8 -10 8" stroke="#1b1400" stroke-width="3.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>
+  </g>
+</svg>
