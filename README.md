@@ -63,15 +63,19 @@ The model card lists ADE/FDE on the KITScenes validation and official test split
 includes a loading example. The KITScenes validation shards used by the community
 benchmark are published in the same repository.
 
-## DataModelConsole dashboard
+<img src="./Media/readme/section-see-it-drive.svg" alt="See it drive" width="100%">
 
-The read-only [DataModelConsole production dashboard](https://d2itskdqq39tx1.cloudfront.net/)
-brings AutoE2E datasets, model results and pipeline state into one workspace. Use it to:
+<p align="center">
+  <img src="https://huggingface.co/AutowareFoundation/auto_e2e/resolve/main/assets/prediction_kitscenes_epoch5_val_roundabout.jpg" alt="AutoE2E entering a roundabout in Karlsruhe" width="100%">
+  <br>
+  <sub>KITScenes Epoch 5 entering a roundabout in Karlsruhe. <b>Purple</b> is the logged path, <b>green</b> is the AutoE2E prediction. Camera images: <a href="https://kitscenes.com/">KITScenes-Multimodal</a>, CC BY-NC 4.0.</sub>
+</p>
 
-- inspect published dataset versions, shards, samples and geographic coverage;
-- play synchronized seven-camera scenes with ego-state and map context;
-- compare ground-truth and model-predicted trajectories in camera and bird's-eye views;
-- explore reasoning labels, MLflow models and Flyte executions.
+<p align="center">
+  <a href="https://d2itskdqq39tx1.cloudfront.net/"><img src="https://img.shields.io/badge/Play_every_frame-DataModelConsole_dashboard-0ea5e9?style=for-the-badge&labelColor=0a2027" alt="Open the DataModelConsole dashboard"></a>
+</p>
+
+The read-only [DataModelConsole dashboard](https://d2itskdqq39tx1.cloudfront.net/) replays synchronized camera scenes with ground-truth and predicted trajectories in camera and bird's-eye views, next to dataset versions, MLflow models and Flyte executions.
 
 ## Getting started
 
