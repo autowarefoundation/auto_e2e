@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="330" viewBox="0 0 760 330" font-family="Helvetica, Arial, sans-serif" font-size="10.5">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#333"/></marker>
+<marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8A8A8A"/></marker>
+<marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#B8443F"/></marker>
+</defs>
+<rect x="0" y="0" width="760" height="330" fill="white"/>
+<text x="14" y="22" font-size="11" font-weight="bold" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">Deterministic GRU control planner (0.835 M params) and unicycle rollout</text>
+<rect x="20" y="40" width="200" height="70" rx="6" fill="#E3EEF9" stroke="#3F6FAE" stroke-width="1.2" fill-opacity="1.0" />
+<text x="120.0" y="54.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Context c_0 (256-d)</text>
+<text x="120.0" y="66.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">P_ego(h_ego): Linear 256 -&gt; 256</text>
+<text x="120.0" y="78.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">+ P_vis(h_vis): Linear 896 -&gt; 256</text>
+<text x="120.0" y="89.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">h_vis = 0 in evaluated checkpoints</text>
+<rect x="20" y="126" width="200" height="56" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="120.0" y="140.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Values V = value_proj(B_fused)</text>
+<text x="120.0" y="152.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">Linear 256 -&gt; 256 per cell</text>
+<text x="120.0" y="164.0" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">256 x 300 x 200</text>
+<rect x="20" y="198" width="200" height="54" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="120.0" y="212.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">Learned ego query e (256)</text>
+<text x="120.0" y="224.5" font-size="9.0" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">nn.Embedding(1, 256)</text>
+<rect x="260" y="60" width="108" height="150" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="314.0" y="74.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">step t = 1</text>
+<text x="314.0" y="86.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">q = detach(h) + e</text>
+<text x="314.0" y="97.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">ref = sigmoid(W_r q)</text>
+<text x="314.0" y="108.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">off = W_o q (16 x 2)</text>
+<text x="314.0" y="119.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">loc = ref + 0.1 off</text>
+<text x="314.0" y="130.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">a = sum_k w_k V[loc_k]</text>
+<text x="314.0" y="141.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">a = W_out a</text>
+<text x="314.0" y="152.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">h = GRU(a, h)</text>
+<text x="314.0" y="163.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">u = W_u h (2)</text>
+<rect x="382" y="60" width="108" height="150" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="436.0" y="74.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">step t = 2</text>
+<text x="436.0" y="86.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">q = detach(h) + e</text>
+<text x="436.0" y="97.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">ref = sigmoid(W_r q)</text>
+<text x="436.0" y="108.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">off = W_o q (16 x 2)</text>
+<text x="436.0" y="119.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">loc = ref + 0.1 off</text>
+<text x="436.0" y="130.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">a = sum_k w_k V[loc_k]</text>
+<text x="436.0" y="141.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">a = W_out a</text>
+<text x="436.0" y="152.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">h = GRU(a, h)</text>
+<text x="436.0" y="163.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">u = W_u h (2)</text>
+<text x="554" y="150" font-size="16" font-weight="normal" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">...</text>
+<rect x="626" y="60" width="108" height="150" rx="6" fill="#E2F3E4" stroke="#2E8B57" stroke-width="1.2" fill-opacity="1.0" />
+<text x="680.0" y="74.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">step t = 64</text>
+<text x="680.0" y="86.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">q = detach(h) + e</text>
+<text x="680.0" y="97.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">ref = sigmoid(W_r q)</text>
+<text x="680.0" y="108.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">off = W_o q (16 x 2)</text>
+<text x="680.0" y="119.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">loc = ref + 0.1 off</text>
+<text x="680.0" y="130.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">a = sum_k w_k V[loc_k]</text>
+<text x="680.0" y="141.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">a = W_out a</text>
+<text x="680.0" y="152.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">h = GRU(a, h)</text>
+<text x="680.0" y="163.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">u = W_u h (2)</text>
+<path d="M 220 75 L 260 75" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="240.0" y="71.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">h_0 = c_0</text>
+<path d="M 368 140 L 382 140" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="375.0" y="136.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">h</text>
+<path d="M 612 140 L 626 140" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="619.0" y="136.0" font-size="8.5" font-weight="normal" text-anchor="middle" fill="#333" font-family="Helvetica, Arial, sans-serif">h</text>
+<path d="M 220 154 L 240 154" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="232" y="168" font-size="8.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">V shared by all steps (bilinear grid_sample, 16 points, zero padding)</text>
+<path d="M 220 225 L 240 225" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="232" y="240" font-size="8.5" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">e shared by all steps</text>
+<rect x="260" y="232" width="474" height="40" rx="6" fill="#FBE5E3" stroke="#B8443F" stroke-width="1.2" fill-opacity="1.0" />
+<text x="497.0" y="246.5" font-size="10.5" font-weight="bold" text-anchor="middle" fill="#222" font-family="Helvetica, Arial, sans-serif">u_1..u_64 = (a_t, kappa_t) @ 10 Hz -&gt; semi-implicit unicycle rollout (dt = 0.1 s, float32)</text>
+<text x="497.0" y="258.3" font-size="8.8" font-weight="normal" text-anchor="middle" fill="#333" font-family="Menlo, Consolas, monospace">v_t = max(v_{t-1} + a_t dt, 0);  theta_t = sum v_i kappa_i dt;  x_t = sum v_i cos(theta_i) dt;  y_t = sum v_i sin(theta_i) dt</text>
+<path d="M 314 210 L 314 232" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 436 210 L 436 232" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<path d="M 680 210 L 680 232" fill="none" stroke="#333" stroke-width="1.3" marker-end="url(#arrow)"/>
+<text x="20" y="296" font-size="9" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">The recurrent state is detached before the deformable lookup, so BEV-lookup gradients do not flow through the recurrence;</text>
+<text x="20" y="310" font-size="9" font-weight="normal" text-anchor="start" fill="#222" font-family="Helvetica, Arial, sans-serif">the same 16-point lookup is applied at every step. Sampling locations are clamped to the BEV extent.</text>
+</svg>

@@ -1,0 +1,17 @@
+{
+  "name": "autoe2e-route-conditioned-paper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bilingual AutoE2E paper with Vivliostyle two-column layout",
+  "devDependencies": {
+    "@vivliostyle/cli": "11.3.3",
+    "@vivliostyle/vfm": "2.7.2"
+  },
+  "scripts": {
+    "build:ja": "vivliostyle build paper_ja.md -o AutoE2E_Paper_JA.pdf",
+    "build:en": "vivliostyle build paper_en.md -o AutoE2E_Paper_EN.pdf",
+    "build": "npm run build:ja && npm run build:en",
+    "preview:ja": "vivliostyle preview paper_ja.md",
+    "preview:en": "vivliostyle preview paper_en.md"
+  }
+}
