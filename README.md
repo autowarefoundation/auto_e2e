@@ -25,6 +25,18 @@
   <img src="https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white" alt="PyTorch">
 </p>
 
+<br>
+
+<p align="center">
+  <img src="./Media/readme/pillars.svg" alt="Camera-first, no HD maps, fully open" width="100%">
+</p>
+
+AutoE2E plans the vehicle's trajectory directly from surround cameras. Fuse its output with LiDAR and radar safety layers for **driverless robotaxis**, or run it camera-only for **L2++ hands-free ADAS**.
+
+<p align="center">
+  <img src="./Media/readme/stats.svg" alt="79.9 M parameters, 6 cameras, 6.4 s horizon, 10 Hz" width="100%">
+</p>
+
 ## Pretrained checkpoints on Hugging Face
 
 The [AutoE2E v1.0 release on Hugging Face](https://huggingface.co/AutowareFoundation/auto_e2e)
@@ -46,13 +58,6 @@ brings AutoE2E datasets, model results and pipeline state into one workspace. Us
 - play synchronized seven-camera scenes with ego-state and map context;
 - compare ground-truth and model-predicted trajectories in camera and bird's-eye views;
 - explore reasoning labels, MLflow models and Flyte executions.
-
-## Free and fully open-source End-to-End AI model
-**AutoE2E is an open-source End-to-End AI model** which enables autonomous driving across highways, arterial roads and city streets using cameras-only, and without reliance on HD-maps. 
-
-AutoE2E outputs can be fused with Physics-based sensors such as LIDAR/RADAR to power **fully driverless Robotaxi applications**, and the basline camera-only model can be used to enable **L2++ automotive ADAS** applications for point-to-point hands-free navigation.
-
-To learn more about how to participate in this project, please read the [onboarding guide](/ONBOARDING.md)
 
 ## Getting started
 
