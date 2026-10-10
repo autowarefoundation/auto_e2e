@@ -37,6 +37,20 @@ AutoE2E plans the vehicle's trajectory directly from surround cameras. Fuse its 
   <img src="./Media/readme/stats.svg" alt="79.9 M parameters, 6 cameras, 6.4 s horizon, 10 Hz" width="100%">
 </p>
 
+<img src="./Media/readme/section-architecture.svg" alt="Architecture" width="100%">
+
+<p align="center">
+  <img src="./Media/readme/architecture.svg" alt="AutoE2E architecture: World Action, Reasoning and Reactive models" width="100%">
+</p>
+
+AutoE2E is three cooperating models. The **Reactive model** runs at 10 Hz and drives: it lifts six surround cameras into a bird's-eye-view grid, optionally fuses a map raster, and lets a GRU planner turn that scene plus ego-motion history into the next 6.4 s of acceleration and curvature. The 1 Hz **World Action** and **Reasoning** models are in development. The [Model guide](./Model/) has the full inputs, outputs and forward signature.
+
+<details>
+  <summary>Original design diagram</summary>
+  <br>
+  <img src="./Media/auto_e2e_architecture.jpg" alt="Original AutoE2E design diagram" width="100%">
+</details>
+
 ## Pretrained checkpoints on Hugging Face
 
 The [AutoE2E v1.0 release on Hugging Face](https://huggingface.co/AutowareFoundation/auto_e2e)
@@ -109,15 +123,6 @@ Review our academic paper, access our knowledge base and read through our work o
 ### Next steps
 - Explore the [Model](./Model/) folder for the model components, training and inference.
 - Follow the [Trial Guide](./TRIAL.md) to run the inference test on AWS EC2.
-
-## Architecture at a glance
-
-<img src="./Media/auto_e2e_architecture.jpg" width="100%">
-
-AutoE2E takes **7 surround and telephoto cameras plus a rendered map tile**, along with
-egomotion and visual history, and predicts a **6.4s future driving trajectory**
-(acceleration and curvature at 10Hz). See the [Model architecture guide](./Model/) for the
-full inputs, outputs and forward signature.
 
 ## Performance
 
