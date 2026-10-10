@@ -7,6 +7,12 @@
     </picture>
 </p>
 
+<p align="center">
+  <a href="https://huggingface.co/AutowareFoundation/auto_e2e">
+    <img src="./Media/readme/huggingface-cta.svg" alt="AutoE2E v1.0 checkpoints on Hugging Face" width="100%">
+  </a>
+</p>
+
 <div align="center">
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
