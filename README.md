@@ -3,7 +3,7 @@
 <p align="center">
     <picture>
         <source media="(prefers-color-scheme: dark)">
-        <img src="./Media/auto_e2e_logo.jpg" alt="VisionPilot" width="100%">
+        <img src="./Media/auto_e2e_logo.jpg" alt="AutoE2E" width="100%">
     </picture>
 </p>
 
