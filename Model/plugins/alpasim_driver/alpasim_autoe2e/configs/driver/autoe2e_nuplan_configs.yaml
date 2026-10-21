@@ -1,0 +1,114 @@
+# @package _global_
+
+# Runtime configuration for the AutoE2E driver on the nuPlan v1.1 rig, in any
+# NuRec scene of the NVIDIA camera rig.
+# The ego follows the recording for 7 s before AutoE2E takes over, so the 6.4 s
+# egomotion history and the 3.5 s camera history hold real motion.
+# extra_cameras can only override cameras a scene already has, so the six nuPlan
+# cameras (configs/calibration/nuplan.json, veh-35) are rendered as rectified
+# pinhole cameras on six NVIDIA camera IDs, the way AlpaSim's Transfuser plugin
+# renders its nuPlan-style rig. configs/calibration/nuplan_nurec.json maps them
+# back. Regenerate both with tools/profile_to_extra_cameras.py.
+# CAM_F0 renders at native size for the 1024 px front tile, the others at half.
+
+runtime:
+  simulation_config:
+    force_gt_duration_us: 7_000_000
+    skip_driver_during_force_gt: true
+    control_timestep_us: 100_000
+    ego_mask_rig_config_id: null
+    cameras:
+    - {logical_id: camera_front_wide_120fov, height: 1080, width: 1920, frame_interval_us: 100000, shutter_duration_us: 30000}
+    - {logical_id: camera_cross_left_120fov, height: 540, width: 960, frame_interval_us: 100000, shutter_duration_us: 30000}
+    - {logical_id: camera_cross_right_120fov, height: 540, width: 960, frame_interval_us: 100000, shutter_duration_us: 30000}
+    - {logical_id: camera_rear_left_70fov, height: 540, width: 960, frame_interval_us: 100000, shutter_duration_us: 30000}
+    - {logical_id: camera_front_tele_30fov, height: 540, width: 960, frame_interval_us: 100000, shutter_duration_us: 30000}
+    - {logical_id: camera_rear_right_70fov, height: 540, width: 960, frame_interval_us: 100000, shutter_duration_us: 30000}
+  extra_cameras:
+  - logical_id: camera_front_wide_120fov
+    rig_to_camera:
+      translation_m: [1.6701, -0.025875, 1.522623]
+      rotation_xyzw: [0.509222, -0.503331, 0.495086, -0.49218]
+    intrinsics:
+      model: opencv_pinhole
+      opencv_pinhole:
+        focal_length: [1315.8848, 1476.0757]
+        principal_point: [961.7419, 560.5188]
+        radial: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        tangential: [0.0, 0.0]
+        thin_prism: [0.0, 0.0, 0.0, 0.0]
+    resolution_hw: [1080, 1920]
+    shutter_type: ROLLING_TOP_TO_BOTTOM
+  - logical_id: camera_cross_left_120fov
+    rig_to_camera:
+      translation_m: [1.646354, 0.143369, 1.521469]
+      rotation_xyzw: [0.679354, -0.207915, 0.215233, -0.670018]
+    intrinsics:
+      model: opencv_pinhole
+      opencv_pinhole:
+        focal_length: [1315.8848, 1476.0757]
+        principal_point: [961.7419, 560.5188]
+        radial: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        tangential: [0.0, 0.0]
+        thin_prism: [0.0, 0.0, 0.0, 0.0]
+    resolution_hw: [1080, 1920]
+    shutter_type: ROLLING_TOP_TO_BOTTOM
+  - logical_id: camera_cross_right_120fov
+    rig_to_camera:
+      translation_m: [1.626168, -0.161517, 1.526269]
+      rotation_xyzw: [0.205424, -0.674057, 0.676355, -0.214458]
+    intrinsics:
+      model: opencv_pinhole
+      opencv_pinhole:
+        focal_length: [1315.8848, 1476.0757]
+        principal_point: [961.7419, 560.5188]
+        radial: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        tangential: [0.0, 0.0]
+        thin_prism: [0.0, 0.0, 0.0, 0.0]
+    resolution_hw: [1080, 1920]
+    shutter_type: ROLLING_TOP_TO_BOTTOM
+  - logical_id: camera_rear_left_70fov
+    rig_to_camera:
+      translation_m: [-0.4851, 0.543391, 1.386885]
+      rotation_xyzw: [0.644161, 0.307646, -0.300594, -0.632498]
+    intrinsics:
+      model: opencv_pinhole
+      opencv_pinhole:
+        focal_length: [1315.8848, 1476.0757]
+        principal_point: [961.7419, 560.5188]
+        radial: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        tangential: [0.0, 0.0]
+        thin_prism: [0.0, 0.0, 0.0, 0.0]
+    resolution_hw: [1080, 1920]
+    shutter_type: ROLLING_TOP_TO_BOTTOM
+  - logical_id: camera_front_tele_30fov
+    rig_to_camera:
+      translation_m: [-0.486641, -0.000595, 1.486321]
+      rotation_xyzw: [0.503851, 0.497823, -0.499723, -0.498582]
+    intrinsics:
+      model: opencv_pinhole
+      opencv_pinhole:
+        focal_length: [1315.8848, 1476.0757]
+        principal_point: [961.7419, 560.5188]
+        radial: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        tangential: [0.0, 0.0]
+        thin_prism: [0.0, 0.0, 0.0, 0.0]
+    resolution_hw: [1080, 1920]
+    shutter_type: ROLLING_TOP_TO_BOTTOM
+  - logical_id: camera_rear_right_70fov
+    rig_to_camera:
+      translation_m: [-0.497623, -0.50467, 1.391058]
+      rotation_xyzw: [0.313466, 0.640215, -0.634472, -0.298848]
+    intrinsics:
+      model: opencv_pinhole
+      opencv_pinhole:
+        focal_length: [1315.8848, 1476.0757]
+        principal_point: [961.7419, 560.5188]
+        radial: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        tangential: [0.0, 0.0]
+        thin_prism: [0.0, 0.0, 0.0, 0.0]
+    resolution_hw: [1080, 1920]
+    shutter_type: ROLLING_TOP_TO_BOTTOM
+services:
+  driver:
+    environments: [AUTOE2E_MODEL_ROOT=/mnt/drivers/autoe2e/Model]
