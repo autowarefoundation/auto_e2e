@@ -60,8 +60,9 @@ if ! grep -q -- "--extra autoe2e" "${ALPASIM_ROOT}/Dockerfile"; then
 fi
 grep -q -- "--extra autoe2e" "${ALPASIM_ROOT}/Dockerfile"
 
-# Host side: protos, utils_rs and the wizard. The script must be sourced.
-(cd "${ALPASIM_ROOT}" && source ./setup_local_env.sh)
+# Host side: protos, utils_rs and the wizard. The script must be sourced and
+# reads unset variables (HF_TOKEN, HF_HOME), so relax nounset for it.
+(cd "${ALPASIM_ROOT}" && set +u && source ./setup_local_env.sh)
 
 docker build -t "${ALPASIM_BASE_IMAGE}" "${ALPASIM_ROOT}"
 docker pull nvcr.io/nvidia/nre/nre-ga:26.04
