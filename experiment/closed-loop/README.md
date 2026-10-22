@@ -72,5 +72,6 @@ Each run lands in `~/closed-loop-runs/<run name>/`:
   `plugins/` is not enough: `!plugins/alpasim_driver/**` must be added, or
   `uv sync` in the image fails with "references a workspace in
   `tool.uv.sources` ... but is not a workspace member".
-- The root `pyproject.toml` needs `alpasim_autoe2e = { workspace = true }` in
-  `[tool.uv.sources]` next to the `autoe2e` extra.
+- `setup_alpasim.sh` also adds `alpasim_autoe2e = { workspace = true }` to
+  the root `[tool.uv.sources]`, as AlpaSim does for the transfuser plugin.
+  Whether the `autoe2e` extra resolves without it was not tested.
