@@ -59,6 +59,12 @@ if ! grep -q -- "--extra autoe2e" "${ALPASIM_ROOT}/Dockerfile"; then
         "${ALPASIM_ROOT}/Dockerfile"
 fi
 grep -q -- "--extra autoe2e" "${ALPASIM_ROOT}/Dockerfile"
+# .dockerignore is an allowlist; without this the plugin is not a workspace
+# member inside the build and uv sync fails.
+if ! grep -qx '!plugins/alpasim_driver/\*\*' "${ALPASIM_ROOT}/.dockerignore"; then
+    sed -i 's#^!plugins/transfuser_driver/\*\*$#&\n!plugins/alpasim_driver/**#' "${ALPASIM_ROOT}/.dockerignore"
+fi
+grep -qx '!plugins/alpasim_driver/\*\*' "${ALPASIM_ROOT}/.dockerignore"
 
 # Host side: protos, utils_rs and the wizard. The script must be sourced and
 # reads unset variables (HF_TOKEN, HF_HOME), so relax nounset for it.
