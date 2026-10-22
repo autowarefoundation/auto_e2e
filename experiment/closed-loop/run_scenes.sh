@@ -23,11 +23,13 @@ LOG_DIR="${RUNS_ROOT}/${RUN_NAME}"
 if [[ -z "${SCENES:-}" ]]; then
     SCENES="$(grep -vE '^\s*(#|$)' "${HERE}/scenes.txt" | paste -sd, -)"
 fi
-# The wizard downloads missing scenes from the gated NuRec dataset.
-if [[ -z "${HF_TOKEN:-}" && -f "${HOME}/.cache/huggingface/token" ]]; then
-    HF_TOKEN="$(cat "${HOME}/.cache/huggingface/token")"
+# The wizard downloads missing scenes from the gated NuRec dataset. The token
+# of an account with access is kept apart from the host's default HF token.
+HF_TOKEN_FILE="${HF_TOKEN_FILE:-${HOME}/.config/closed-loop/hf_token}"
+if [[ -z "${HF_TOKEN:-}" && -f "${HF_TOKEN_FILE}" ]]; then
+    HF_TOKEN="$(cat "${HF_TOKEN_FILE}")"
 fi
-export HF_TOKEN
+export HF_TOKEN="${HF_TOKEN:?set HF_TOKEN or write it to ${HF_TOKEN_FILE}}"
 
 mkdir -p "${LOG_DIR}"
 cat > "${LOG_DIR}/experiment.json" <<EOF
