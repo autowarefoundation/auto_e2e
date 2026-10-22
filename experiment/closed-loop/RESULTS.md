@@ -35,15 +35,48 @@ road, where the NuRec render breaks down. The same direction in every scene
 points at a systematic input or frame mismatch rather than scene difficulty;
 the cause is not yet identified.
 
-Candidates to check, in order of cost:
+### Diagnosis: ego-motion feedback, not a configuration error
 
-1. Open-loop replay: keep the ego on the log for the whole rollout with the
-   driver running (`force_gt_duration_us` 20 s,
-   `skip_driver_during_force_gt=false`) and compare plans with the recorded
-   future. A right bias here rules out closed-loop compounding.
-2. The `nuplan_nurec` rig: camera-to-reference extrinsics against the
-   rendered `extra_cameras`, and the rear-axle reference frame of the NVIDIA
-   rig versus nuPlan's. Unlike the KITScenes profile, this rig has no parity
-   test against packed samples.
-3. Camera-only inputs: the checkpoint was trained with route conditioning and
-   runs here with `map_valid = route_valid = False`.
+Checked and ruled out:
+
+- Camera assignment: the six frames the driver received (extracted from
+  `rollout.asl` with `alpasim_utils.asl_to_frames`) show front, front-left,
+  front-right, rear-left, rear and rear-right as the `nuplan_nurec` profile
+  expects.
+- Egomotion construction: row order (oldest first), 10 Hz grid, rad/s units
+  and the nuPlan curvature rule match `data_parsing/nuplan/packing.py`.
+- Dataset policy: the policy the plugin derives from the dataset name equals
+  the one stored in the checkpoint (`mask_latest_history_acceleration=False`).
+- Open-loop quality: the first plan of every rollout, made with the ego still
+  on the log, matches the recorded drive (01d503d4: 0.1 m longitudinal and
+  0.3 m lateral at 5 s).
+
+[`replay_driver.py`](./replay_driver.py) rebuilds each decision's inputs from
+the log, reproduces the logged plan exactly, and reruns it with the yaw rate
+and curvature columns of the egomotion history set to zero. Heading of the
+plan 3 s ahead, in degrees (left positive):
+
+| Scene | Decision 1 | Decision 11 | Decision 21 | Decision 21, yaw/curvature = 0 |
+| :--- | ---: | ---: | ---: | ---: |
+| 01d503d4 | +1.63 | -2.83 | -19.09 | +1.66 |
+| 023b7fcc | +3.21 | -3.52 | -39.73 | +1.25 |
+| 0245ff75 | +1.87 | -5.11 | -19.87 | +1.11 |
+| 026d6a39 | +0.40 | -8.26 | -90.32 | -0.03 |
+| 02eadd92 | -0.30 | -8.75 | -69.40 | +0.35 |
+
+With the yaw history removed the plan stays within about 2 degrees of straight
+even when the ego has already turned 5 to 10 degrees off the lane. The turn is
+therefore driven by the ego's own yaw history, not by the cameras:
+
+1. The first plans start with a small right kink (heading -0.5 degrees at
+   0.1 s in 023b7fcc) before bending left, and the controller follows it.
+2. The resulting negative yaw rate enters the next egomotion history, and the
+   model extrapolates it into a sharper right turn, at a gain above one
+   (newest yaw rate -0.127 rad/s gives a planned -9.6 degrees in 1 s in
+   01d503d4).
+3. The loop diverges within 2 to 3 s and the ego leaves the road.
+
+This is the copycat failure of imitation policies that condition on their own
+past motion: the history explains the logged future well open-loop, and feeds
+back closed-loop. A cheap check without retraining is a closed-loop run with
+the yaw rate and curvature history zeroed at inference.
