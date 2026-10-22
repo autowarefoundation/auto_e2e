@@ -9,13 +9,13 @@ present is driven by the ego's own motion, not by the cameras.
 Run inside the AlpaSim image with a GPU, e.g. on the GPU host:
 
     docker run --rm --gpus all \
-      -v ~/closed-loop-runs/<run>:/run:ro \
+      -v ~/closed-loop-runs/<run>:/rundir:ro \
       -v ~/alpasim/data/drivers/autoe2e:/drivers:ro \
       -v <repo>:/src:ro \
       -e AUTOE2E_MODEL_ROOT=/drivers/Model \
       -e PYTHONPATH=/src/Model/plugins/alpasim_driver:/src/Model/plugins/alpasim_driver/tools \
       alpasim-base:autoe2e-<commit> bash -lc "cd /repo && uv run python \
-        /src/experiment/closed-loop/replay_driver.py /run <scene prefix> 0,5,10,20"
+        /src/experiment/closed-loop/replay_driver.py /rundir <scene prefix> 0,5,10,20"
 """
 
 from __future__ import annotations
