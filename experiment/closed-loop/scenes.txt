@@ -1,0 +1,8 @@
+# public_2601 scenes for the first closed-loop runs, one scene ID per line.
+# 01d503d4 is the scene the plugin author completed a rollout on (PR #177);
+# 026d6a39 and 02eadd92 are the AlpaSim tutorial scenes.
+clipgt-01d503d4-449b-46fc-8d78-9085e70d3554
+clipgt-026d6a39-bd8f-4175-bc61-fe50ed0403a3
+clipgt-02eadd92-02f1-46d8-86fe-a9e338fed0b6
+clipgt-023b7fcc-671c-40e3-9bd2-c66b0b073fbc
+clipgt-0245ff75-aa3f-46b7-ba87-16a7afb841af
