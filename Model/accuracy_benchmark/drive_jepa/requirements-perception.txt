@@ -1,0 +1,12 @@
+# In addition to requirements-drive-jepa-benchmark.txt, using torch2.0.1/cu117:
+https://download.openmmlab.com/mmcv/dist/cu117/torch2.0.0/mmcv_full-1.7.2-cp311-cp311-win_amd64.whl
+mmdet==2.28.2
+addict==2.4.0
+yapf==0.40.1
+pyquaternion==0.9.9
+terminaltables==3.1.10
+regex
+pycocotools
+geopandas==0.14.4
+# Official nuPlan v1.2 source vendored under .benchmark/vendor/nuplan at
+# ce3c323af01c0d7ec5672f7832ef53f9c679aab0 (Windows packaging has BUILD/build collision).

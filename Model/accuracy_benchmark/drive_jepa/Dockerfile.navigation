@@ -1,0 +1,6 @@
+FROM python:3.12-slim
+RUN pip install --no-cache-dir numpy==1.26.4 scipy==1.17.1 pyproj==3.7.2 PyYAML pyarrow opencv-python-headless==4.9.0.80
+COPY --from=sdk /lanelet2-1.2.2-cp312-cp312-manylinux_2_31_x86_64.whl /tmp/lanelet2-1.2.2-cp312-cp312-manylinux_2_31_x86_64.whl
+RUN pip install --no-cache-dir /tmp/lanelet2-1.2.2-cp312-cp312-manylinux_2_31_x86_64.whl
+WORKDIR /workspace
+ENV PYTHONPATH=/workspace/Model:/workspace/.benchmark/vendor/kitscenes

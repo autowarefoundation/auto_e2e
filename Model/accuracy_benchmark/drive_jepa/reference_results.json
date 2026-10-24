@@ -1,0 +1,451 @@
+{
+  "created_at_utc": "2026-10-05T09:08:45.395527+00:00",
+  "condition_count": 9,
+  "scene_count": 117,
+  "sample_count": 11035,
+  "all_ids_timestamps_targets_identical": true,
+  "published_sample_uid_sha256": "00f824202c97b47ec74561d247e8e30686e5505eef2ad2bc0acba97e41ce9925",
+  "limitations_and_policies": [
+    "Missing commands use an all-zero four-dimensional vector; invalid supplied routes use the distinct unknown one-hot category.",
+    "20 m commands use centreline arc length and +/-2 m lateral thresholds from the KITScenes recorded ego-pose origin. No NAVSIM vehicle-specific rear-axle offset is fabricated.",
+    "100 m commands are published AutoE2E maneuver labels. Routes are reconstructed offline from whole recorded scene traces; exact published navigation hashes match. Commands do not directly inspect future evaluation targets, but these are offline reconstructed routes rather than independently supplied online navigation plans.",
+    "KITScenes raw front images and actual calibration are used. Native image preprocessing crops 28 pixels top/bottom, resizes to 512x256 and uses current and 0.5-second-past frames. Perception-based projection retains native 0.4 scale and 32-pixel padding with actual front shape and calibration; an unused metadata slot aliases the front camera to accommodate KITScenes unequal camera resolutions.",
+    "Causal KITScenes ego velocity/acceleration and the recorded ego origin are used; trained model vehicle geometry is retained. This is a dataset adaptation.",
+    "NAVSIM v2 selection uses its native learned-score branch without optional sequential simulator comfort calibration. This is independent-sample KITScenes ADE/FDE, not native NAVSIM sequential simulator scoring.",
+    "Perception-free inference used bf16; perception-based inference used fp32. Checkpoints were strictly loaded, and trained model forward computation was retained.",
+    "ADE averages displacement error over 10Hz samples through each horizon; FDE uses its endpoint. Native 0.5-second predictions are interpolated from the origin without extrapolation. Metrics weight each sample equally.",
+    "Candidate mean averages errors across all 32 proposals per sample. Oracle minima choose ADE and FDE independently per sample and horizon using ground truth offline; these are not deployed selection metrics. Candidate first means proposal index zero, not learned-score selection.",
+    "5-second ADE/FDE are unavailable: these checkpoints predict only 4 seconds."
+  ],
+  "conditions": [
+    {
+      "model": "Perception-free v1",
+      "commands": "Missing",
+      "selected": {
+        "ade_1s_m": 0.20532575294773775,
+        "ade_2s_m": 0.5096608294801146,
+        "ade_3s_m": 0.9342843278695622,
+        "ade_4s_m": 1.4820478621682918,
+        "ade_5s_m": null,
+        "fde_1s_m": 0.4199328629312658,
+        "fde_2s_m": 1.1910768523602988,
+        "fde_3s_m": 2.327597719649681,
+        "fde_4s_m": 3.82920193199016,
+        "fde_5s_m": null
+      },
+      "checkpoint_sha256": "982960aed9e82900584d20c676ba9a7498add912bed94a3e7fa5f4d22bff6237",
+      "precision": "bf16",
+      "ids_timestamps_targets_identical": true,
+      "selected_metrics_recomputed": true,
+      "published_sample_uid_sha256": "00f824202c97b47ec74561d247e8e30686e5505eef2ad2bc0acba97e41ce9925",
+      "candidate_count": 1,
+      "candidate_metrics": null
+    },
+    {
+      "model": "Perception-free v1",
+      "commands": "20 m",
+      "selected": {
+        "ade_1s_m": 0.22142924767411234,
+        "ade_2s_m": 0.5331681724582045,
+        "ade_3s_m": 0.9605308150294468,
+        "ade_4s_m": 1.51061053790277,
+        "ade_5s_m": null,
+        "fde_1s_m": 0.44464305280072686,
+        "fde_2s_m": 1.222019509465434,
+        "fde_3s_m": 2.3621160576340294,
+        "fde_4s_m": 3.863534218140409,
+        "fde_5s_m": null
+      },
+      "checkpoint_sha256": "982960aed9e82900584d20c676ba9a7498add912bed94a3e7fa5f4d22bff6237",
+      "precision": "bf16",
+      "ids_timestamps_targets_identical": true,
+      "selected_metrics_recomputed": true,
+      "published_sample_uid_sha256": "00f824202c97b47ec74561d247e8e30686e5505eef2ad2bc0acba97e41ce9925",
+      "candidate_count": 1,
+      "candidate_metrics": null
+    },
+    {
+      "model": "Perception-free v1",
+      "commands": "100 m",
+      "selected": {
+        "ade_1s_m": 0.22162850989061728,
+        "ade_2s_m": 0.5334494610204381,
+        "ade_3s_m": 0.9612303242080612,
+        "ade_4s_m": 1.5119940553361817,
+        "ade_5s_m": null,
+        "fde_1s_m": 0.4448631846532057,
+        "fde_2s_m": 1.222906735130279,
+        "fde_3s_m": 2.3645603825941204,
+        "fde_4s_m": 3.8682745970262356,
+        "fde_5s_m": null
+      },
+      "checkpoint_sha256": "982960aed9e82900584d20c676ba9a7498add912bed94a3e7fa5f4d22bff6237",
+      "precision": "bf16",
+      "ids_timestamps_targets_identical": true,
+      "selected_metrics_recomputed": true,
+      "published_sample_uid_sha256": "00f824202c97b47ec74561d247e8e30686e5505eef2ad2bc0acba97e41ce9925",
+      "candidate_count": 1,
+      "candidate_metrics": null
+    },
+    {
+      "model": "Perception-based v1",
+      "commands": "Missing",
+      "selected": {
+        "ade_1s_m": 0.4359236068918957,
+        "ade_2s_m": 0.9211695001035672,
+        "ade_3s_m": 1.5159261213906707,
+        "ade_4s_m": 2.2433360286465476,
+        "ade_5s_m": null,
+        "fde_1s_m": 0.8499060506916823,
+        "fde_2s_m": 1.9221818167319598,
+        "fde_3s_m": 3.400718560972849,
+        "fde_4s_m": 5.339917657728589,
+        "fde_5s_m": null
+      },
+      "checkpoint_sha256": "b3e1d4ab723715be07c8266a7dfbd58abffed6990d654afcf5fbcd8cd97eeb34",
+      "precision": "fp32",
+      "ids_timestamps_targets_identical": true,
+      "selected_metrics_recomputed": true,
+      "published_sample_uid_sha256": "00f824202c97b47ec74561d247e8e30686e5505eef2ad2bc0acba97e41ce9925",
+      "candidate_count": 32,
+      "candidate_metrics": {
+        "candidate_first": {
+          "ade_1s_m": 0.6735434882997737,
+          "ade_2s_m": 1.274934162355463,
+          "ade_3s_m": 1.9515191359998254,
+          "ade_4s_m": 2.783734973778971,
+          "ade_5s_m": null,
+          "fde_1s_m": 1.2284730189872757,
+          "fde_2s_m": 2.4705159562175285,
+          "fde_3s_m": 4.066125317247383,
+          "fde_4s_m": 6.266552004255236,
+          "fde_5s_m": null
+        },
+        "candidate_mean": {
+          "ade_1s_m": 0.8416889843867276,
+          "ade_2s_m": 1.6103563943652477,
+          "ade_3s_m": 2.4539335080763847,
+          "ade_4s_m": 3.434188890208688,
+          "ade_5s_m": null,
+          "fde_1s_m": 1.5742043338267038,
+          "fde_2s_m": 3.0866057396691255,
+          "fde_3s_m": 5.044134477181947,
+          "fde_4s_m": 7.5121048476396775,
+          "fde_5s_m": null
+        },
+        "oracle_min": {
+          "ade_1s_m": 0.11277933496126072,
+          "ade_2s_m": 0.24642140959614425,
+          "ade_3s_m": 0.40668073806964034,
+          "ade_4s_m": 0.6154798884976083,
+          "ade_5s_m": null,
+          "fde_1s_m": 0.1898627081778644,
+          "fde_2s_m": 0.4065618346754842,
+          "fde_3s_m": 0.6848732515433182,
+          "fde_4s_m": 1.1074944377763727,
+          "fde_5s_m": null
+        }
+      }
+    },
+    {
+      "model": "Perception-based v1",
+      "commands": "20 m",
+      "selected": {
+        "ade_1s_m": 0.4467802871027088,
+        "ade_2s_m": 0.9335747027996714,
+        "ade_3s_m": 1.5410580413504644,
+        "ade_4s_m": 2.275501141118204,
+        "ade_5s_m": null,
+        "fde_1s_m": 0.8285286200386829,
+        "fde_2s_m": 1.9646650228340485,
+        "fde_3s_m": 3.4504104020750033,
+        "fde_4s_m": 5.386399364946761,
+        "fde_5s_m": null
+      },
+      "checkpoint_sha256": "b3e1d4ab723715be07c8266a7dfbd58abffed6990d654afcf5fbcd8cd97eeb34",
+      "precision": "fp32",
+      "ids_timestamps_targets_identical": true,
+      "selected_metrics_recomputed": true,
+      "published_sample_uid_sha256": "00f824202c97b47ec74561d247e8e30686e5505eef2ad2bc0acba97e41ce9925",
+      "candidate_count": 32,
+      "candidate_metrics": {
+        "candidate_first": {
+          "ade_1s_m": 0.6196431602220974,
+          "ade_2s_m": 1.1744700933230587,
+          "ade_3s_m": 1.8058554716560167,
+          "ade_4s_m": 2.565135851179684,
+          "ade_5s_m": null,
+          "fde_1s_m": 1.119715808790665,
+          "fde_2s_m": 2.2924923045308794,
+          "fde_3s_m": 3.7686908331294986,
+          "fde_4s_m": 5.757856847259237,
+          "fde_5s_m": null
+        },
+        "candidate_mean": {
+          "ade_1s_m": 0.8193801859627496,
+          "ade_2s_m": 1.5534398095446795,
+          "ade_3s_m": 2.360610554998257,
+          "ade_4s_m": 3.2893041693899607,
+          "ade_5s_m": null,
+          "fde_1s_m": 1.5043955677820646,
+          "fde_2s_m": 2.975472559894325,
+          "fde_3s_m": 4.827395914753584,
+          "fde_4s_m": 7.154832847268537,
+          "fde_5s_m": null
+        },
+        "oracle_min": {
+          "ade_1s_m": 0.11385229477696003,
+          "ade_2s_m": 0.24036456978832185,
+          "ade_3s_m": 0.39651530441090865,
+          "ade_4s_m": 0.5991378332200866,
+          "ade_5s_m": null,
+          "fde_1s_m": 0.18021316195993867,
+          "fde_2s_m": 0.39328065395754425,
+          "fde_3s_m": 0.6595798861016792,
+          "fde_4s_m": 1.0379671953272076,
+          "fde_5s_m": null
+        }
+      }
+    },
+    {
+      "model": "Perception-based v1",
+      "commands": "100 m",
+      "selected": {
+        "ade_1s_m": 0.4464676801684111,
+        "ade_2s_m": 0.9307850897420192,
+        "ade_3s_m": 1.5359382677143063,
+        "ade_4s_m": 2.2680071147146084,
+        "ade_5s_m": null,
+        "fde_1s_m": 0.8258085893623204,
+        "fde_2s_m": 1.957457233436733,
+        "fde_3s_m": 3.4377537868008874,
+        "fde_4s_m": 5.367408974547704,
+        "fde_5s_m": null
+      },
+      "checkpoint_sha256": "b3e1d4ab723715be07c8266a7dfbd58abffed6990d654afcf5fbcd8cd97eeb34",
+      "precision": "fp32",
+      "ids_timestamps_targets_identical": true,
+      "selected_metrics_recomputed": true,
+      "published_sample_uid_sha256": "00f824202c97b47ec74561d247e8e30686e5505eef2ad2bc0acba97e41ce9925",
+      "candidate_count": 32,
+      "candidate_metrics": {
+        "candidate_first": {
+          "ade_1s_m": 0.6151203566766333,
+          "ade_2s_m": 1.1665209713984006,
+          "ade_3s_m": 1.7955144312372833,
+          "ade_4s_m": 2.5529310778141237,
+          "ade_5s_m": null,
+          "fde_1s_m": 1.1112052825057992,
+          "fde_2s_m": 2.2786723649844958,
+          "fde_3s_m": 3.750464623303781,
+          "fde_4s_m": 5.743535194494502,
+          "fde_5s_m": null
+        },
+        "candidate_mean": {
+          "ade_1s_m": 0.8167026107080068,
+          "ade_2s_m": 1.5480719395768443,
+          "ade_3s_m": 2.3541223564999214,
+          "ade_4s_m": 3.2828594619459732,
+          "ade_5s_m": null,
+          "fde_1s_m": 1.4987334682923072,
+          "fde_2s_m": 2.9665912260013196,
+          "fde_3s_m": 4.81989243856965,
+          "fde_4s_m": 7.149386661496701,
+          "fde_5s_m": null
+        },
+        "oracle_min": {
+          "ade_1s_m": 0.11351582885664556,
+          "ade_2s_m": 0.23950683701383377,
+          "ade_3s_m": 0.3957072304803954,
+          "ade_4s_m": 0.5986170136977846,
+          "ade_5s_m": null,
+          "fde_1s_m": 0.17903226860406976,
+          "fde_2s_m": 0.3924020791492131,
+          "fde_3s_m": 0.6604800066892328,
+          "fde_4s_m": 1.0415221503954954,
+          "fde_5s_m": null
+        }
+      }
+    },
+    {
+      "model": "Perception-based v2",
+      "commands": "Missing",
+      "selected": {
+        "ade_1s_m": 0.6701117895823774,
+        "ade_2s_m": 1.371129143502737,
+        "ade_3s_m": 2.1629750831234116,
+        "ade_4s_m": 3.0674051543193865,
+        "ade_5s_m": null,
+        "fde_1s_m": 1.26997025988466,
+        "fde_2s_m": 2.7725221038890955,
+        "fde_3s_m": 4.642618633904606,
+        "fde_4s_m": 6.769959108052775,
+        "fde_5s_m": null
+      },
+      "checkpoint_sha256": "740335c800e248598949c2f3c70700da79fe52f5fdc282b887d08fe112d30d05",
+      "precision": "fp32",
+      "ids_timestamps_targets_identical": true,
+      "selected_metrics_recomputed": true,
+      "published_sample_uid_sha256": "00f824202c97b47ec74561d247e8e30686e5505eef2ad2bc0acba97e41ce9925",
+      "candidate_count": 32,
+      "candidate_metrics": {
+        "candidate_first": {
+          "ade_1s_m": 0.3719830101316244,
+          "ade_2s_m": 0.8258684601720826,
+          "ade_3s_m": 1.3995791369094588,
+          "ade_4s_m": 2.1093133665327577,
+          "ade_5s_m": null,
+          "fde_1s_m": 0.751246643116707,
+          "fde_2s_m": 1.7663209820509727,
+          "fde_3s_m": 3.252016728981067,
+          "fde_4s_m": 5.088859715901981,
+          "fde_5s_m": null
+        },
+        "candidate_mean": {
+          "ade_1s_m": 0.7323084153764973,
+          "ade_2s_m": 1.4294374117091817,
+          "ade_3s_m": 2.221889245650538,
+          "ade_4s_m": 3.10610311234975,
+          "ade_5s_m": null,
+          "fde_1s_m": 1.3297622306696906,
+          "fde_2s_m": 2.822992144429851,
+          "fde_3s_m": 4.657757991314691,
+          "fde_4s_m": 6.690998539975395,
+          "fde_5s_m": null
+        },
+        "oracle_min": {
+          "ade_1s_m": 0.13278972137496584,
+          "ade_2s_m": 0.26331997718299116,
+          "ade_3s_m": 0.4231713579884065,
+          "ade_4s_m": 0.6324189972056486,
+          "ade_5s_m": null,
+          "fde_1s_m": 0.21130932912964326,
+          "fde_2s_m": 0.4244809225330312,
+          "fde_3s_m": 0.7108482791947671,
+          "fde_4s_m": 1.1663153890224944,
+          "fde_5s_m": null
+        }
+      }
+    },
+    {
+      "model": "Perception-based v2",
+      "commands": "20 m",
+      "selected": {
+        "ade_1s_m": 0.7146443747264204,
+        "ade_2s_m": 1.4549355718200434,
+        "ade_3s_m": 2.2655629982492425,
+        "ade_4s_m": 3.176829902284222,
+        "ade_5s_m": null,
+        "fde_1s_m": 1.3453519306303854,
+        "fde_2s_m": 2.917434134610811,
+        "fde_3s_m": 4.774149910097593,
+        "fde_4s_m": 6.880035597693612,
+        "fde_5s_m": null
+      },
+      "checkpoint_sha256": "740335c800e248598949c2f3c70700da79fe52f5fdc282b887d08fe112d30d05",
+      "precision": "fp32",
+      "ids_timestamps_targets_identical": true,
+      "selected_metrics_recomputed": true,
+      "published_sample_uid_sha256": "00f824202c97b47ec74561d247e8e30686e5505eef2ad2bc0acba97e41ce9925",
+      "candidate_count": 32,
+      "candidate_metrics": {
+        "candidate_first": {
+          "ade_1s_m": 0.3687087352795667,
+          "ade_2s_m": 0.8379094977693072,
+          "ade_3s_m": 1.383272005288132,
+          "ade_4s_m": 2.061201719274659,
+          "ade_5s_m": null,
+          "fde_1s_m": 0.7427337632272738,
+          "fde_2s_m": 1.7689837927559975,
+          "fde_3s_m": 3.119731820030893,
+          "fde_4s_m": 4.979634481904742,
+          "fde_5s_m": null
+        },
+        "candidate_mean": {
+          "ade_1s_m": 0.7469239777469722,
+          "ade_2s_m": 1.461997757122211,
+          "ade_3s_m": 2.2525934993113443,
+          "ade_4s_m": 3.128367008058853,
+          "ade_5s_m": null,
+          "fde_1s_m": 1.3644975672197062,
+          "fde_2s_m": 2.8760364257700584,
+          "fde_3s_m": 4.661655518354525,
+          "fde_4s_m": 6.6796586186733515,
+          "fde_5s_m": null
+        },
+        "oracle_min": {
+          "ade_1s_m": 0.1348464196660958,
+          "ade_2s_m": 0.2643874806600509,
+          "ade_3s_m": 0.4262698875791653,
+          "ade_4s_m": 0.6366662366834765,
+          "ade_5s_m": null,
+          "fde_1s_m": 0.21084140243015484,
+          "fde_2s_m": 0.42517956964428233,
+          "fde_3s_m": 0.7120763062791899,
+          "fde_4s_m": 1.1806164606828808,
+          "fde_5s_m": null
+        }
+      }
+    },
+    {
+      "model": "Perception-based v2",
+      "commands": "100 m",
+      "selected": {
+        "ade_1s_m": 0.7145252467498122,
+        "ade_2s_m": 1.4553460387120594,
+        "ade_3s_m": 2.2680090382674942,
+        "ade_4s_m": 3.181834258264041,
+        "ade_5s_m": null,
+        "fde_1s_m": 1.3439373730424846,
+        "fde_2s_m": 2.9215315118762883,
+        "fde_3s_m": 4.7860188734385565,
+        "fde_4s_m": 6.8983248157959265,
+        "fde_5s_m": null
+      },
+      "checkpoint_sha256": "740335c800e248598949c2f3c70700da79fe52f5fdc282b887d08fe112d30d05",
+      "precision": "fp32",
+      "ids_timestamps_targets_identical": true,
+      "selected_metrics_recomputed": true,
+      "published_sample_uid_sha256": "00f824202c97b47ec74561d247e8e30686e5505eef2ad2bc0acba97e41ce9925",
+      "candidate_count": 32,
+      "candidate_metrics": {
+        "candidate_first": {
+          "ade_1s_m": 0.36303818805331445,
+          "ade_2s_m": 0.8271708568033991,
+          "ade_3s_m": 1.3702812657016783,
+          "ade_4s_m": 2.0468489358705475,
+          "ade_5s_m": null,
+          "fde_1s_m": 0.730194894743068,
+          "fde_2s_m": 1.7511010616915625,
+          "fde_3s_m": 3.102969944886239,
+          "fde_4s_m": 4.960582743681069,
+          "fde_5s_m": null
+        },
+        "candidate_mean": {
+          "ade_1s_m": 0.7443980004002079,
+          "ade_2s_m": 1.4573903167577258,
+          "ade_3s_m": 2.2469220984019898,
+          "ade_4s_m": 3.122570574607685,
+          "ade_5s_m": null,
+          "fde_1s_m": 1.360010034499473,
+          "fde_2s_m": 2.867920234600883,
+          "fde_3s_m": 4.654570397436213,
+          "fde_4s_m": 6.675376119751924,
+          "fde_5s_m": null
+        },
+        "oracle_min": {
+          "ade_1s_m": 0.1340427192972866,
+          "ade_2s_m": 0.26305198474898156,
+          "ade_3s_m": 0.4252287880389681,
+          "ade_4s_m": 0.6370544040380666,
+          "ade_5s_m": null,
+          "fde_1s_m": 0.20962179489454866,
+          "fde_2s_m": 0.42701809016289716,
+          "fde_3s_m": 0.7191494225207032,
+          "fde_4s_m": 1.1953790005746305,
+          "fde_5s_m": null
+        }
+      }
+    }
+  ]
+}
