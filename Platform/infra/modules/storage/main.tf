@@ -72,7 +72,11 @@ resource "aws_iam_role" "s3_access" {
         Action    = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringLike = {
-            "${var.oidc_provider_url}:sub" = "system:serviceaccount:flyte:flyteadmin"
+            "${var.oidc_provider_url}:sub" = [
+              "system:serviceaccount:flyte:flyteadmin",
+              "system:serviceaccount:flyte:flytepropeller",
+              "system:serviceaccount:flyte:datacatalog",
+            ]
           }
         }
       }] : []

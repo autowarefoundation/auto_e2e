@@ -32,6 +32,18 @@ spec:
       effect: NoSchedule
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: gpu-overlay-flavor
+spec:
+  nodeLabels:
+    workload-type: gpu-overlay
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+---
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: WorkloadPriorityClass
 metadata:
   name: research-low
@@ -120,6 +132,43 @@ spec:
     reclaimWithinCohort: Never
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: gpu-overlay-queue
+spec:
+  queueingStrategy: BestEffortFIFO
+  namespaceSelector:
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values:
+          - auto-e2e-development
+  resourceGroups:
+    - coveredResources:
+        - cpu
+        - memory
+        - ephemeral-storage
+      flavors:
+        - name: default-flavor
+          resources:
+            - name: cpu
+              nominalQuota: "144"
+            - name: memory
+              nominalQuota: 576Gi
+            - name: ephemeral-storage
+              nominalQuota: 4Ti
+    - coveredResources:
+        - nvidia.com/gpu
+      flavors:
+        - name: gpu-overlay-flavor
+          resources:
+            - name: nvidia.com/gpu
+              nominalQuota: "36"
+  preemption:
+    withinClusterQueue: Never
+    reclaimWithinCohort: Never
+---
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
   name: gpu-validation
@@ -178,3 +227,11 @@ metadata:
 spec:
   clusterQueue: p5en-capacity-block-queue
   stopPolicy: HoldAndDrain
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: gpu-overlay
+  namespace: auto-e2e-development
+spec:
+  clusterQueue: gpu-overlay-queue

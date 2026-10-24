@@ -291,6 +291,7 @@ configmap:
           - container
           - sidecar
           - k8s-array
+          - ray
           - connector-service
           - echo
         #          - sagemaker_hyperparameter_tuning
@@ -300,6 +301,7 @@ configmap:
           container: container
           sidecar: sidecar
           container_array: k8s-array
+          ray: ray
   #          sagemaker_custom_training_task: sagemaker_custom_training
   #          sagemaker_custom_training_job_task: sagemaker_custom_training
 

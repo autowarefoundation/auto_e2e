@@ -171,6 +171,7 @@ echo "=== 5. Apply GPU NodeClasses, NodePools, and Kueue queues ==="
 sed "s/REPLACE_WITH_AWS_ACCOUNT_ID/${ACCOUNT}/g" \
   ../k8s/karpenter-nodepools/gpu-nodeclass.yaml | kubectl apply -f -
 kubectl apply -f ../k8s/karpenter-nodepools/gpu-nodepool.yaml
+kubectl apply -f ../k8s/karpenter-nodepools/gpu-overlay-nodepool.yaml
 kubectl apply -f ../k8s/kueue-config/kueue-objects.yaml
 for resource in \
   nodeclass/auto-e2e-gpu-validation \

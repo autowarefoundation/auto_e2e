@@ -1,7 +1,5 @@
 # NodePools behind the Kueue gpu-overlay-queue (flavor gpu-overlay-flavor,
-# nodeLabels workload-type=gpu-overlay). The queue and flavor are live in the
-# cluster but not yet in kueue-config/kueue-objects.yaml, so post-apply.sh does
-# not apply this file; apply it with kubectl when the queue exists.
+# nodeLabels workload-type=gpu-overlay, defined in kueue-config/kueue-objects.yaml).
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:

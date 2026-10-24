@@ -20,6 +20,9 @@ spec:
         kind: NodeClass
         name: auto-e2e-gpu-validation
       requirements:
+        - key: workload-type
+          operator: In
+          values: ["gpu-validation"]
         - key: node.kubernetes.io/instance-type
           operator: In
           values: ["g6.2xlarge"]
