@@ -1,0 +1,21 @@
+# Tested: Windows / Python 3.11 / PyTorch 2.0.1 cu117 (install torch first).
+numpy>=1.25,<2
+scipy>=1.11,<2
+opencv-python==4.9.0.80
+timm==0.9.16
+einops==0.8.1
+PyYAML>=6,<7
+huggingface_hub>=0.34,<3
+Brotli>=1.2
+pyarrow>=14
+pyproj>=3.6
+tqdm>=4.66
+https://download.openmmlab.com/mmcv/dist/cu117/torch2.0.0/mmcv_full-1.7.2-cp311-cp311-win_amd64.whl
+mmdet==2.28.2
+addict==2.4.0
+yapf==0.40.1
+pyquaternion==0.9.9
+terminaltables==3.1.10
+regex
+pycocotools
+geopandas==0.14.4
