@@ -53,6 +53,11 @@ from .egomotion import (
     extract_egomotion,
 )
 from .world_model_windows import required_margins, stride_for_hz
+from reactive_training_contracts import (
+    REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+    REACTIVE_BEVFORMER_FRAME_OFFSETS,
+    REACTIVE_BEVFORMER_HISTORY_FRAMES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +135,7 @@ class L2DDataset(Dataset):
         self._wm_enabled = include_world_model_windows
         self._wm_num_frames = wm_num_frames
         self._wm_stride = stride_for_hz(source_hz, wm_hz)
+        self._source_hz = source_hz
 
         # Reasoning-clip mode: the offline teacher only needs the front camera at
         # the reasoning horizons, so lerobot decodes just those frames via
@@ -327,6 +333,69 @@ class L2DDataset(Dataset):
                     f"episode {ep_idx} [{ep_start},{ep_end})")
             out.append((ep_idx, r - ep_start))
         return out
+
+    def bevformer_history_rows(self, idx: int) -> list[tuple[int, int]]:
+        """Seven 0.5 s history rows, oldest first, as (episode, frame index).
+
+        L2D keeps 64 frames (6.4 s) of past before every sample, so the 3.5 s
+        T8 history the nuPlan parent's BEVFormer was trained on always fits.
+        """
+        ep_idx, row = self._samples[idx]
+        ep_start, _ = self._episode_ranges[ep_idx]
+        frame = row - ep_start
+        stride = round(REACTIVE_BEVFORMER_FRAME_INTERVAL_US / 1_000_000 * self._source_hz)
+        if stride <= 0 or not np.isclose(stride / self._source_hz, REACTIVE_BEVFORMER_FRAME_INTERVAL_US / 1_000_000):
+            raise ValueError("L2D source frequency cannot represent the T8 interval")
+        rows = [frame + offset * stride for offset in REACTIVE_BEVFORMER_FRAME_OFFSETS[:-1]]
+        if len(rows) != REACTIVE_BEVFORMER_HISTORY_FRAMES or rows[0] < 0:
+            raise IndexError("L2D T8 history leaves the episode")
+        return [(ep_idx, history_row) for history_row in rows]
+
+    def bevformer_history_frame_ids(self, idx: int) -> list[list[str]]:
+        """Shared-pool frame IDs of the seven T8 history rows."""
+        return [
+            [f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame:06d}-c{view}" for view in range(len(CAMERA_NAMES))]
+            for ep_idx, frame in self.bevformer_history_rows(idx)
+        ]
+
+    def reactive_calibration_for(self, idx: int, *, image_size: int) -> dict[str, object]:
+        """Current, native-front, and current-ego-aligned T8 projections.
+
+        The same contract KITScenes writes. History cameras see the current
+        ego frame through the planar GPS motion between the two poses.
+        """
+        from reactive_training_contracts import REACTIVE_FRONT_CAMERA_IMAGE_SIZE, REACTIVE_FRONT_CAMERA_INDEX
+
+        from .calibration import compute_l2d_projection_matrices
+
+        ep_idx, row = self._samples[idx]
+        ep_start, ep_end = self._episode_ranges[ep_idx]
+        states = self._get_vehicle_states_window(ep_start, ep_end)
+        frame = row - ep_start
+        # K @ [R|t] of the current frame; a history camera sees a current-ego
+        # point after moving it into that frame's ego: P @ history_from_current.
+        current = compute_l2d_projection_matrices(image_size).astype(np.float64)
+        world_from_current = _planar_pose(states[frame], states[frame])
+        history_matrix = np.stack([
+            current @ (np.linalg.inv(_planar_pose(states[history_frame], states[frame])) @ world_from_current)
+            for _, history_frame in self.bevformer_history_rows(idx)
+        ]).astype(np.float32)
+        front = compute_l2d_projection_matrices(REACTIVE_FRONT_CAMERA_IMAGE_SIZE)[REACTIVE_FRONT_CAMERA_INDEX:REACTIVE_FRONT_CAMERA_INDEX + 1]
+        if not (np.isfinite(history_matrix).all() and np.isfinite(front).all()):
+            raise ValueError("L2D T8 projections are non-finite")
+        return {
+            "dataset": self.repo_id,
+            "geometry_type": "pinhole",
+            "image_size": image_size,
+            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+            "front_camera_image_size": REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            "front_camera_fpn_image_size": image_size,
+            "front_projection": {"matrix": front.tolist(), "type": "pinhole"},
+            "projection": {"matrix": current.astype(np.float32).tolist(), "type": "pinhole"},
+            "history_projection": {"matrix": history_matrix.tolist(), "reference_frame": "current_ego", "type": "pinhole"},
+            "temporal_frame_interval_us": REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+            "temporal_frame_offsets": list(REACTIVE_BEVFORMER_FRAME_OFFSETS),
+        }
 
     def egomotion_for(self, idx: int):
         """(egomotion_history, trajectory_target) for sample ``idx`` without video decode."""
@@ -590,3 +659,19 @@ def track_points(data_root: str | Path, episodes: list[int], *, decimals: int = 
         raise ValueError(f"L2D data files lack episodes {sorted(wanted - seen)[:5]}")
     points = np.concatenate(chunks)
     return np.unique(points[np.isfinite(points).all(axis=1)], axis=0)
+
+
+def _planar_pose(state: np.ndarray, origin: np.ndarray) -> np.ndarray:
+    """World-from-ego 4x4 of one vehicle state, in a tangent plane at ``origin``.
+
+    L2D has no height or attitude, so the motion between T8 frames is planar:
+    east and north from the GPS fix and yaw from the true-north heading.
+    """
+    earth_radius_m = 6_378_137.0
+    east = np.radians(float(state[_LONGITUDE]) - float(origin[_LONGITUDE])) * earth_radius_m * np.cos(np.radians(float(origin[_LATITUDE])))
+    north = np.radians(float(state[_LATITUDE]) - float(origin[_LATITUDE])) * earth_radius_m
+    yaw = np.radians(90.0 - float(state[_HEADING]))
+    pose = np.eye(4)
+    pose[:2, :2] = [[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]]
+    pose[:2, 3] = [east, north]
+    return pose
