@@ -260,6 +260,7 @@ def _validate_reactive_manifest(
     if stage in {
         ReactiveTrainingStage.NUPLAN_FULL,
         ReactiveTrainingStage.KITSCENES_FINETUNE,
+        ReactiveTrainingStage.L2D_CONTINUATION,
     }:
         if (
             manifest.get("front_camera_index")
