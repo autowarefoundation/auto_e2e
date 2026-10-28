@@ -2067,6 +2067,7 @@ def _train_fixed_steps(
     require_reactive_camera_context = objective.stage in {
         ReactiveTrainingStage.NUPLAN_FULL,
         ReactiveTrainingStage.KITSCENES_FINETUNE,
+        ReactiveTrainingStage.L2D_CONTINUATION,
     }
     trajectory_training_policy = reactive_training_policy(
         objective.stage
