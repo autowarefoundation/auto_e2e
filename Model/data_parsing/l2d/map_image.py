@@ -17,7 +17,7 @@ import math
 
 import numpy as np
 
-MAP_IMAGE_VERSION = "l2d_map_image_v1"
+from .navigation_contract import MAP_IMAGE_VERSION
 
 # Carto road fills, motorway to residential and service. The light greys of
 # parking and living streets sit within JPEG noise of the land background
