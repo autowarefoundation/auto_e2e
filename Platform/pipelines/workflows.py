@@ -444,7 +444,7 @@ def _l2d_episode_navigation(
         L2DEpisodeNavigation,
         episode_lane_graph_from_region,
     )
-    from data_parsing.l2d.osm_pbf_region import parse_region
+    from data_parsing.l2d.osm_pbf_region import RegionIndex, parse_region
     from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
     from navigation.rasterizer import NativeNavigationRasterizer
 
@@ -452,14 +452,14 @@ def _l2d_episode_navigation(
     if hashlib.sha256(payload).hexdigest() != osm_region_sha256:
         raise ValueError("OSM region differs from its pinned SHA-256")
     nodes, ways, _ = parse_region(payload)
+    region = RegionIndex(nodes, ways)
     rasterizer = NativeNavigationRasterizer(AUTOE2E_NAVIGATION_GEOMETRY)
     navigation = {}
     records = []
     for episode in sorted(episodes):
         longitudes, latitudes, headings, timestamps = ds.episode_track(episode)
         graph, graph_sha256 = episode_lane_graph_from_region(
-            nodes,
-            ways,
+            region,
             longitudes_deg=longitudes,
             latitudes_deg=latitudes,
             region_sha256=osm_region_sha256,
