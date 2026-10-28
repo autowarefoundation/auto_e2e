@@ -141,9 +141,11 @@ def lane_layout(tags: Mapping[str, str]) -> tuple[int, int, float]:
             half = max(1, (total or 2) // 2)
             forward, backward = half, max(1, (total or 2) - half)
         elif forward is None:
+            assert backward is not None
             forward = max(1, (total or backward + 1) - backward)
         elif backward is None:
             backward = max(1, (total or forward + 1) - forward)
+    assert forward is not None and backward is not None
     lanes = forward + backward
     width = _float_tag(tags.get("width"))
     default = _DEFAULT_LANE_WIDTH_M.get(tags.get("highway", ""), 3.0)
@@ -307,7 +309,7 @@ def _directed_lanes(
                 if direction == "reverse":
                     center, left, right = center[::-1], right[::-1], left[::-1]
                 # Lane index 0 is innermost: its left neighbour is index-1 toward the centre.
-                lane = {
+                lane: dict[str, Any] = {
                     "way_id": segment.segment_id,
                     "osm_way_id": segment.way_id,
                     "direction": direction,
@@ -434,8 +436,8 @@ def _semantics(
                         stop_lines.append({"id": f"{node_id}:{lane_id}", "points_enu_m": _rounded(line), "level": level})
         if highway == "crossing" or "crossing" in tags:
             segment, position = max(incident[node_id], key=lambda item: item[0].half_width_m)
-            direction = road_direction(segment, position)
-            polygon = _rectangle(center, direction, _CROSSWALK_DEPTH_M / 2.0, segment.half_width_m + 0.5)
+            along = road_direction(segment, position)
+            polygon = _rectangle(center, along, _CROSSWALK_DEPTH_M / 2.0, segment.half_width_m + 0.5)
             crosswalks.append({"id": str(node_id), "points_enu_m": _rounded(polygon), "level": level})
     return {
         "intersections": intersections,
