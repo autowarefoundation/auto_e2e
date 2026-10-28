@@ -53,3 +53,26 @@ def test_read_region_keeps_drivable_ways_near_the_tracks_and_their_point_tags(tm
     assert sorted(nodes) == [1, 2, 3]
     assert nodes[2].tags == {"highway": "traffic_signals"}
     assert nodes[1].tags == {}
+
+
+def test_region_round_trips_canonically_and_subregions_keep_whole_ways():
+    from data_parsing.l2d.osm_lane_graph import OSMNode, OSMWay
+    from data_parsing.l2d.osm_pbf_region import parse_region, region_bytes, subregion
+
+    nodes = {
+        1: OSMNode(1, 8.40, 49.0),
+        2: OSMNode(2, 8.401, 49.0, {"highway": "traffic_signals"}),
+        3: OSMNode(3, 8.402, 49.0),
+        7: OSMNode(7, 13.40, 52.5),
+        8: OSMNode(8, 13.401, 52.5),
+    }
+    ways = [OSMWay(11, (7, 8), {"highway": "primary"}), OSMWay(10, (1, 2, 3), {"highway": "primary", "lanes": "2"})]
+    payload = region_bytes(nodes, ways, provenance={"pbf_sha256": "0" * 64})
+    assert region_bytes(dict(reversed(list(nodes.items()))), list(reversed(ways)), provenance={"pbf_sha256": "0" * 64}) == payload
+    parsed_nodes, parsed_ways, provenance = parse_region(payload)
+    assert parsed_nodes == nodes and [way.way_id for way in parsed_ways] == [10, 11]
+    assert provenance == {"pbf_sha256": "0" * 64}
+    near_nodes, near_ways = subregion(parsed_nodes, parsed_ways, clip_cells([(8.40, 49.0)], buffer_m=100.0))
+    assert [way.way_id for way in near_ways] == [10]
+    # Node 3 lies outside the cells but its way touches them, so it stays.
+    assert sorted(near_nodes) == [1, 2, 3]
