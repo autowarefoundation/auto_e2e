@@ -225,6 +225,10 @@ def _split_segments(
             )
             keep = np.concatenate([[True], np.linalg.norm(np.diff(points, axis=0), axis=1) > 0.05])
             if keep.sum() >= 2:
+                # Segment ids are way_id * 1000 + n; a 1000th split would
+                # take the next way's first id and duplicate its lanes.
+                if per_way[way.way_id] >= 1000:
+                    raise ValueError(f"OSM way {way.way_id} splits into more than 1000 segments")
                 segments.append(_Segment(
                     segment_id=way.way_id * 1000 + per_way[way.way_id],
                     way_id=way.way_id,
