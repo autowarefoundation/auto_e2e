@@ -18,11 +18,14 @@ def _dataset(states: np.ndarray) -> L2DDataset:
     dataset._episode_ranges = {3: (100, 100 + len(states))}
     dataset._samples = [(3, 100 + 64)]
     dataset._get_vehicle_states_window = lambda start, end: states  # type: ignore[method-assign,assignment]
+    timestamps = 1_700_000_000_000_000_000 + np.arange(len(states), dtype=np.int64) * 100_000_000
+    dataset._get_timestamps_window = lambda start, end: timestamps  # type: ignore[method-assign,assignment]
     return dataset
 
 
 def _driving_north(count: int = 200, speed_mps: float = 10.0) -> np.ndarray:
     states = np.zeros((count, 8), dtype=np.float32)
+    states[:, 0] = speed_mps * 3.6  # km/h
     states[:, 1] = 0.0  # heading: true north
     states[:, 3] = 49.0 + np.arange(count) * speed_mps * 0.1 / 111_320.0
     states[:, 4] = 8.4
@@ -51,3 +54,24 @@ def test_history_projection_sees_a_current_point_from_the_earlier_pose():
     expected = current[0] @ ahead_then
     assert seen_then[:2] / seen_then[2] == pytest.approx(expected[:2] / expected[2], abs=0.5)
     assert np.asarray(calibration["front_projection"]["matrix"]).shape == (1, 3, 4)
+
+
+def test_history_rows_off_the_half_second_grid_are_refused():
+    dataset = _dataset(_driving_north())
+    # A dropped frame shifts every later row by 100 ms.
+    timestamps = 1_700_000_000_000_000_000 + np.arange(200, dtype=np.int64) * 100_000_000
+    timestamps[40:] += 100_000_000
+    dataset._get_timestamps_window = lambda start, end: timestamps  # type: ignore[method-assign,assignment]
+    with pytest.raises(ValueError, match="0.5 s grid"):
+        dataset.bevformer_history_rows(0)
+
+
+def test_dead_reckoning_ignores_float32_gps_steps():
+    from data_parsing.l2d.dataset import _dead_reckoned_poses
+
+    states = _driving_north()
+    timestamps = np.arange(len(states), dtype=np.int64) * 100_000_000
+    poses = _dead_reckoned_poses(states, timestamps, 29, 64)
+    # 35 frames at 10 m/s: the oldest pose is 35 m behind, on the axis.
+    assert poses[0][:2, 3] == pytest.approx([-35.0, 0.0], abs=1e-6)
+    assert np.allclose(poses[-1], np.eye(4))
