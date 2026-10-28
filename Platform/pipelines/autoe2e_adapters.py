@@ -89,6 +89,9 @@ class SourcePlan:
     snapshot_manifest_sha256: str
     units: List[UnitRef] = field(default_factory=list)
     partitions: List[List[str]] = field(default_factory=list)
+    # Group ids each partition packs, when they are not its unit ids (L2D
+    # partitions read shared file units but pack episodes).
+    partition_groups: List[List[str]] = field(default_factory=list)
     partition_limits: List[int] = field(default_factory=list)
     labels: bool = False
     console: bool = False
@@ -161,16 +164,46 @@ def read_kitscenes(spec: DatasetSpec, payload: bytes) -> SourcePlan:
 
 
 def read_l2d(spec: DatasetSpec, payload: bytes) -> SourcePlan:
+    """Plan an L2D build: partitions of episodes over shared file units.
+
+    The snapshot fixes the episodes and the OSM extract; ``partition_size``
+    is the only pack input and must be given, so equal content never gets two
+    dataset ids from a default.
+    """
+    from Platform.pipelines.l2d_snapshot import L2D_OSM_UNIT, partition_plan
+
     _check_pack_version(spec)
-    _reject_unknown(spec.pack_params, {"partition_size", "osm_graph_snapshot"})
-    if "osm_graph_snapshot" not in spec.pack_params:
-        raise ValueError(
-            "L2D Reactive packs need OSM navigation (14 map channels); "
-            "set pack_params['osm_graph_snapshot']"
-        )
-    raise NotImplementedError(
-        "the L2D packer does not receive osm_graph_snapshot_path from any task yet, "
-        "so it would emit 3 map channels that Reactive training rejects"
+    _reject_unknown(spec.pack_params, {"partition_size"})
+    if "partition_size" not in spec.pack_params:
+        raise ValueError("L2D pack_params must set partition_size")
+    if spec.reasoning is not None:
+        raise ValueError("L2D has no reasoning labels")
+    if spec.unit_limit:
+        raise ValueError("L2D units are shared files; acquire fewer episodes instead of unit_limit")
+    manifest, units = _unit_plan(spec, payload, upstream=L2D_UPSTREAM)
+    if L2D_OSM_UNIT not in {unit.unit_id for unit in units}:
+        raise ValueError("L2D snapshot has no OSM extract unit")
+    partitions, groups = partition_plan(
+        manifest["provenance"],
+        _int_param(spec.pack_params, "partition_size", 1, minimum=1),
+    )
+    known = {unit.unit_id for unit in units}
+    missing = sorted({unit for partition in partitions for unit in partition} - known)
+    if missing:
+        raise ValueError(f"L2D episodes need units the snapshot lacks: {missing[:3]}")
+    return SourcePlan(
+        dataset=spec.dataset,
+        upstream=L2D_UPSTREAM,
+        revision=manifest["revision"],
+        split="train",
+        published_name="l2d",
+        snapshot_manifest_sha256=spec.source_manifest.sha256,
+        units=units,
+        partitions=partitions,
+        partition_groups=groups,
+        labels=False,
+        console=False,
+        pack_params=dict(spec.pack_params),
     )
 
 
