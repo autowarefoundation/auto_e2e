@@ -261,7 +261,8 @@ def _lane_offsets(segment: _Segment, direction: str) -> list[float]:
 
     Right-hand traffic: forward lanes lie right of the drawn line, reverse
     lanes left of it; a one-way road is centred on the line. Index 0 is the
-    lane closest to the road centre.
+    leftmost lane in the direction of travel (on a two-way road, the one
+    next to the road centre), so index - 1 is always the left neighbour.
     """
     width = segment.lane_width_m
     if segment.forward_lanes and segment.reverse_lanes:
@@ -270,11 +271,15 @@ def _lane_offsets(segment: _Segment, direction: str) -> list[float]:
         return [sign * (index + 0.5) * width for index in range(count)]
     count = segment.forward_lanes or segment.reverse_lanes
     left_edge = 0.5 * count * width
-    return [left_edge - (index + 0.5) * width for index in range(count)]
+    # A reverse one-way travels against the drawing, so its left is the
+    # drawing's right.
+    sign = 1.0 if direction == "forward" else -1.0
+    return [sign * (left_edge - (index + 0.5) * width) for index in range(count)]
 
 
-def _maneuver(points: np.ndarray) -> str:
-    turn = _wrap(_heading(points, at_end=True) - _heading(points, at_end=False))
+def turn_maneuver(incoming_heading_rad: float, outgoing_heading_rad: float) -> str:
+    """The maneuver of leaving one lane for the next at a junction."""
+    turn = _wrap(outgoing_heading_rad - incoming_heading_rad)
     if abs(turn) <= _STRAIGHT_LIMIT_RAD:
         return "straight"
     if abs(turn) >= math.radians(150.0):
@@ -320,7 +325,10 @@ def _directed_lanes(
                     "successors": [],
                     "left_adjacent": ids[index - 1] if index > 0 else None,
                     "right_adjacent": ids[index + 1] if index + 1 < count else None,
-                    "maneuver": _maneuver(center),
+                    # OSM has no lanes inside junctions, so a lane between
+                    # junctions never turns; the turn is between lanes and
+                    # is read off consecutive route lanes instead.
+                    "maneuver": "straight",
                     "level": segment.level,
                     "confidence": 1.0 if any(key in segment.tags for key in ("lanes", "lanes:forward", "lanes:backward")) else 0.8,
                 }
