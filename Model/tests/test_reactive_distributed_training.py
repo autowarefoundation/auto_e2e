@@ -1746,6 +1746,46 @@ def test_validate_stage_config_bounds_single_worker_kitscenes_smoke(override, ma
         validate_reactive_stage_config(config)
 
 
+def _l2d_single_worker_smoke_config() -> dict[str, object]:
+    config = _kitscenes_single_worker_smoke_config()
+    config.update({"stage": "l2d_continuation", "parent_checkpoint_epoch": 5})
+    return config
+
+
+def test_validate_stage_config_accepts_l2d_continuation_from_profiled_parent():
+    config = _stage_config("l2d_continuation")
+    config.update({
+        "allow_random_bevformer_init": False,
+        "bev_weight": 0.0,
+        "is_pretrained": True,
+        "parent_profile": "nuplan_trajectory_route_v1",
+        "parent_checkpoint_sha256": "a" * 64,
+        "parent_checkpoint_epoch": 5,
+    })
+    validate_reactive_stage_config(config)
+    validate_reactive_stage_config(_l2d_single_worker_smoke_config())
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"bev_weight": 1.0}, "frozen nuPlan"),
+        ({"freeze_bevformer": False}, "frozen nuPlan"),
+        ({"parent_profile": "other"}, "frozen nuPlan"),
+        ({"parent_checkpoint_sha256": "b" * 63}, "frozen nuPlan"),
+        ({"parent_checkpoint_epoch": 0}, "frozen nuPlan"),
+        ({"parent_checkpoint_uri": ""}, "Stage A"),
+        ({"steps_per_epoch": 17}, "single-worker smoke"),
+    ],
+)
+def test_validate_stage_config_bounds_l2d_continuation(override, match):
+    config = _l2d_single_worker_smoke_config()
+    config.update(override)
+
+    with pytest.raises(ValueError, match=match):
+        validate_reactive_stage_config(config)
+
+
 def test_validate_stage_config_rejects_smoke_flag_on_production_topology():
     config = _stage_config("nuplan_full")
     config["allow_single_worker_smoke"] = True
