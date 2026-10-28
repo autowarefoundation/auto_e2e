@@ -180,7 +180,12 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
             if sha256_bytes(s3.get_object(Bucket=bucket, Key=key)["Body"].read()) != unit.label_record_sha256:
                 raise ValueError(f"{dataset_id}: label record of {unit.unit_id} changed")
             labels_checked += 1
+    from Platform.pipelines.l2d_snapshot import L2D_OSM_UNIT
+
     region = lineage["pack"].get("osm_region")
+    # L2D map channels come only from the region, so its lineage must name one.
+    if lineage["spec"]["dataset"] == "l2d" and region is None:
+        raise ValueError(f"{dataset_id}: L2D lineage names no OSM region")
     if region is not None:
         # The region is derived from the snapshot's OSM unit; it must still be
         # the bytes every pack rendered navigation from, and name that unit.
@@ -188,7 +193,7 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
         if sha256_bytes(region_payload) != region["sha256"]:
             raise ValueError(f"{dataset_id}: OSM region changed")
         provenance = json.loads(region_payload)["provenance"]
-        if tar_digests.get("osm") != provenance["osm_unit_digest"]:
+        if tar_digests.get(L2D_OSM_UNIT) != provenance["osm_unit_digest"]:
             raise ValueError(f"{dataset_id}: OSM region was not built from the snapshot's OSM extract")
         if provenance["snapshot_manifest_sha256"] != lineage["raw"]["snapshot_manifest_sha256"]:
             raise ValueError(f"{dataset_id}: OSM region was built for another snapshot")
