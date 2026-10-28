@@ -22,24 +22,9 @@ import numpy as np
 
 from navigation.osm_adapter import OSM_LANE_GRAPH_SCHEMA_VERSION
 
-OSM_LANE_GRAPH_BUILDER_VERSION = "osm_lane_graph_builder_v1"
+from .navigation_contract import DRIVABLE_HIGHWAYS, OSM_LANE_GRAPH_BUILDER_VERSION
 
-DRIVABLE_HIGHWAYS = frozenset({
-    "living_street",
-    "motorway",
-    "motorway_link",
-    "primary",
-    "primary_link",
-    "residential",
-    "secondary",
-    "secondary_link",
-    "service",
-    "tertiary",
-    "tertiary_link",
-    "trunk",
-    "trunk_link",
-    "unclassified",
-})
+
 
 # Lane widths when a way carries no width tag (German design guidance).
 _DEFAULT_LANE_WIDTH_M = {
