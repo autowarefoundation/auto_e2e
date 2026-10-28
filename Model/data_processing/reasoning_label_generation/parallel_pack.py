@@ -105,6 +105,18 @@ def _jpeg(frame_tensor, output_size: int | None = None) -> bytes:
     return b.getvalue()
 
 
+def _native_png(frame_tensor) -> bytes:
+    """Encode a raw (3,H,W) frame losslessly at its native size."""
+    import torch
+
+    t = frame_tensor.cpu()
+    if t.dtype.is_floating_point:
+        t = (t.clamp(0, 1) * 255.0).round().to(dtype=torch.uint8)
+    b = io.BytesIO()
+    _TO_PIL(t).save(b, format="PNG")
+    return b.getvalue()
+
+
 def init_row_worker(
     dataset_value: str,
     episodes: Optional[List[int | str]],
@@ -179,7 +191,7 @@ def decode_row(
     ``task`` = (ep_idx, frame_index) is a global identity, so the worker resolves
     the local row from its own _episode_ranges (robust across processes and
     partitions). KITScenes returns lossless schema-v8 navigation members for
-    current rows; other datasets return the optional map JPEG.
+    current rows; L2D returns the map JPEG and the lossless native map tile.
 
     Each unique row is decoded exactly once per partition: the parent maps this
     over the union of all samples' window rows. Map is skipped when all-zero (same rule as pack_sample). The
@@ -243,13 +255,16 @@ def decode_row(
     for v, cam_name in enumerate(CAMERA_NAMES):
         fid = f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{v}"
         l2d_cams[fid] = _jpeg(item[cam_name])
-    map_jpeg = None
+    extras = None
     if include_map:
         map_tile = item[MAP_VIEW_NAME]
         mt = map_tile[0] if map_tile.ndim == 4 else map_tile
         if float(mt.abs().max()) > 0:
-            map_jpeg = _jpeg(mt)
-    return (ep_idx, frame_index), l2d_cams, map_jpeg
+            # map.jpg is the resized tile the map encoder reads; the lossless
+            # native tile is what navigation registers against, since JPEG
+            # and resizing both shift the road colours it classifies.
+            extras = {"map_jpeg": _jpeg(mt), "map_png": _native_png(mt)}
+    return (ep_idx, frame_index), l2d_cams, extras
 
 
 def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
