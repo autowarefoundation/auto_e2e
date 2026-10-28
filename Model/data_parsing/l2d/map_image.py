@@ -7,7 +7,7 @@ including parking areas and junction corners that a lane graph built from
 way centrelines leaves out. Registering it needs no assumption about zoom or
 orientation: the dots are the same ten route waypoints the dataset gives in
 GPS, so a similarity fit of dots to waypoints yields scale and rotation per
-frame.
+frame. Real tiles are 640 by 360, north-up, at about 1.33 px/m.
 """
 
 from __future__ import annotations
@@ -33,6 +33,15 @@ _ROAD_TOLERANCE = 10.0
 _MIN_DOTS = 3
 _MAX_RESIDUAL_PX = 3.0
 _MIN_METERS_PER_PIXEL, _MAX_METERS_PER_PIXEL = 0.1, 5.0
+# Real fits came out up to 4.6 degrees off north where the dots and the
+# waypoints disagree; a north-up tile allows only GPS and rounding error.
+_ROTATION_TOLERANCE_DEG = 2.0
+_SCALE_GRID = np.geomspace(1.0 / _MAX_METERS_PER_PIXEL, 1.0 / _MIN_METERS_PER_PIXEL, 240)
+_SEARCH_TOLERANCE_PX = 5.0
+_EGO_MARKER_RADIUS_PX = 6.0
+_EGO_CENTER_TOLERANCE_PX = 4.0
+# Share of the waypoints that should show as dots for a fit to count.
+_MIN_VISIBLE_FRACTION = 0.6
 
 
 @dataclasses.dataclass(frozen=True)
@@ -72,34 +81,90 @@ def _route_dots(image: np.ndarray) -> tuple[np.ndarray, tuple[float, float]]:
         if 2 <= len(points) <= 200
     ]
     height, width = image.shape[:2]
-    ego_points = [points for points in _components(ego) if len(points) >= 3]
+    # The renderer centres the ego; a dark label near the centre must not
+    # move the origin, so only a marker within a few pixels refines it.
+    center = ((width - 1) / 2.0, (height - 1) / 2.0)
+    ego_points = [
+        points for points in _components(ego)
+        if len(points) >= 3 and np.hypot(points[:, 1].mean() - center[0], points[:, 0].mean() - center[1]) <= _EGO_CENTER_TOLERANCE_PX
+    ]
     if ego_points:
-        nearest = min(ego_points, key=lambda points: np.hypot(points[:, 1].mean() - width / 2, points[:, 0].mean() - height / 2))
+        nearest = min(ego_points, key=lambda points: np.hypot(points[:, 1].mean() - center[0], points[:, 0].mean() - center[1]))
         center = (float(nearest[:, 1].mean()), float(nearest[:, 0].mean()))
-    else:
-        center = ((width - 1) / 2.0, (height - 1) / 2.0)
     return np.asarray(centroids, dtype=np.float64).reshape(-1, 2), center
 
 
-def register(image: np.ndarray, waypoints_east_north_m: np.ndarray) -> MapImageRegistration | None:
-    """Fit the image to ego-relative route waypoints; None when it does not fit."""
+def _fit(pixel: np.ndarray, metric: np.ndarray) -> complex:
+    """Least-squares similarity (complex scale-rotation) from metric to pixel."""
+    return complex(np.vdot(metric, pixel) / np.vdot(metric, metric))
+
+
+def _matches(transform: complex, metric: np.ndarray, dots: np.ndarray, tolerance_px: float) -> tuple[np.ndarray, np.ndarray]:
+    """Waypoints whose predicted pixel has a detected dot within tolerance."""
+    predicted = transform * metric
+    distance = np.abs(predicted[:, None] - dots[None, :])
+    nearest = distance.argmin(axis=1)
+    ok = distance[np.arange(len(metric)), nearest] <= tolerance_px
+    return np.flatnonzero(ok), nearest[ok]
+
+
+def register(
+    image: np.ndarray,
+    waypoints_east_north_m: np.ndarray,
+    *,
+    expected_rotation_rad: float = 0.0,
+) -> MapImageRegistration | None:
+    """Fit the image to ego-relative route waypoints; None when it does not fit.
+
+    The tiles are north-up, so in a projected frame their rotation is known:
+    ``expected_rotation_rad`` is minus the grid angle of true east at the
+    ego (the meridian convergence, about one degree in Germany). Scale varies with the renderer's zoom, so it is searched; the
+    hypothesis that lands the most waypoints on detected dots is refined by
+    least squares and must keep the expected rotation. Ranking dots by
+    distance from the ego does not work on real tiles, where the nearest
+    waypoint hides under the ego marker and other blue map features add
+    blobs.
+    """
     dots, center = _route_dots(image)
     waypoints = np.asarray(waypoints_east_north_m, dtype=np.float64)[:, :2]
     waypoints = waypoints[np.hypot(waypoints[:, 0], waypoints[:, 1]) > 1.0]
     if len(dots) < _MIN_DOTS or len(waypoints) < _MIN_DOTS:
         return None
-    # Pair dots and waypoints by their rank of distance from the ego.
-    dots = dots[np.argsort(np.hypot(dots[:, 0] - center[0], dots[:, 1] - center[1]))]
-    waypoints = waypoints[np.argsort(np.hypot(waypoints[:, 0], waypoints[:, 1]))]
-    count = min(len(dots), len(waypoints))
-    pixel = (dots[:count, 0] - center[0]) - 1j * (dots[:count, 1] - center[1])
-    metric = waypoints[:count, 0] + 1j * waypoints[:count, 1]
-    transform = complex(np.vdot(metric, pixel) / np.vdot(metric, metric))
-    scale = abs(transform)
-    residual = float(np.sqrt(np.mean(np.abs(pixel - transform * metric) ** 2)))
-    if not (1.0 / _MAX_METERS_PER_PIXEL <= scale <= 1.0 / _MIN_METERS_PER_PIXEL) or residual > _MAX_RESIDUAL_PX:
+    pixel_dots = (dots[:, 0] - center[0]) - 1j * (dots[:, 1] - center[1])
+    metric = waypoints[:, 0] + 1j * waypoints[:, 1]
+    height, width = image.shape[:2]
+    best: tuple[int, complex] | None = None
+    for rotation in expected_rotation_rad + np.radians(np.arange(-_ROTATION_TOLERANCE_DEG, _ROTATION_TOLERANCE_DEG + 1e-9, 0.5)):
+        for scale in _SCALE_GRID:
+            transform = scale * complex(math.cos(rotation), math.sin(rotation))
+            inliers, _ = _matches(transform, metric, pixel_dots, _SEARCH_TOLERANCE_PX)
+            if best is None or len(inliers) > best[0]:
+                best = (len(inliers), transform)
+    assert best is not None
+    transform = best[1]
+    for tolerance in (_SEARCH_TOLERANCE_PX, _MAX_RESIDUAL_PX):
+        inliers, nearest = _matches(transform, metric, pixel_dots, tolerance)
+        if len(inliers) < _MIN_DOTS or len(set(nearest.tolist())) != len(nearest):
+            return None
+        transform = _fit(pixel_dots[nearest], metric[inliers])
+    predicted = transform * metric
+    column, row = center[0] + predicted.real, center[1] - predicted.imag
+    # Waypoints under the ego marker or off the image cannot have a dot.
+    visible = (np.abs(predicted) > _EGO_MARKER_RADIUS_PX) & (column >= 0) & (column < width) & (row >= 0) & (row < height)
+    inliers, nearest = _matches(transform, metric, pixel_dots, _MAX_RESIDUAL_PX)
+    if len(inliers) < max(_MIN_DOTS, math.ceil(_MIN_VISIBLE_FRACTION * int(visible.sum()))):
         return None
-    return MapImageRegistration(center, scale, math.atan2(transform.imag, transform.real), residual, count)
+    residual = float(np.sqrt(np.mean(np.abs(pixel_dots[nearest] - transform * metric[inliers]) ** 2)))
+    scale = abs(transform)
+    rotation = math.atan2(transform.imag, transform.real)
+    if (
+        not (1.0 / _MAX_METERS_PER_PIXEL <= scale <= 1.0 / _MIN_METERS_PER_PIXEL)
+        or residual > _MAX_RESIDUAL_PX
+        # Dots that only fit rotated away from north are not this route.
+        or abs(math.remainder(rotation - expected_rotation_rad, math.tau)) > math.radians(_ROTATION_TOLERANCE_DEG)
+    ):
+        return None
+    return MapImageRegistration(center, scale, rotation, residual, len(inliers))
 
 
 def road_mask(image: np.ndarray) -> np.ndarray:
