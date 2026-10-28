@@ -65,8 +65,16 @@ class MapImageRegistration:
 def _components(mask: np.ndarray) -> list[np.ndarray]:
     from scipy import ndimage
 
-    labels, count = ndimage.label(mask)
-    return [np.argwhere(labels == index) for index in range(1, count + 1)]
+    labels, _ = ndimage.label(mask)
+    # find_objects bounds each component, so no full-image pass per label
+    # (dark Carto label text makes hundreds of them).
+    components = []
+    for index, box in enumerate(ndimage.find_objects(labels), start=1):
+        if box is None:
+            continue
+        points = np.argwhere(labels[box] == index)
+        components.append(points + [box[0].start, box[1].start])
+    return components
 
 
 def _route_dots(image: np.ndarray) -> tuple[np.ndarray, tuple[float, float]]:
