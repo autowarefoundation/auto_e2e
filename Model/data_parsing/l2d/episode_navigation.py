@@ -1,7 +1,7 @@
 """Leak-resistant L2D navigation, built the way KITScenes builds its own.
 
-One episode gets one ``NavigationMap`` cut out of the regional OSM lane
-graph, one route matched from the recorded GPS trace onto that lane graph,
+One episode gets one ``NavigationMap`` built from the OSM region around its
+track, one route matched from the recorded GPS trace onto that lane graph,
 and sample rasters rendered by the shared native rasterizer on the 500 ms
 anchor grid and warped to each frame. The dataset's own map image then adds
 the road surface it draws to the drivable and known-area channels. Members
@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-from collections.abc import Mapping
+import json
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
@@ -27,6 +28,8 @@ from navigation.supervision import build_route_supervision
 from navigation.valhalla import LocalLaneSequenceResolver, ProviderRoute, _wgs84_to_local_enu
 
 from .map_image import MAP_IMAGE_VERSION, bev_layers, register
+from .osm_lane_graph import OSMNode, OSMWay, build_osm_lane_graph
+from .osm_pbf_region import clip_cells, subregion
 
 L2D_NAVIGATION_VERSION = "l2d_osm_navigation_v1"
 ANCHOR_PERIOD_NS = 500_000_000
@@ -66,8 +69,50 @@ def episode_lane_graph(payload: Mapping[str, Any], trace_enu_m: np.ndarray, marg
     return {**payload, "lanes": trimmed, "semantic": semantic}
 
 
-def _yaw_enu(heading_deg_cw_from_north: np.ndarray) -> np.ndarray:
-    return np.unwrap(np.radians(90.0 - np.asarray(heading_deg_cw_from_north, dtype=np.float64)))
+def _grid_yaw(longitudes: np.ndarray, latitudes: np.ndarray, headings_deg_cw_from_north: np.ndarray, frame: MapFrame) -> np.ndarray:
+    """Ego yaw in the projected map frame, counter-clockwise from grid east.
+
+    GPS heading is measured from true north, while the lane graph lives in a
+    UTM grid whose north differs by the meridian convergence (up to about
+    2.4 degrees at a German zone edge). Projecting a point 10 m ahead along
+    the heading turns the heading into the grid frame exactly.
+    """
+    from pyproj import Geod
+
+    ahead_lon, ahead_lat, _ = Geod(ellps="WGS84").fwd(
+        longitudes, latitudes, np.asarray(headings_deg_cw_from_north, dtype=np.float64), np.full(len(longitudes), 10.0)
+    )
+    here = _wgs84_to_local_enu(np.column_stack([latitudes, longitudes]), frame)
+    ahead = _wgs84_to_local_enu(np.column_stack([np.asarray(ahead_lat), np.asarray(ahead_lon)]), frame)
+    return np.unwrap(np.arctan2(ahead[:, 1] - here[:, 1], ahead[:, 0] - here[:, 0]))
+
+
+def episode_lane_graph_from_region(
+    nodes: Mapping[int, OSMNode],
+    ways: Iterable[OSMWay],
+    *,
+    longitudes_deg: np.ndarray,
+    latitudes_deg: np.ndarray,
+    region_sha256: str,
+    episode_id: str,
+) -> tuple[dict[str, Any], str]:
+    """One episode's lane graph, projected around the episode's first pose.
+
+    A per-episode origin keeps coordinates small and the UTM zone the
+    episode's own, which a single country-wide frame would not.
+    """
+    cells = clip_cells(zip(longitudes_deg, latitudes_deg), buffer_m=EPISODE_MAP_MARGIN_M)
+    near_nodes, near_ways = subregion(nodes, ways, cells)
+    graph = build_osm_lane_graph(
+        near_nodes,
+        near_ways,
+        origin_longitude_deg=round(float(longitudes_deg[0]), 6),
+        origin_latitude_deg=round(float(latitudes_deg[0]), 6),
+        map_version=f"l2d-osm-{region_sha256[:16]}",
+        provenance={"osm_region_sha256": region_sha256, "episode_id": str(episode_id)},
+    )
+    digest = hashlib.sha256(json.dumps(graph, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return graph, digest
 
 
 def _thinned(points: np.ndarray, step_m: float) -> np.ndarray:
@@ -123,7 +168,7 @@ class L2DEpisodeNavigation:
             projection=str(frame["projection"]),
         )
         self.positions = _wgs84_to_local_enu(np.column_stack([latitudes, longitudes]), self.frame)
-        self.yaws = _yaw_enu(headings_deg_cw_from_north)
+        self.yaws = _grid_yaw(longitudes, latitudes, headings_deg_cw_from_north, self.frame)
         self.lane_graph_sha256 = lane_graph_sha256
         self.adapter = OSMMapAdapter(episode_lane_graph(lane_graph, self.positions), source_sha256=lane_graph_sha256)
         self.navigation_map = self.adapter.extract()
