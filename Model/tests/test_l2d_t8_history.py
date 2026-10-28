@@ -17,7 +17,7 @@ def _dataset(states: np.ndarray) -> L2DDataset:
     dataset._source_hz = 10.0
     dataset._episode_ranges = {3: (100, 100 + len(states))}
     dataset._samples = [(3, 100 + 64)]
-    dataset._get_vehicle_states_window = lambda start, end: states
+    dataset._get_vehicle_states_window = lambda start, end: states  # type: ignore[method-assign,assignment]
     return dataset
 
 
