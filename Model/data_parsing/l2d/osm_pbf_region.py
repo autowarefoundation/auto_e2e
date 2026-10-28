@@ -15,7 +15,8 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from .osm_lane_graph import DRIVABLE_HIGHWAYS, OSMNode, OSMWay
+from .navigation_contract import DRIVABLE_HIGHWAYS, OSM_REGION_SCHEMA_VERSION
+from .osm_lane_graph import OSMNode, OSMWay
 
 CELL_DEG = 0.01
 # Node tags that become HD-map semantics; everything else is dropped.
@@ -94,9 +95,6 @@ def read_region(pbf_path: str | Path, cells: frozenset[tuple[int, int]]) -> tupl
         if len(refs) >= 2:
             complete.append(OSMWay(way.way_id, refs, way.tags))
     return nodes, sorted(complete, key=lambda way: way.way_id)
-
-
-OSM_REGION_SCHEMA_VERSION = "l2d_osm_region_v1"
 
 
 def region_bytes(
