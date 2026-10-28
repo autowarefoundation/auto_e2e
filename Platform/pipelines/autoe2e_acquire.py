@@ -243,8 +243,12 @@ def _plan_l2d(prefix: str, revision: str, split: str, units: List[str], osm_extr
         raise ValueError("L2D has only a train split")
     if not units:
         raise ValueError("L2D acquisition needs explicit episode ids")
-    if not osm_extract_url.startswith("https://") or not osm_extract_url.endswith(".osm.pbf"):
-        raise ValueError("L2D acquisition needs an https OSM .osm.pbf extract URL")
+    import re
+
+    # A dated extract (Geofabrik's "<region>-YYMMDD.osm.pbf") never changes;
+    # "-latest" does, so a rerun of the plan could fetch other bytes.
+    if re.fullmatch(r"https://[^\s]+-[0-9]{6}\.osm\.pbf", osm_extract_url) is None:
+        raise ValueError("L2D acquisition needs a dated https OSM extract URL (<region>-YYMMDD.osm.pbf)")
     upstream = UPSTREAM[AutoE2EDataset.L2D]
     meta = LeRobotDatasetMetadata(repo_id=upstream, revision=revision)
     meta_files = [
@@ -268,15 +272,21 @@ def _plan_l2d(prefix: str, revision: str, split: str, units: List[str], osm_extr
 
 
 def _download_https(url: str, target: Path) -> None:
+    """Download ``url`` and check it against the ``.md5`` the server publishes."""
+    import hashlib
     import urllib.request
 
+    with urllib.request.urlopen(f"{url}.md5", timeout=60) as response:
+        expected_md5 = response.read().decode().split()[0].lower()
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_name(f".{target.name}.partial")
+    digest = hashlib.md5(usedforsecurity=False)
     with urllib.request.urlopen(url, timeout=60) as response, partial.open("wb") as out:
-        expected = int(response.headers.get("Content-Length", "-1"))
-        shutil.copyfileobj(response, out, length=16 * 1024**2)
-    if expected >= 0 and partial.stat().st_size != expected:
-        raise IOError(f"short download of {url}: {partial.stat().st_size} of {expected} bytes")
+        while chunk := response.read(16 * 1024**2):
+            digest.update(chunk)
+            out.write(chunk)
+    if digest.hexdigest() != expected_md5:
+        raise IOError(f"{url}: MD5 {digest.hexdigest()} differs from the published {expected_md5}")
     partial.replace(target)
 
 
