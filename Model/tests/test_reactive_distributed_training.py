@@ -237,8 +237,9 @@ def _write_source(
         "source_revision": "test-revision",
         "total_samples": sum(shard_counts),
     }
+    # Every Reactive stage, L2D included, now packs T8 camera context.
     if (
-        include_bev
+        (include_bev or dataset == L2D_DATASET_NAME)
         if include_direct_camera_context is None
         else include_direct_camera_context
     ):
@@ -1178,6 +1179,12 @@ def test_fixed_step_resume_matches_uninterrupted_training(
     monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(dist, "get_rank", lambda: 0)
     monkeypatch.setattr(dist, "get_world_size", lambda: 1)
+    # Resume bookkeeping is under test, not the camera context every stage
+    # now requires, so the toy batches carry none.
+    import training.reactive_stage_runner as reactive_stage_runner_module
+
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_front_projection", lambda *_a, **_k: None)
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_camera_history", lambda *_a, **_k: (None, None))
     monkeypatch.setattr(
         reactive_stage_module,
         "reactive_gradient_parameter_groups",
@@ -2634,13 +2641,14 @@ def test_canary_dataset_uses_production_loader_contract(
     assert sample["map_context"].shape == (1, 14, 450, 300)
     assert sample["route_mask"].shape == (1, 2, 450, 300)
     assert bool(sample["bev_segmentation_available"][0]) is expected_bev
+    # Every stage, L2D included, carries the native front view and T8 history.
+    assert sample["front_camera_tile"].shape == (
+        1,
+        3,
+        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    )
     if stage is ReactiveTrainingStage.NUPLAN_FULL:
-        assert sample["front_camera_tile"].shape == (
-            1,
-            3,
-            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
-            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
-        )
         statistics = discover_bev_training_statistics(
             [str(dataset)],
             val_fraction=0.5,
@@ -2662,7 +2670,7 @@ def test_canary_dataset_uses_production_loader_contract(
             calibration_stream = archive.extractfile(calibration_member)
             assert calibration_stream is not None
             calibration = json.loads(calibration_stream.read())
-        assert "projection" not in calibration
+        assert calibration["history_projection"]["reference_frame"] == "current_ego"
 
 
 def test_t8_temporal_batch_norm_is_synchronized():
