@@ -165,7 +165,8 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
     tar_digests.update({a["archive_id"]: nuplan_archive_digest(a) for a in snapshot.get("archives", [])})
     bucket = units_uri.split("/")[2]
     views_key = lineage["views"]["key"]
-    if sha256_bytes(s3.get_object(Bucket=bucket, Key=views_key)["Body"].read()) != lineage["views"]["sha256"]:
+    views_payload = s3.get_object(Bucket=bucket, Key=views_key)["Body"].read()
+    if sha256_bytes(views_payload) != lineage["views"]["sha256"]:
         raise ValueError(f"{dataset_id}: partition views manifest changed")
     labels_checked = 0
     for unit in units:
@@ -186,9 +187,21 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
         region_payload = _s3_bytes(s3, region["uri"], region["version_id"])
         if sha256_bytes(region_payload) != region["sha256"]:
             raise ValueError(f"{dataset_id}: OSM region changed")
-        osm_digest = json.loads(region_payload)["provenance"]["osm_unit_digest"]
-        if tar_digests.get("osm") != osm_digest:
+        provenance = json.loads(region_payload)["provenance"]
+        if tar_digests.get("osm") != provenance["osm_unit_digest"]:
             raise ValueError(f"{dataset_id}: OSM region was not built from the snapshot's OSM extract")
+        if provenance["snapshot_manifest_sha256"] != lineage["raw"]["snapshot_manifest_sha256"]:
+            raise ValueError(f"{dataset_id}: OSM region was built for another snapshot")
+        # Every packed partition must have rendered from this same region.
+        for partition in json.loads(views_payload)["partitions"]:
+            manifest_payload = s3.get_object(Bucket=bucket, Key=f"{partition['prefix']}/manifest.json")["Body"].read()
+            if sha256_bytes(manifest_payload) != partition["manifest_sha256"]:
+                raise ValueError(f"{dataset_id}: partition {partition['partition_id']} manifest changed")
+            manifest = json.loads(manifest_payload)
+            if int(manifest.get("total_samples", 0)) and (
+                (manifest.get("navigation") or {}).get("osm_region_sha256") != region["sha256"]
+            ):
+                raise ValueError(f"{dataset_id}: partition {partition['partition_id']} used another OSM region")
     return {"dataset_id": dataset_id, "units": len(units), "labels": labels_checked}
 
 
