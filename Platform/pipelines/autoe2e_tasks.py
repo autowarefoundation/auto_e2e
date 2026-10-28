@@ -619,8 +619,7 @@ def unit_rows(plan: SourcePlan, labels: List[UnitLabel], views: List[PartitionVi
         label = by_label.get(unit.unit_id)
         if plan.labels and label is None:
             raise ValueError(f"{unit.unit_id}: labelled dataset is missing its label set")
-        # nuPlan archives and L2D files and meta feed several partitions.
-        shared = plan.dataset in (AutoE2EDataset.NUPLAN, AutoE2EDataset.L2D)
+        shared = plan.shared_units
         if not shared and unit.unit_id not in partition_of:
             raise ValueError(f"{unit.unit_id}: no partition view packed this unit")
         rows.append(UnitLineage(
