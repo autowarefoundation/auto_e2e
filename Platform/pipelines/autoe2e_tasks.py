@@ -16,7 +16,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Dict, List
+from typing import Annotated, Dict, List, Optional
 
 from flytekit import BatchSize, PodTemplate, Resources, Secret, current_context, dynamic, map_task, task
 from flytekit.types.directory import FlyteDirectory
@@ -31,6 +31,7 @@ from Platform.pipelines.autoe2e_adapters import (
 from Platform.pipelines.autoe2e_dataset import (
     AutoE2EDataset,
     DatasetSpec,
+    ManifestRef,
     canonical_dataset_spec,
     partition_view_prefix,
     units_key,
@@ -323,6 +324,93 @@ def label_unit(
     )
 
 
+# Clip the OSM extract this far around every pose and route waypoint: far
+# wider than the raster, so map matching keeps the connectivity of the roads
+# an episode drives near.
+L2D_OSM_REGION_BUFFER_M = 1000.0
+
+
+def _l2d_track_points(raw_root: Path, episodes: List[int]) -> list:
+    """Every (longitude, latitude) of the episodes' poses and route waypoints."""
+    import numpy as np
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    wanted = set(episodes)
+    points = []
+    seen = set()
+    for path in sorted((raw_root / "data").rglob("*.parquet")):
+        table = pq.read_table(
+            path, columns=["episode_index", "observation.state.vehicle", "observation.state.waypoints"],
+        )
+        table = table.filter(pc.is_in(table["episode_index"], value_set=pa.array(sorted(wanted))))
+        if not table.num_rows:
+            continue
+        seen.update(int(e) for e in pc.unique(table["episode_index"]).to_pylist())
+        vehicle = np.asarray(table["observation.state.vehicle"].to_pylist(), dtype=np.float64)
+        points.extend(zip(vehicle[:, 4], vehicle[:, 3]))
+        for route in table["observation.state.waypoints"].to_pylist():
+            points.extend((float(lon), float(lat)) for lon, lat in route)
+    if seen != wanted:
+        raise ValueError(f"L2D data files lack episodes {sorted(wanted - seen)[:5]}")
+    return points
+
+
+@task(
+    container_image=DATA_PREP_IMAGE,
+    pod_template=_DO_NOT_DISRUPT,
+    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="60Gi"),
+    limits=Resources(cpu="4", mem="16Gi", ephemeral_storage="60Gi"),
+    retries=2,
+    # Cached by the plan (which pins the snapshot), so every pack of a
+    # rebuilt dataset sees the same region bytes.
+    cache=True,
+    cache_version=f"l2d-osm-region-v1-{sha256_bytes(DATA_PREP_IMAGE.encode())[:16]}",
+)
+def build_l2d_osm_region(plan: SourcePlan, datasets_bucket: str) -> ManifestRef:
+    """Clip the snapshot's OSM extract to the episodes' tracks, once per plan."""
+    from data_parsing.l2d.osm_pbf_region import clip_cells, file_sha256, read_region, region_bytes
+
+    from Platform.pipelines.l2d_snapshot import L2D_OSM_UNIT
+
+    s3 = _s3()
+    by_id = {unit.unit_id: unit for unit in plan.units}
+    raw_root = Path(tempfile.mkdtemp(prefix="autoe2e-l2d-region-"))
+    data_units = sorted({u for partition in plan.partitions for u in partition if u.startswith("data.")})
+    materialize_units(s3, datasets_bucket, [by_id[u] for u in [L2D_OSM_UNIT, *data_units]], raw_root)
+    episodes = sorted(int(e) for group in plan.partition_groups for e in group)
+    points = _l2d_track_points(raw_root, episodes)
+    cells = clip_cells(points, buffer_m=L2D_OSM_REGION_BUFFER_M)
+    (pbf,) = sorted((raw_root / "osm").glob("*.osm.pbf"))
+    nodes, ways = read_region(pbf, cells)
+    payload = region_bytes(nodes, ways, provenance={
+        "snapshot_manifest_sha256": plan.snapshot_manifest_sha256,
+        "osm_unit_digest": by_id[L2D_OSM_UNIT].tar_digest,
+        "osm_extract": pbf.name,
+        "osm_extract_sha256": file_sha256(pbf),
+        "episodes": episodes,
+        "buffer_m": L2D_OSM_REGION_BUFFER_M,
+        "cell_count": len(cells),
+    })
+    digest = sha256_bytes(payload)
+    key = f"{plan.published_name}/osm-regions/{digest}.json"
+    _put_immutable(s3, bucket=datasets_bucket, key=key, payload=payload, content_type="application/json")
+    head = s3.head_object(Bucket=datasets_bucket, Key=key)
+    print(f"L2D OSM region: {len(ways)} ways, {len(nodes)} nodes, {len(payload)} bytes, sha256 {digest}")
+    return ManifestRef(uri=f"s3://{datasets_bucket}/{key}", version_id=str(head.get("VersionId") or "null"), sha256=digest)
+
+
+def _download_region(s3, ref: ManifestRef) -> Path:
+    bucket, key = _split_s3_uri(ref.uri)
+    payload = s3.get_object(Bucket=bucket, Key=key, VersionId=ref.version_id)["Body"].read()
+    if sha256_bytes(payload) != ref.sha256:
+        raise ValueError("OSM region differs from its pinned SHA-256")
+    path = Path(tempfile.mkdtemp(prefix="autoe2e-osm-")) / "region.json"
+    path.write_bytes(payload)
+    return path
+
+
 @task(
     container_image=DATA_PREP_IMAGE,
     pod_template=_DO_NOT_DISRUPT,
@@ -345,6 +433,7 @@ def pack_partition(
     label_uris: Dict[str, str],
     version: str,
     datasets_bucket: str,
+    osm_region: Optional[ManifestRef] = None,
 ) -> Annotated[FlyteDirectory, BatchSize(4)]:
     """Pack one partition from snapshot units (and their labels).
 
@@ -381,6 +470,12 @@ def pack_partition(
             download_prefix(s3, label_uris[unit_id], labels_root / unit_id)
         labels_dir = FlyteDirectory(str(labels_root))
     training = plan.split == "train"
+    groups = plan.partition_groups[partition_index] if plan.partition_groups else unit_ids
+    region = {}
+    if spec.dataset is AutoE2EDataset.L2D:
+        if osm_region is None:
+            raise ValueError("L2D packs need the OSM region")
+        region = {"osm_region_path": str(_download_region(s3, osm_region)), "osm_region_sha256": osm_region.sha256}
     return data_processing.task_function(
         raw_data=FlyteDirectory(str(raw_root)),
         dataset=Dataset[spec.dataset.name],
@@ -391,10 +486,11 @@ def pack_partition(
         episodes=0,
         world_model=training,
         reasoning_labels=labels_dir,
-        group_ids=list(unit_ids),
+        group_ids=list(groups),
         sample_limit=0,
         source_split=plan.split,
         data_role="training" if training else "benchmark",
+        **region,
     )
 
 
@@ -461,6 +557,7 @@ def commit_dataset(
     console_manifest_key: str,
     console_manifest_sha256: str,
     datasets_bucket: str,
+    osm_region: Optional[ManifestRef] = None,
 ) -> DatasetHandle:
     """Write views manifest, lineage, and finally the by-id index."""
     from Platform.pipelines.autoe2e_dataset import compute_dataset_id
@@ -515,6 +612,9 @@ def commit_dataset(
             "contracts": contracts,
             "image_digest": DATA_PREP_IMAGE,
             "git_commit": os.environ.get("AUTO_E2E_GIT_COMMIT", "unknown"),
+            **({} if osm_region is None else {"osm_region": {
+                "uri": osm_region.uri, "version_id": osm_region.version_id, "sha256": osm_region.sha256,
+            }}),
         },
         # Only values that a rerun reproduces: the write-once lineage must come
         # out byte-identical when a failed commit is retried.
@@ -550,7 +650,8 @@ def unit_rows(plan: SourcePlan, labels: List[UnitLabel], views: List[PartitionVi
         label = by_label.get(unit.unit_id)
         if plan.labels and label is None:
             raise ValueError(f"{unit.unit_id}: labelled dataset is missing its label set")
-        shared = plan.dataset is AutoE2EDataset.NUPLAN
+        # nuPlan archives and L2D files and meta feed several partitions.
+        shared = plan.dataset in (AutoE2EDataset.NUPLAN, AutoE2EDataset.L2D)
         if not shared and unit.unit_id not in partition_of:
             raise ValueError(f"{unit.unit_id}: no partition view packed this unit")
         rows.append(UnitLineage(
@@ -607,10 +708,13 @@ def build_dataset(
             concurrency=label_concurrency,
         )(unit=plan.units)
         label_uris = committed_label_uris(labels=labels)
+    osm_region = None
+    if plan.dataset is AutoE2EDataset.L2D:
+        osm_region = build_l2d_osm_region(plan=plan, datasets_bucket=datasets_bucket)
     packed = map_task(
         functools.partial(
             pack_partition, spec=spec, plan=plan, label_uris=label_uris,
-            version=handle.version, datasets_bucket=datasets_bucket,
+            version=handle.version, datasets_bucket=datasets_bucket, osm_region=osm_region,
         ),
         concurrency=pack_concurrency,
     )(partition_index=list(range(len(plan.partitions))))
@@ -649,5 +753,5 @@ def build_dataset(
         spec=spec, plan=plan, version=handle.version, reserved_by=handle.reserved_by,
         labels=labels, views=views,
         console_manifest_key=console_key, console_manifest_sha256=console_sha,
-        datasets_bucket=datasets_bucket,
+        datasets_bucket=datasets_bucket, osm_region=osm_region,
     )
