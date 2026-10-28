@@ -21,6 +21,7 @@ from Platform.pipelines.autoe2e_snapshot import iter_units, parse_manifest
 KITSCENES_UPSTREAM = "KIT-MRT/KITScenes-Multimodal"
 L2D_UPSTREAM = "yaak-ai/L2D"
 NUPLAN_SNAPSHOT_SCHEMA = "nuplan_raw_snapshot_v1"
+L2D_MAX_PARTITION_EPISODES = 64
 _KITSCENES_SPLIT_NAMES = {"train": "kitscenes", "val": "kitscenes-val", "test": "kitscenes-test"}
 _NUPLAN_PACK_PARAMS = {"total_scenario_limit", "samples_per_shard", "max_rejection_fraction", "group_limit"}
 _NUPLAN_PACK_DEFAULTS = {
@@ -189,13 +190,21 @@ def read_l2d(spec: DatasetSpec, payload: bytes) -> SourcePlan:
         raise ValueError("L2D has no reasoning labels")
     if spec.unit_limit:
         raise ValueError("L2D units are shared files; acquire fewer episodes instead of unit_limit")
+    from reactive_training_contracts import REACTIVE_CAMERA_IMAGE_SIZE
+
+    # Reactive training reads only the 512 px camera contract; failing here
+    # beats packing and publishing a dataset that training then rejects.
+    if spec.image_size != REACTIVE_CAMERA_IMAGE_SIZE:
+        raise ValueError(f"L2D packs need image_size {REACTIVE_CAMERA_IMAGE_SIZE}")
+    partition_size = _int_param(spec.pack_params, "partition_size", 1, minimum=1)
+    # A pack holds every decoded row of its partition in memory (about
+    # 130 MB per episode), so the 64 GiB pack pod bounds the partition.
+    if partition_size > L2D_MAX_PARTITION_EPISODES:
+        raise ValueError(f"partition_size must be at most {L2D_MAX_PARTITION_EPISODES} episodes")
     manifest, units = _unit_plan(spec, payload, upstream=L2D_UPSTREAM)
     if L2D_OSM_UNIT not in {unit.unit_id for unit in units}:
         raise ValueError("L2D snapshot has no OSM extract unit")
-    partitions, groups = partition_plan(
-        manifest["provenance"],
-        _int_param(spec.pack_params, "partition_size", 1, minimum=1),
-    )
+    partitions, groups = partition_plan(manifest["provenance"], partition_size)
     known = {unit.unit_id for unit in units}
     missing = sorted({unit for partition in partitions for unit in partition} - known)
     if missing:
