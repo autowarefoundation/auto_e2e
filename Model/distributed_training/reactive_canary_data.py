@@ -155,74 +155,81 @@ def _sample_members(
     for view in range(num_views):
         image_size = (
             REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-            if (
-                stage is ReactiveTrainingStage.NUPLAN_FULL
-                and view == REACTIVE_FRONT_CAMERA_INDEX
-            )
+            if view == REACTIVE_FRONT_CAMERA_INDEX
             else REACTIVE_CAMERA_IMAGE_SIZE
         )
         members[f"cam_{view}.jpg"] = _jpeg_bytes(
             color,
             image_size=image_size,
         )
-    if stage is ReactiveTrainingStage.NUPLAN_FULL:
-        projection = np.zeros((num_views, 3, 4), dtype=np.float32)
-        projection[:, 0, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
-        projection[:, 1, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
-        projection[:, 2, 3] = 1.0
-        front_projection = projection[
-            REACTIVE_FRONT_CAMERA_INDEX:
-            REACTIVE_FRONT_CAMERA_INDEX + 1
-        ].copy()
-        front_projection[:, :2] *= (
+    # Every stage packs the T8 camera context its frozen BEVFormer needs.
+    camera_geometry = (
+        "rectified_pinhole"
+        if stage is ReactiveTrainingStage.NUPLAN_FULL
+        else "pinhole"
+    )
+    projection = np.zeros((num_views, 3, 4), dtype=np.float32)
+    projection[:, 0, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
+    projection[:, 1, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
+    projection[:, 2, 3] = 1.0
+    front_projection = projection[
+        REACTIVE_FRONT_CAMERA_INDEX:
+        REACTIVE_FRONT_CAMERA_INDEX + 1
+    ].copy()
+    front_projection[:, :2] *= (
+        REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+        / REACTIVE_CAMERA_IMAGE_SIZE
+    )
+    history_projection = np.repeat(
+        projection[None],
+        REACTIVE_BEVFORMER_HISTORY_FRAMES,
+        axis=0,
+    )
+    for history_index in range(
+        REACTIVE_BEVFORMER_HISTORY_FRAMES
+    ):
+        for view in range(num_views):
+            members[
+                f"bev_hist_{history_index}_cam_{view}.jpg"
+            ] = _jpeg_bytes(
+                color,
+                image_size=REACTIVE_CAMERA_IMAGE_SIZE,
+            )
+    members["calib.json"] = canonical_json_bytes({
+        "camera_order": (
+            list(NUPLAN_CAMERA_CHANNELS)
+            if stage is ReactiveTrainingStage.NUPLAN_FULL
+            else list(L2D_CAMERA_NAMES)
+        ),
+        "camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
+        "dataset": dataset,
+        "front_camera_image_size": (
             REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-            / REACTIVE_CAMERA_IMAGE_SIZE
-        )
-        history_projection = np.repeat(
-            projection[None],
-            REACTIVE_BEVFORMER_HISTORY_FRAMES,
-            axis=0,
-        )
-        for history_index in range(
-            REACTIVE_BEVFORMER_HISTORY_FRAMES
-        ):
-            for view in range(num_views):
-                members[
-                    f"bev_hist_{history_index}_cam_{view}.jpg"
-                ] = _jpeg_bytes(
-                    color,
-                    image_size=REACTIVE_CAMERA_IMAGE_SIZE,
-                )
-        members["calib.json"] = canonical_json_bytes({
-            "camera_order": list(NUPLAN_CAMERA_CHANNELS),
-            "camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
-            "dataset": dataset,
-            "front_camera_image_size": (
-                REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-            ),
-            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
-            "front_projection": {
-                "matrix": front_projection.tolist(),
-                "type": "rectified_pinhole",
-            },
-            "geometry_type": "rectified_pinhole",
-            "history_projection": {
-                "matrix": history_projection.tolist(),
-                "reference_frame": "current_ego",
-                "type": "rectified_pinhole",
-            },
-            "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
-            "projection": {
-                "matrix": projection.tolist(),
-                "type": "rectified_pinhole",
-            },
-            "temporal_frame_interval_us": (
-                REACTIVE_BEVFORMER_FRAME_INTERVAL_US
-            ),
-            "temporal_frame_offsets": list(
-                REACTIVE_BEVFORMER_FRAME_OFFSETS
-            ),
-        })
+        ),
+        "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+        "front_projection": {
+            "matrix": front_projection.tolist(),
+            "type": camera_geometry,
+        },
+        "geometry_type": camera_geometry,
+        "history_projection": {
+            "matrix": history_projection.tolist(),
+            "reference_frame": "current_ego",
+            "type": camera_geometry,
+        },
+        "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
+        "projection": {
+            "matrix": projection.tolist(),
+            "type": camera_geometry,
+        },
+        "temporal_frame_interval_us": (
+            REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+        ),
+        "temporal_frame_offsets": list(
+            REACTIVE_BEVFORMER_FRAME_OFFSETS
+        ),
+    })
+    if stage is ReactiveTrainingStage.NUPLAN_FULL:
         bev = np.zeros((8, height, width), dtype=np.float32)
         bev[0] = map_context[0]
         bev[1, 100:350:20, 110:190] = 1.0
@@ -243,14 +250,6 @@ def _sample_members(
                 valid,
             )
         )
-    else:
-        members["calib.json"] = canonical_json_bytes({
-            "camera_order": list(L2D_CAMERA_NAMES),
-            "camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
-            "dataset": dataset,
-            "geometry_type": "pinhole",
-            "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
-        })
     return members
 
 
@@ -365,20 +364,19 @@ def write_reactive_canary_dataset(
         "source_revision": REACTIVE_CANARY_SCHEMA_VERSION,
         "total_samples": sample_index,
     }
-    if stage is ReactiveTrainingStage.NUPLAN_FULL:
-        manifest.update({
-            "front_camera_image_size": (
-                REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-            ),
-            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
-            "temporal_frame_interval_us": (
-                REACTIVE_BEVFORMER_FRAME_INTERVAL_US
-            ),
-            "temporal_frame_offsets": list(
-                REACTIVE_BEVFORMER_FRAME_OFFSETS
-            ),
-        })
-    else:
+    manifest.update({
+        "front_camera_image_size": (
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+        ),
+        "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+        "temporal_frame_interval_us": (
+            REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+        ),
+        "temporal_frame_offsets": list(
+            REACTIVE_BEVFORMER_FRAME_OFFSETS
+        ),
+    })
+    if stage is not ReactiveTrainingStage.NUPLAN_FULL:
         manifest["projection"] = l2d_projection_spec(
             REACTIVE_CAMERA_IMAGE_SIZE
         )
