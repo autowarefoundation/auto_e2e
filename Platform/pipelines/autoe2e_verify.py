@@ -179,6 +179,16 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
             if sha256_bytes(s3.get_object(Bucket=bucket, Key=key)["Body"].read()) != unit.label_record_sha256:
                 raise ValueError(f"{dataset_id}: label record of {unit.unit_id} changed")
             labels_checked += 1
+    region = lineage["pack"].get("osm_region")
+    if region is not None:
+        # The region is derived from the snapshot's OSM unit; it must still be
+        # the bytes every pack rendered navigation from, and name that unit.
+        region_payload = _s3_bytes(s3, region["uri"], region["version_id"])
+        if sha256_bytes(region_payload) != region["sha256"]:
+            raise ValueError(f"{dataset_id}: OSM region changed")
+        osm_digest = json.loads(region_payload)["provenance"]["osm_unit_digest"]
+        if tar_digests.get("osm") != osm_digest:
+            raise ValueError(f"{dataset_id}: OSM region was not built from the snapshot's OSM extract")
     return {"dataset_id": dataset_id, "units": len(units), "labels": labels_checked}
 
 
