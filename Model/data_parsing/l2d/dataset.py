@@ -642,7 +642,15 @@ def track_points(data_root: str | Path, episodes: list[int], *, decimals: int = 
 
     wanted = set(int(episode) for episode in episodes)
     seen: set[int] = set()
-    chunks = []
+    points = np.empty((0, 2))
+
+    def flat(column) -> np.ndarray:
+        # Nested lists flatten in Arrow without building Python objects.
+        values = column.combine_chunks()
+        while pa.types.is_list(values.type) or pa.types.is_fixed_size_list(values.type):
+            values = values.flatten()
+        return values.to_numpy(zero_copy_only=False).astype(np.float64)
+
     for path in sorted(Path(data_root, "data").rglob("*.parquet")):
         table = pq.read_table(
             path, columns=["episode_index", "observation.state.vehicle", "observation.state.waypoints"],
@@ -651,14 +659,14 @@ def track_points(data_root: str | Path, episodes: list[int], *, decimals: int = 
         if not table.num_rows:
             continue
         seen.update(int(e) for e in pc.unique(table["episode_index"]).to_pylist())
-        vehicle = np.asarray(table["observation.state.vehicle"].to_pylist(), dtype=np.float64)
-        routes = np.asarray(table["observation.state.waypoints"].to_pylist(), dtype=np.float64).reshape(-1, 2)
-        chunks.append(np.round(vehicle[:, [_LONGITUDE, _LATITUDE]], decimals))
-        chunks.append(np.round(routes, decimals))
+        vehicle = flat(table["observation.state.vehicle"]).reshape(table.num_rows, -1)
+        routes = flat(table["observation.state.waypoints"]).reshape(-1, 2)
+        batch = np.round(np.concatenate([vehicle[:, [_LONGITUDE, _LATITUDE]], routes]), decimals)
+        # Deduplicate per file, so memory follows distinct places, not frames.
+        points = np.unique(np.concatenate([points, batch[np.isfinite(batch).all(axis=1)]]), axis=0)
     if seen != wanted:
         raise ValueError(f"L2D data files lack episodes {sorted(wanted - seen)[:5]}")
-    points = np.concatenate(chunks)
-    return np.unique(points[np.isfinite(points).all(axis=1)], axis=0)
+    return points
 
 
 def _planar_pose(state: np.ndarray, origin: np.ndarray) -> np.ndarray:
