@@ -15,8 +15,8 @@ from data_parsing.l2d.episode_navigation import L2DEpisodeNavigation, episode_la
 from navigation.artifacts import decode_sample_navigation  # noqa: E402
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY, MapChannel, RouteChannel  # noqa: E402
 
-from test_l2d_map_image import _image  # noqa: E402
-from test_osm_lane_graph import DLAT, DLON, ORIGIN_LAT, ORIGIN_LON, _graph  # noqa: E402
+from tests.test_l2d_map_image import _image  # noqa: E402
+from tests.test_osm_lane_graph import DLAT, DLON, ORIGIN_LAT, ORIGIN_LON, _graph  # noqa: E402
 
 
 @pytest.fixture(scope="module")
