@@ -763,7 +763,8 @@ def test_row_decode_initializer_matches_worker_abi():
     (
         (workflows.Dataset.L2D, True, False, True, True),
         (workflows.Dataset.L2D, True, True, False, True),
-        (workflows.Dataset.L2D, True, False, False, False),
+        # L2D always needs parent assembly for its OSM navigation.
+        (workflows.Dataset.L2D, True, False, False, True),
         (workflows.Dataset.KITSCENES, True, False, False, True),
         (
             workflows.Dataset.NVIDIA_PHYSICAL_AI,
