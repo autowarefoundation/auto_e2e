@@ -7,7 +7,6 @@ import io
 import json
 import pickle
 import sqlite3
-from pathlib import Path
 import sys
 import tarfile
 import types
