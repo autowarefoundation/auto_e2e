@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 from typing import Any, Iterator, TypedDict
 
 import torch
@@ -54,6 +55,10 @@ from .egomotion import (
 from .world_model_windows import required_margins, stride_for_hz
 
 logger = logging.getLogger(__name__)
+
+# observation.state.vehicle columns read as pose; the only place they are
+# interpreted (egomotion.py documents the full vector).
+_HEADING, _LATITUDE, _LONGITUDE = 1, 3, 4
 
 _VISUAL_HISTORY_DIM = 896
 
@@ -450,9 +455,9 @@ class L2DDataset(Dataset):
         states = self._get_vehicle_states_window(ep_start, ep_end)
         timestamps = self._get_timestamps_window(ep_start, ep_end)
         return (
-            states[:, 4].astype(np.float64),
-            states[:, 3].astype(np.float64),
-            states[:, 1].astype(np.float64),
+            states[:, _LONGITUDE].astype(np.float64),
+            states[:, _LATITUDE].astype(np.float64),
+            states[:, _HEADING].astype(np.float64),
             timestamps,
         )
 
@@ -553,3 +558,35 @@ class L2DDataset(Dataset):
             sample["future_frames"] = future_frames
 
         return sample
+
+
+def track_points(data_root: str | Path, episodes: list[int], *, decimals: int = 4) -> np.ndarray:
+    """Distinct ``[longitude, latitude]`` of the episodes' poses and route waypoints.
+
+    Reads the LeRobot parquet files directly, so no video is opened. Points
+    are rounded to ``decimals`` degrees (about 10 m) and deduplicated, which
+    keeps the result small however many frames the episodes have.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    wanted = set(int(episode) for episode in episodes)
+    seen: set[int] = set()
+    chunks = []
+    for path in sorted(Path(data_root, "data").rglob("*.parquet")):
+        table = pq.read_table(
+            path, columns=["episode_index", "observation.state.vehicle", "observation.state.waypoints"],
+        )
+        table = table.filter(pc.is_in(table["episode_index"], value_set=pa.array(sorted(wanted))))
+        if not table.num_rows:
+            continue
+        seen.update(int(e) for e in pc.unique(table["episode_index"]).to_pylist())
+        vehicle = np.asarray(table["observation.state.vehicle"].to_pylist(), dtype=np.float64)
+        routes = np.asarray(table["observation.state.waypoints"].to_pylist(), dtype=np.float64).reshape(-1, 2)
+        chunks.append(np.round(vehicle[:, [_LONGITUDE, _LATITUDE]], decimals))
+        chunks.append(np.round(routes, decimals))
+    if seen != wanted:
+        raise ValueError(f"L2D data files lack episodes {sorted(wanted - seen)[:5]}")
+    points = np.concatenate(chunks)
+    return np.unique(points[np.isfinite(points).all(axis=1)], axis=0)
