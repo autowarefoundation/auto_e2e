@@ -132,3 +132,32 @@ def test_episode_graph_from_region_is_local_and_deterministic():
         nodes, ways, longitudes_deg=lon, latitudes_deg=lat, region_sha256="b" * 64, episode_id="3",
     )
     assert again_digest == digest and len(digest) == 64
+
+
+def test_pack_helper_builds_one_navigation_per_sampled_episode(rasterizer, tmp_path):
+    import hashlib
+
+    pytest.importorskip("flytekit")
+    from data_parsing.l2d.osm_lane_graph import OSMNode, OSMWay
+    from data_parsing.l2d.osm_pbf_region import region_bytes
+    from Platform.pipelines.workflows import _l2d_episode_navigation
+
+    nodes = {i: OSMNode(i, ORIGIN_LON + (i - 3) * 60.0 * DLON, ORIGIN_LAT) for i in range(1, 6)}
+    payload = region_bytes(nodes, [OSMWay(1, (1, 2, 3, 4, 5), {"highway": "secondary"})], provenance={})
+    path = tmp_path / "region.json"
+    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    class _Dataset:
+        def episode_track(self, episode):
+            lon, lat, heading, timestamps = _eastbound_drive()
+            return lon, lat, heading, timestamps
+
+    navigation, summary = _l2d_episode_navigation(
+        _Dataset(), {4, 2}, osm_region_path=str(path), osm_region_sha256=digest,
+    )
+    assert sorted(navigation) == [2, 4]
+    assert [record["episode_index"] for record in summary["episodes"]] == [2, 4]
+    assert summary["osm_region_sha256"] == digest and summary["route_valid_episodes"] == 2
+    with pytest.raises(ValueError, match="pinned"):
+        _l2d_episode_navigation(_Dataset(), {2}, osm_region_path=str(path), osm_region_sha256="0" * 64)
