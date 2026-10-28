@@ -75,3 +75,22 @@ def test_dead_reckoning_ignores_float32_gps_steps():
     # 35 frames at 10 m/s: the oldest pose is 35 m behind, on the axis.
     assert poses[0][:2, 3] == pytest.approx([-35.0, 0.0], abs=1e-6)
     assert np.allclose(poses[-1], np.eye(4))
+
+
+def test_track_points_read_the_real_l2d_parquet_schema(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from data_parsing.l2d.dataset import track_points
+
+    vehicle = [[36.0, 0.0, 0.0, 49.0, 8.4, 0.0, 0.0, 0.0], [36.0, 0.0, 0.0, 49.0001, 8.4, 0.0, 0.0, 0.0]]
+    waypoints = [[[8.4, 49.0002]] * 10, [[8.4, 49.0003]] * 10]
+    table = pa.table({
+        "episode_index": pa.array([7, 7], pa.int64()),
+        "observation.state.vehicle": pa.array(vehicle, pa.list_(pa.float32(), 8)),
+        "observation.state.waypoints": pa.array(waypoints, pa.large_list(pa.large_list(pa.float32()))),
+    })
+    (tmp_path / "data" / "chunk-000").mkdir(parents=True)
+    pq.write_table(table, tmp_path / "data" / "chunk-000" / "file-000.parquet")
+    points = track_points(tmp_path, [7])
+    assert points.shape == (4, 2)
+    assert points[:, 0] == pytest.approx([8.4] * 4)
