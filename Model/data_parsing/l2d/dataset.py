@@ -438,6 +438,24 @@ class L2DDataset(Dataset):
         path[:, 3] = timestamps
         return path
 
+    def episode_track(
+        self, episode_index: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return ``(longitude, latitude, heading, timestamp_ns)`` per frame.
+
+        Unlike :meth:`episode_path`, timestamps stay exact int64 nanoseconds,
+        which navigation needs for its 500 ms anchor grid.
+        """
+        ep_start, ep_end = self._episode_ranges[episode_index]
+        states = self._get_vehicle_states_window(ep_start, ep_end)
+        timestamps = self._get_timestamps_window(ep_start, ep_end)
+        return (
+            states[:, 4].astype(np.float64),
+            states[:, 3].astype(np.float64),
+            states[:, 1].astype(np.float64),
+            timestamps,
+        )
+
     def sample_pose_records(self) -> Iterator[dict[str, Any]]:
         """Yield exact per-sample pose rows for the partition geo parquet."""
         by_episode: dict[int, tuple[np.ndarray, np.ndarray]] = {}
