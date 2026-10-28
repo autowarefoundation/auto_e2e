@@ -96,3 +96,39 @@ def test_registered_map_image_adds_road_surface_osm_leaves_out(rasterizer):
     assert metadata["map_image_residual_px"] < 3.0
     assert (with_image[MapChannel.DRIVABLE_AREA] >= without[MapChannel.DRIVABLE_AREA]).all()
     assert metadata["map_image_drivable_iou"] is not None
+
+
+def test_grid_yaw_removes_meridian_convergence():
+    from data_parsing.l2d.episode_navigation import _grid_yaw
+    from navigation.contracts import MapFrame
+
+    # 12.0 E is 3 degrees east of the EPSG:25832 central meridian: grid north
+    # is rotated about 2.3 degrees from true north there.
+    frame = MapFrame(frame_id="t", origin_latitude_deg=50.0, origin_longitude_deg=12.0, projection="EPSG:25832 local ENU")
+    lon, lat = np.asarray([12.0, 12.0]), np.asarray([50.0, 50.0])
+    yaw = _grid_yaw(lon, lat, np.asarray([0.0, 90.0]), frame)
+    convergence = np.degrees(np.pi / 2 - yaw[0])
+    assert 2.0 < abs(convergence) < 2.6
+    # A true-north heading and a true-east heading stay 90 degrees apart.
+    assert np.degrees(yaw[0] - yaw[1]) == pytest.approx(90.0, abs=0.05)
+
+
+def test_episode_graph_from_region_is_local_and_deterministic():
+    from data_parsing.l2d.episode_navigation import episode_lane_graph_from_region
+    from data_parsing.l2d.osm_lane_graph import OSMNode, OSMWay
+
+    nodes = {i: OSMNode(i, ORIGIN_LON + (i - 1) * 100.0 * DLON, ORIGIN_LAT) for i in range(1, 5)}
+    nodes[9] = OSMNode(9, ORIGIN_LON + 0.5, ORIGIN_LAT)
+    nodes[10] = OSMNode(10, ORIGIN_LON + 0.501, ORIGIN_LAT)
+    ways = [OSMWay(1, (1, 2, 3, 4), {"highway": "secondary"}), OSMWay(2, (9, 10), {"highway": "primary"})]
+    lon, lat, _, _ = _eastbound_drive()
+    graph, digest = episode_lane_graph_from_region(
+        nodes, ways, longitudes_deg=lon, latitudes_deg=lat, region_sha256="b" * 64, episode_id="3",
+    )
+    assert {lane["osm_way_id"] for lane in graph["lanes"]} == {1}
+    assert graph["frame"]["origin_longitude_deg"] == pytest.approx(lon[0], abs=1e-6)
+    assert graph["provenance"]["osm_region_sha256"] == "b" * 64
+    again, again_digest = episode_lane_graph_from_region(
+        nodes, ways, longitudes_deg=lon, latitudes_deg=lat, region_sha256="b" * 64, episode_id="3",
+    )
+    assert again_digest == digest and len(digest) == 64
