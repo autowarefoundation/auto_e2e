@@ -26,6 +26,7 @@ Usage
 
 from __future__ import annotations
 
+import functools
 import logging
 import sys
 from pathlib import Path
@@ -349,7 +350,27 @@ class L2DDataset(Dataset):
         rows = [frame + offset * stride for offset in REACTIVE_BEVFORMER_FRAME_OFFSETS[:-1]]
         if len(rows) != REACTIVE_BEVFORMER_HISTORY_FRAMES or rows[0] < 0:
             raise IndexError("L2D T8 history leaves the episode")
+        # Row arithmetic assumes no dropped frames; check the clock as
+        # KITScenes does, 50 ms around each 0.5 s step.
+        _, timestamps = self._episode_numeric(ep_idx)
+        for offset, history_row in zip(REACTIVE_BEVFORMER_FRAME_OFFSETS[:-1], rows):
+            expected_ns = int(timestamps[frame]) + offset * REACTIVE_BEVFORMER_FRAME_INTERVAL_US * 1000
+            if abs(int(timestamps[history_row]) - expected_ns) > 50_000_000:
+                raise ValueError(f"L2D episode {ep_idx} T8 history frame {history_row} is off the 0.5 s grid")
         return [(ep_idx, history_row) for history_row in rows]
+
+    def _episode_numeric(self, ep_idx: int) -> tuple[np.ndarray, np.ndarray]:
+        """Vehicle states and timestamps of one episode, kept for the last episode.
+
+        Samples arrive in episode order, so one cached episode saves reading
+        the whole episode from Arrow again for every sample.
+        """
+        cached = getattr(self, "_numeric_cache", None)
+        if cached is None or cached[0] != ep_idx:
+            ep_start, ep_end = self._episode_ranges[ep_idx]
+            cached = (ep_idx, self._get_vehicle_states_window(ep_start, ep_end), self._get_timestamps_window(ep_start, ep_end))
+            self._numeric_cache = cached
+        return cached[1], cached[2]
 
     def bevformer_history_frame_ids(self, idx: int) -> list[list[str]]:
         """Shared-pool frame IDs of the seven T8 history rows."""
@@ -362,25 +383,24 @@ class L2DDataset(Dataset):
         """Current, native-front, and current-ego-aligned T8 projections.
 
         The same contract KITScenes writes. History cameras see the current
-        ego frame through the planar GPS motion between the two poses.
+        ego frame through the dead-reckoned planar motion between the poses.
         """
         from reactive_training_contracts import REACTIVE_FRONT_CAMERA_IMAGE_SIZE, REACTIVE_FRONT_CAMERA_INDEX
 
-        from .calibration import compute_l2d_projection_matrices
-
         ep_idx, row = self._samples[idx]
-        ep_start, ep_end = self._episode_ranges[ep_idx]
-        states = self._get_vehicle_states_window(ep_start, ep_end)
+        ep_start, _ = self._episode_ranges[ep_idx]
+        states, timestamps = self._episode_numeric(ep_idx)
         frame = row - ep_start
+        history_frames = [history_frame for _, history_frame in self.bevformer_history_rows(idx)]
         # K @ [R|t] of the current frame; a history camera sees a current-ego
         # point after moving it into that frame's ego: P @ history_from_current.
-        current = compute_l2d_projection_matrices(image_size).astype(np.float64)
-        world_from_current = _planar_pose(states[frame], states[frame])
+        current = _projection_matrices(image_size)
+        poses = _dead_reckoned_poses(states, timestamps, history_frames[0], frame)
         history_matrix = np.stack([
-            current @ (np.linalg.inv(_planar_pose(states[history_frame], states[frame])) @ world_from_current)
-            for _, history_frame in self.bevformer_history_rows(idx)
+            current @ np.linalg.inv(poses[history_frame - history_frames[0]])
+            for history_frame in history_frames
         ]).astype(np.float32)
-        front = compute_l2d_projection_matrices(REACTIVE_FRONT_CAMERA_IMAGE_SIZE)[REACTIVE_FRONT_CAMERA_INDEX:REACTIVE_FRONT_CAMERA_INDEX + 1]
+        front = _projection_matrices(REACTIVE_FRONT_CAMERA_IMAGE_SIZE)[REACTIVE_FRONT_CAMERA_INDEX:REACTIVE_FRONT_CAMERA_INDEX + 1]
         if not (np.isfinite(history_matrix).all() and np.isfinite(front).all()):
             raise ValueError("L2D T8 projections are non-finite")
         return {
@@ -669,17 +689,37 @@ def track_points(data_root: str | Path, episodes: list[int], *, decimals: int = 
     return points
 
 
-def _planar_pose(state: np.ndarray, origin: np.ndarray) -> np.ndarray:
-    """World-from-ego 4x4 of one vehicle state, in a tangent plane at ``origin``.
 
-    L2D has no height or attitude, so the motion between T8 frames is planar:
-    east and north from the GPS fix and yaw from the true-north heading.
+@functools.lru_cache(maxsize=4)
+def _projection_matrices(image_size: int) -> np.ndarray:
+    """The rig projection at one size; it reads and hashes the extrinsics YAML."""
+    from .calibration import compute_l2d_projection_matrices
+
+    matrices = compute_l2d_projection_matrices(image_size).astype(np.float64)
+    matrices.setflags(write=False)
+    return matrices
+
+
+def _dead_reckoned_poses(states: np.ndarray, timestamps_ns: np.ndarray, first: int, current: int) -> np.ndarray:
+    """Current-ego-from-ego poses of frames ``first..current`` by dead reckoning.
+
+    L2D stores latitude and longitude as float32, about 0.4 m steps in
+    Germany, which would shift a 10 m distant point by tens of pixels between
+    T8 frames. Speed and heading integrated at 10 Hz give the 3.5 s relative
+    motion smoothly; GPS is not needed over so short a span.
     """
-    earth_radius_m = 6_378_137.0
-    east = np.radians(float(state[_LONGITUDE]) - float(origin[_LONGITUDE])) * earth_radius_m * np.cos(np.radians(float(origin[_LATITUDE])))
-    north = np.radians(float(state[_LATITUDE]) - float(origin[_LATITUDE])) * earth_radius_m
-    yaw = np.radians(90.0 - float(state[_HEADING]))
-    pose = np.eye(4)
-    pose[:2, :2] = [[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]]
-    pose[:2, 3] = [east, north]
-    return pose
+    span = states[first:current + 1].astype(np.float64)
+    seconds = np.diff(timestamps_ns[first:current + 1].astype(np.int64)) / 1e9
+    speed = span[:, 0] / 3.6  # km/h to m/s
+    heading = np.radians(span[:, _HEADING])
+    # Trapezoidal steps in ENU, true-north heading clockwise.
+    step_speed = 0.5 * (speed[:-1] + speed[1:])
+    step_heading = heading[:-1] + 0.5 * np.angle(np.exp(1j * (heading[1:] - heading[:-1])))
+    east = np.concatenate([[0.0], np.cumsum(step_speed * seconds * np.sin(step_heading))])
+    north = np.concatenate([[0.0], np.cumsum(step_speed * seconds * np.cos(step_heading))])
+    yaw = np.pi / 2 - heading
+    world_from_ego = np.tile(np.eye(4), (len(span), 1, 1))
+    world_from_ego[:, 0, 0], world_from_ego[:, 0, 1] = np.cos(yaw), -np.sin(yaw)
+    world_from_ego[:, 1, 0], world_from_ego[:, 1, 1] = np.sin(yaw), np.cos(yaw)
+    world_from_ego[:, 0, 3], world_from_ego[:, 1, 3] = east, north
+    return np.linalg.inv(world_from_ego[-1]) @ world_from_ego
