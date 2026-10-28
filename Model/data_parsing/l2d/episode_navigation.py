@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 
 from navigation.artifacts import encode_sample_navigation
-from navigation.contracts import Maneuver, MapFrame
+from navigation.contracts import Maneuver, MapFrame, TransitionType
 from navigation.geometry import MapChannel, RouteChannel
 from navigation.osm_adapter import OSMMapAdapter
 from navigation.rasterizer import EgoPose, NativeNavigationRasterizer, NavigationRaster
@@ -207,8 +207,19 @@ class L2DEpisodeNavigation:
         self.positions = _wgs84_to_local_enu(np.column_stack([latitudes, longitudes]), self.frame)
         self.yaws = _grid_yaw(longitudes, latitudes, headings_deg_cw_from_north, self.frame)
         self.lane_graph_sha256 = lane_graph_sha256
-        self.adapter = OSMMapAdapter(episode_lane_graph(lane_graph, self.positions), source_sha256=lane_graph_sha256)
+        trimmed = episode_lane_graph(lane_graph, self.positions)
+        # The route and its provenance must name the graph actually rendered.
+        self.rendered_lane_graph_sha256 = hashlib.sha256(
+            json.dumps(trimmed, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        self.adapter = OSMMapAdapter(trimmed, source_sha256=self.rendered_lane_graph_sha256)
         self.navigation_map = self.adapter.extract()
+        # Junction octagons as (centre, circumradius), for turn detection.
+        self._intersections = []
+        for polygon in self.navigation_map.intersection_polygons:
+            points = np.asarray(polygon.points_enu_m, dtype=np.float64)[:, :2]
+            center = points.mean(axis=0)
+            self._intersections.append((center, float(np.linalg.norm(points - center, axis=1).max())))
         thinned = _thinned(self.positions, TRACE_STEP_M)
         self.route = LocalLaneSequenceResolver(self.adapter).resolve(
             ProviderRoute(
@@ -234,6 +245,12 @@ class L2DEpisodeNavigation:
         for values in (longitudes, latitudes, np.asarray(headings_deg_cw_from_north, dtype=np.float64), self.timestamps):
             digest.update(np.ascontiguousarray(values).tobytes())
         self.episode_navigation_sha256 = digest.hexdigest()
+
+    def _at_intersection(self, point: np.ndarray) -> bool:
+        return any(
+            float(np.linalg.norm(point - center)) <= radius
+            for center, radius in self._intersections
+        )
 
     def _pose(self, frame_idx: int) -> EgoPose:
         return EgoPose(
@@ -304,16 +321,22 @@ class L2DEpisodeNavigation:
         # its vertices (as KITScenes measures it).
         active = min(range(len(sequence)), key=lambda index: _point_to_polyline_distance(position, sequence[index].centerline_enu_m))
         # OSM lanes end at junctions, so a turn is the heading change from
-        # one route lane to the next, within the lookahead.
+        # one route lane to its successor, read only where that successor
+        # starts inside an intersection: two ways meeting end to end mid-curve
+        # are not a junction. A lane change runs alongside, so it adds no
+        # distance to the lookahead.
         maneuver = Maneuver.STRAIGHT
         travelled = _distance_along(sequence[active].centerline_enu_m, position)
         for current, following in zip(sequence[active:], sequence[active + 1:]):
             if travelled > MANEUVER_LOOKAHEAD_M:
                 break
-            turn = Maneuver(turn_maneuver(_end_heading(current.centerline_enu_m, at_end=True), _end_heading(following.centerline_enu_m, at_end=False)))
-            if turn is not Maneuver.STRAIGHT:
-                maneuver = turn
-                break
+            if following.transition_from_previous is not TransitionType.FOLLOW:
+                continue
+            if self._at_intersection(current.centerline_enu_m[-1, :2]):
+                turn = Maneuver(turn_maneuver(_end_heading(current.centerline_enu_m, at_end=True), _end_heading(following.centerline_enu_m, at_end=False)))
+                if turn is not Maneuver.STRAIGHT:
+                    maneuver = turn
+                    break
             travelled += float(np.linalg.norm(np.diff(following.centerline_enu_m[:, :2], axis=0), axis=1).sum())
         x_forward, _ = self.rasterizer.geometry.pixel_center_grids()
         ahead = (x_forward >= 0.0) & (x_forward <= MANEUVER_LOOKAHEAD_M)
@@ -343,6 +366,7 @@ class L2DEpisodeNavigation:
                 "map_source": "osm_lane_graph+l2d_map_image",
                 "l2d_navigation_version": L2D_NAVIGATION_VERSION,
                 "osm_lane_graph_sha256": self.lane_graph_sha256,
+                "rendered_lane_graph_sha256": self.rendered_lane_graph_sha256,
                 "episode_navigation_sha256": self.episode_navigation_sha256,
                 "map_image_version": MAP_IMAGE_VERSION,
                 "map_image_registered": fusion.registered,
