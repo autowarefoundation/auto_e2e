@@ -2653,7 +2653,7 @@ def data_processing(
                 current_row = (ep_idx_s, row_s - ep_start_s)
             sample_cur_rows[si] = current_row
             all_rows.add(current_row)
-            if dataset == Dataset.KITSCENES:
+            if dataset in (Dataset.KITSCENES, Dataset.L2D):
                 for row_t in ds.bevformer_history_rows(si):
                     all_rows.add(row_t)
             if world_model:
@@ -2770,7 +2770,7 @@ def data_processing(
                 members["window_index.json"] = json.dumps(ids).encode()
                 has_wm = True
 
-            if dataset == Dataset.KITSCENES:
+            if dataset in (Dataset.KITSCENES, Dataset.L2D):
                 history_ids = ds_asm.bevformer_history_frame_ids(si)
                 missing_history_ids = sorted(
                     frame_id
@@ -2780,7 +2780,7 @@ def data_processing(
                 )
                 if missing_history_ids:
                     raise ValueError(
-                        "KITScenes T8 history is missing frame-pool members: "
+                        f"{dataset.value} T8 history is missing frame-pool members: "
                         f"{missing_history_ids[:8]}"
                     )
                 members["bev_history_index.json"] = json.dumps(
@@ -2816,8 +2816,16 @@ def data_processing(
                         )
                         has_map = True
                 elif dataset == Dataset.L2D:
+                    if not isinstance(row_extras, dict):
+                        raise ValueError("L2D current row lacks its front view")
+                    members[
+                        f"cam_{REACTIVE_FRONT_CAMERA_INDEX}.jpg"
+                    ] = row_extras["front_camera_native_jpeg"]
+                    members["front_camera_fpn.jpg"] = row_extras[
+                        "front_camera_fpn_jpeg"
+                    ]
                     map_rgb = None
-                    if row_extras is not None:
+                    if row_extras["map_png"] is not None:
                         members["map.jpg"] = row_extras["map_jpeg"]
                         from PIL import Image
 
@@ -2908,7 +2916,7 @@ def data_processing(
                     separators=(",", ":"),
                     sort_keys=True,
                 ).encode("ascii")
-                if dataset == Dataset.KITSCENES
+                if dataset in (Dataset.KITSCENES, Dataset.L2D)
                 else calib_bytes
             )
 
@@ -3112,17 +3120,17 @@ def data_processing(
                 "camera_slots": camera_slots if sample_count else None,
                 "front_camera_index": (
                     REACTIVE_FRONT_CAMERA_INDEX
-                    if sample_count and dataset == Dataset.KITSCENES
+                    if sample_count and dataset in (Dataset.KITSCENES, Dataset.L2D)
                     else None
                 ),
                 "front_camera_image_size": (
                     REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-                    if sample_count and dataset == Dataset.KITSCENES
+                    if sample_count and dataset in (Dataset.KITSCENES, Dataset.L2D)
                     else None
                 ),
                 "front_camera_fpn_image_size": (
                     REACTIVE_CAMERA_IMAGE_SIZE
-                    if sample_count and dataset == Dataset.KITSCENES
+                    if sample_count and dataset in (Dataset.KITSCENES, Dataset.L2D)
                     else None
                 ),
                 "has_map": bool(sample_count) and has_map,
