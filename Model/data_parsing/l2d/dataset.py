@@ -667,7 +667,9 @@ def track_points(data_root: str | Path, episodes: list[int], *, decimals: int = 
     def flat(column) -> np.ndarray:
         # Nested lists flatten in Arrow without building Python objects.
         values = column.combine_chunks()
-        while pa.types.is_list(values.type) or pa.types.is_fixed_size_list(values.type):
+        # Real L2D waypoints are large_list<large_list<float>>, vehicle a
+        # fixed_size_list<float>[8].
+        while pa.types.is_list(values.type) or pa.types.is_large_list(values.type) or pa.types.is_fixed_size_list(values.type):
             values = values.flatten()
         return values.to_numpy(zero_copy_only=False).astype(np.float64)
 
