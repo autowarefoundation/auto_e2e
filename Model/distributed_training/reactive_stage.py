@@ -467,13 +467,33 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
                 "KITScenes fine-tuning requires the frozen Epoch 5 nuPlan "
                 "trajectory and route parent profile"
             )
+    elif stage is ReactiveTrainingStage.L2D_CONTINUATION and parent_profile:
+        # L2D continues the same frozen nuPlan parent that KITScenes
+        # fine-tunes from. L2D packs carry no BEV segmentation targets.
+        if (
+            training_scope is not ReactiveTrainingScope.MULTITASK
+            or not bool(config.get("freeze_bevformer", False))
+            or float(config["bev_weight"]) != 0.0
+            or parent_profile != "nuplan_trajectory_route_v1"
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                parent_checkpoint_sha256,
+            )
+            is None
+            or parent_checkpoint_epoch < 1
+        ):
+            raise ValueError(
+                "L2D continuation from a profiled parent requires the "
+                "frozen nuPlan trajectory and route parent profile"
+            )
     elif (
         parent_profile
         or parent_checkpoint_sha256
         or parent_checkpoint_epoch
-    ):
+    ) and stage is not ReactiveTrainingStage.L2D_CONTINUATION:
         raise ValueError(
-            "parent checkpoint profile fields are reserved for KITScenes"
+            "parent checkpoint profile fields are reserved for KITScenes "
+            "and L2D continuation"
         )
     is_pretrained = config.get("is_pretrained")
     allow_random_init = config.get(
@@ -596,16 +616,21 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
         # nuPlan parent for a few steps; the parent contract above still holds.
         # It reads the whole corpus: the frozen validation split exists only
         # there, and the worker checks its exact sample identity.
-        kitscenes_finetune_smoke = (
-            stage is ReactiveTrainingStage.KITSCENES_FINETUNE
+        continuation_smoke = (
+            stage
+            in {
+                ReactiveTrainingStage.KITSCENES_FINETUNE,
+                ReactiveTrainingStage.L2D_CONTINUATION,
+            }
             and bool(parent_uri)
         )
-        if not bounded or not (nuplan_bev_smoke or kitscenes_finetune_smoke):
+        if not bounded or not (nuplan_bev_smoke or continuation_smoke):
             raise ValueError(
                 "single-worker smoke must be a one-epoch, 2-16 step, "
                 "batch-one pretrained run with no resume or Capacity Block: "
                 "either nuPlan BEV-only over at most two sources without a "
-                "parent, or KITScenes fine-tuning from its nuPlan parent"
+                "parent, or KITScenes or L2D continuation from its nuPlan "
+                "parent"
             )
 
 
