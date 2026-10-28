@@ -2937,7 +2937,7 @@ def data_processing(
             ] = l2d_map_image_registered
 
     else:
-        # Per-sample decode path (imitation-only L2D, NVIDIA, or empty
+        # Per-sample decode path (NVIDIA, or an empty
         # partition).
         pack_workers = _row_decode_worker_count(dataset, len(idx_list))
         print(f"Packing {len(idx_list)} samples, legacy mode "
