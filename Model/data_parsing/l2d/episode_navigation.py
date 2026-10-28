@@ -27,18 +27,17 @@ from navigation.rasterizer import EgoPose, NativeNavigationRasterizer, Navigatio
 from navigation.supervision import build_route_supervision
 from navigation.valhalla import LocalLaneSequenceResolver, ProviderRoute, _wgs84_to_local_enu
 
-from .map_image import MAP_IMAGE_VERSION, bev_layers, register
+from .map_image import bev_layers, register
+from .navigation_contract import (
+    ANCHOR_PERIOD_NS,
+    EPISODE_MAP_MARGIN_M,
+    L2D_NAVIGATION_VERSION,
+    MAP_IMAGE_VERSION,
+    MANEUVER_LOOKAHEAD_M,
+    TRACE_STEP_M,
+)
 from .osm_lane_graph import build_osm_lane_graph, turn_maneuver
 from .osm_pbf_region import RegionIndex, clip_cells
-
-L2D_NAVIGATION_VERSION = "l2d_osm_navigation_v1"
-ANCHOR_PERIOD_NS = 500_000_000
-MANEUVER_LOOKAHEAD_M = 100.0
-# Lanes within this distance of the episode trace are kept for the episode map.
-EPISODE_MAP_MARGIN_M = 250.0
-# The route matcher compares every trace point with every lane, so the trace
-# is thinned to one point per this many metres.
-TRACE_STEP_M = 4.0
 
 
 def episode_lane_graph(payload: Mapping[str, Any], trace_enu_m: np.ndarray, margin_m: float = EPISODE_MAP_MARGIN_M) -> dict[str, Any]:
