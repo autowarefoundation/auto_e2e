@@ -118,8 +118,8 @@ def register(
 
     The tiles are north-up, so in a projected frame their rotation is known:
     ``expected_rotation_rad`` is minus the grid angle of true east at the
-    ego (the meridian convergence, about one degree in Germany). Scale varies with the renderer's zoom, so it is searched; the
-    hypothesis that lands the most waypoints on detected dots is refined by
+    ego (the meridian convergence, about one degree in Germany). Scale
+    varies with the renderer's zoom, so it is searched; the hypothesis that lands the most waypoints on detected dots is refined by
     least squares and must keep the expected rotation. Ranking dots by
     distance from the ego does not work on real tiles, where the nearest
     waypoint hides under the ego marker and other blue map features add
@@ -137,9 +137,12 @@ def register(
     for rotation in expected_rotation_rad + np.radians(np.arange(-_ROTATION_TOLERANCE_DEG, _ROTATION_TOLERANCE_DEG + 1e-9, 0.5)):
         for scale in _SCALE_GRID:
             transform = scale * complex(math.cos(rotation), math.sin(rotation))
-            inliers, _ = _matches(transform, metric, pixel_dots, _SEARCH_TOLERANCE_PX)
-            if best is None or len(inliers) > best[0]:
-                best = (len(inliers), transform)
+            # Count distinct dots: evenly spaced dots also fit half the
+            # scale, with two waypoints landing on every dot.
+            _, nearest = _matches(transform, metric, pixel_dots, _SEARCH_TOLERANCE_PX)
+            score = len(set(nearest.tolist()))
+            if best is None or score > best[0]:
+                best = (score, transform)
     assert best is not None
     transform = best[1]
     for tolerance in (_SEARCH_TOLERANCE_PX, _MAX_RESIDUAL_PX):
