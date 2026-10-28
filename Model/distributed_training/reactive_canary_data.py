@@ -380,6 +380,23 @@ def write_reactive_canary_dataset(
         manifest["projection"] = l2d_projection_spec(
             REACTIVE_CAMERA_IMAGE_SIZE
         )
+    if stage is not ReactiveTrainingStage.NUPLAN_FULL:
+        # The L2D stage requires the frame-pool archive its packs carry; the
+        # canary keeps its history as direct members, so one placeholder
+        # frame satisfies the manifest contract.
+        payload = _jpeg_bytes((0, 0, 0), image_size=REACTIVE_CAMERA_IMAGE_SIZE)
+        archive_path = output / "frame_pool.tar"
+        with tarfile.open(archive_path, "w") as archive:
+            member = tarfile.TarInfo("canary-placeholder.jpg")
+            member.size = len(payload)
+            member.mtime = 0
+            archive.addfile(member, io.BytesIO(payload))
+        manifest.update({
+            "frame_pool_archive": archive_path.name,
+            "frame_pool_archive_schema": "frame_pool_archive_v1",
+            "frame_pool_archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+            "frame_pool_frame_count": 1,
+        })
     (output / "manifest.json").write_text(
         json.dumps(
             manifest,
