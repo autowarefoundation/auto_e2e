@@ -467,13 +467,21 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
                 "KITScenes fine-tuning requires the frozen Epoch 5 nuPlan "
                 "trajectory and route parent profile"
             )
-    elif stage is ReactiveTrainingStage.L2D_CONTINUATION and parent_profile:
+    elif stage is ReactiveTrainingStage.L2D_CONTINUATION and (
+        parent_profile
+        or parent_checkpoint_sha256
+        or parent_checkpoint_epoch
+    ):
         # L2D continues the same frozen nuPlan parent that KITScenes
         # fine-tunes from. L2D packs carry no BEV segmentation targets.
         if (
             training_scope is not ReactiveTrainingScope.MULTITASK
             or not bool(config.get("freeze_bevformer", False))
+            or float(config["trajectory_weight"]) <= 0.0
             or float(config["bev_weight"]) != 0.0
+            or float(config["route_weight"]) <= 0.0
+            or config.get("is_pretrained") is not True
+            or config.get("allow_random_bevformer_init") is not False
             or parent_profile != "nuplan_trajectory_route_v1"
             or re.fullmatch(
                 r"[0-9a-f]{64}",
@@ -490,7 +498,7 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
         parent_profile
         or parent_checkpoint_sha256
         or parent_checkpoint_epoch
-    ) and stage is not ReactiveTrainingStage.L2D_CONTINUATION:
+    ):
         raise ValueError(
             "parent checkpoint profile fields are reserved for KITScenes "
             "and L2D continuation"
