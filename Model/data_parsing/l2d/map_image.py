@@ -17,7 +17,6 @@ import math
 
 import numpy as np
 
-from .navigation_contract import MAP_IMAGE_VERSION
 
 # Carto road fills, motorway to residential and service. The light greys of
 # parking and living streets sit within JPEG noise of the land background
