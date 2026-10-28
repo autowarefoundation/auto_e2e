@@ -159,7 +159,8 @@ manifest last. Rerunning it rewrites nothing.
 |---|---|---|---|
 | KITScenes train | scene | `kitscenes/raw-snapshots/6fde0034…/` | the 533 `raw_uri` prefixes of Full Run `a5nk56zsbcg7g6npjfpt` in the Flyte artifacts bucket, tarred in-region (1.75 TB, 14.47 million objects become 533 tars). No Hub access |
 | nuPlan | archive | `nuplan/raw-snapshots/nuplan-v1.1-complete/nuplan-v1.1-complete-20260809/` | already exists. Its 341 archives are uncompressed tar despite the `.zip` name; only the index is added |
-| L2D, KITScenes val and test | episode, scene | none yet | the first `wf_acquire_raw_snapshot` run is the only Hub access |
+| L2D | one upstream file, all of `meta/`, and the OSM extract | `l2d/raw-snapshots/1e7578b1…/` | the first `wf_acquire_raw_snapshot` run downloads the episodes' files from the Hub and one dated Geofabrik extract pinned by a caller-given SHA-256 |
+| KITScenes val and test | scene | `kitscenes-val-hub` | the first `wf_acquire_raw_snapshot` run is the only Hub access |
 
 ### 4.2 Labels
 
@@ -230,11 +231,11 @@ ETag. Any mismatch fails the execution.
 
 | | KITScenes | nuPlan | L2D |
 |---|---|---|---|
-| `acquire_task` | HF download of one scene | `acquire_nuplan_archive` | HF download of one episode |
-| `label_task` | `generate_reasoning_labels` | `None` | `generate_reasoning_labels` |
+| `acquire_task` | HF download of one scene | `acquire_nuplan_archive` | HF download of one file, `meta/`, or the OSM extract |
+| `label_task` | `generate_reasoning_labels` | `None` | `None` |
 | Partition | one scene | one sensor group (43 for train) | `pack_params["partition_size"]` episodes |
 | `pack_task` | `data_processing` | `pack_nuplan_snapshot_reactive_dataset` | `data_processing` |
-| `pack_params` | none | `total_scenario_limit`, `samples_per_shard`, `max_rejection_fraction` | `partition_size`, `osm_graph_snapshot` |
+| `pack_params` | none | `total_scenario_limit`, `samples_per_shard`, `max_rejection_fraction` | `partition_size` |
 | Validation split | frozen holdout `kitscenes_train_dev_v4.json` | hash buckets of the log id | hash buckets |
 
 Pack tasks read only the members their partition needs. A nuPlan pack no
@@ -247,12 +248,37 @@ The code that fetches metadata from the Hub today
 `Model/data_parsing/kit_scenes/source.py`, and the KITScenes test direct
 pack) reads the same files from the snapshot instead.
 
-L2D is out of scope for this pipeline. L2D has no HD map: it ships an RGB
-map image (640x360) and ten GPS route waypoints, while the Reactive contract
-needs the 14-channel semantic map that only an OSM graph snapshot can supply
-for L2D. The L2D adapter therefore rejects every spec with that reason, and
-L2D support is left to a separate change that either wires an OSM snapshot
-into the packer or adds an image-map Reactive path.
+### 4.4.1 L2D navigation
+
+L2D has no HD map. It ships a 640x360 north-up OpenStreetMap tile per frame
+and ten GPS route waypoints, while the Reactive contract needs the 14 map
+channels and 2 route channels of nuPlan and KITScenes. They are rebuilt from
+two sources:
+
+| Source | Channels |
+|---|---|
+| OSM lane graph (`osm_lane_graph.py`): drivable ways split at junctions into directed lanes with boundaries, successors, neighbours, and levels; traffic signals, stop signs, and crossings become signals, stop lines, and crosswalks | all 14, through the shared `OSMMapAdapter` and native rasterizer |
+| The dataset's map tile, registered by fitting its route dots to the waypoints at the known north-up rotation (`map_image.py`) | road surface added to `DRIVABLE_AREA`, footprint to `KNOWN_MAP_AREA` |
+
+The route is matched from the recorded trace onto the lane graph, rendered on
+the 500 ms anchor grid and warped to each frame, as KITScenes does. Members
+are the same four KITScenes writes, so the loader reads every dataset alike.
+
+Bytes and identity:
+
+| Artifact | Where | Identity |
+|---|---|---|
+| OSM extract | the snapshot's `osm` unit | tar digest in the snapshot manifest |
+| OSM region (ways near every pose and waypoint, 1 km buffer) | `l2d/osm-regions/<sha256>.json`, built once per plan by `build_l2d_osm_region` | its SHA-256 in every partition manifest and in the lineage `pack.osm_region`; `verify_lineage` rechecks both and the source unit |
+| Every rule that decides the bytes (buffers, margins, lane widths, highway set, versions) | `navigation_contract.py` | `L2D_NAVIGATION_CONTRACT`, part of the L2D `pack_version` and so of `dataset_id` |
+
+Each episode builds its own lane graph from the region with its own UTM
+origin, and GPS heading is turned into grid yaw, since meridian convergence
+reaches several degrees across Germany.
+
+Open for scale (100k episodes): one region per dataset makes every pack read
+the whole region and the plan carry every episode's units. Per-partition
+subregions and an episode index outside the manifest would bound both.
 
 ## 5. `wf_autoe2e` Stages
 
