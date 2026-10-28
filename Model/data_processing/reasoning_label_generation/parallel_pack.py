@@ -248,13 +248,27 @@ def decode_row(
         l2d_cams[fid] = _jpeg(item[cam_name])
     extras = None
     if include_map:
+        from reactive_training_contracts import (
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            REACTIVE_FRONT_CAMERA_INDEX,
+        )
+
+        # Current rows also carry the native front view and its FPN tile,
+        # the T8 front contract the nuPlan parent was trained with.
+        front_id = f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{REACTIVE_FRONT_CAMERA_INDEX}"
+        extras = {
+            "map_jpeg": None,
+            "map_png": None,
+            "front_camera_native_jpeg": _jpeg(item[CAMERA_NAMES[REACTIVE_FRONT_CAMERA_INDEX]], REACTIVE_FRONT_CAMERA_IMAGE_SIZE),
+            "front_camera_fpn_jpeg": l2d_cams[front_id],
+        }
         map_tile = item[MAP_VIEW_NAME]
         mt = map_tile[0] if map_tile.ndim == 4 else map_tile
         if float(mt.abs().max()) > 0:
             # map.jpg is the resized tile the map encoder reads; the lossless
             # native tile is what navigation registers against, since JPEG
             # and resizing both shift the road colours it classifies.
-            extras = {"map_jpeg": _jpeg(mt), "map_png": _native_png(mt)}
+            extras.update(map_jpeg=_jpeg(mt), map_png=_native_png(mt))
     return (ep_idx, frame_index), l2d_cams, extras
 
 
