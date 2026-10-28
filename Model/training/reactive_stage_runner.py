@@ -819,6 +819,7 @@ def run_reactive_epoch(
     require_reactive_camera_context = objective.stage in {
         ReactiveTrainingStage.NUPLAN_FULL,
         ReactiveTrainingStage.KITSCENES_FINETUNE,
+        ReactiveTrainingStage.L2D_CONTINUATION,
     }
     training_policy = reactive_training_policy(objective.stage)
     model.train()
@@ -929,6 +930,7 @@ def evaluate_reactive_xy(
     require_reactive_camera_context = stage in {
         ReactiveTrainingStage.NUPLAN_FULL,
         ReactiveTrainingStage.KITSCENES_FINETUNE,
+        ReactiveTrainingStage.L2D_CONTINUATION,
     }
     was_training = model.training
     ade_sum = 0.0
@@ -1289,6 +1291,7 @@ def evaluate_reactive_multitask(
     require_reactive_camera_context = stage in {
         ReactiveTrainingStage.NUPLAN_FULL,
         ReactiveTrainingStage.KITSCENES_FINETUNE,
+        ReactiveTrainingStage.L2D_CONTINUATION,
     }
     was_training = model.training
     horizon_steps = {
