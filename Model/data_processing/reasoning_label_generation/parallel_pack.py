@@ -31,7 +31,6 @@ _RESIZE: Any = None
 _TO_PIL: Any = None
 _DATASET_VALUE: Any = None
 _CALIB_BYTES: Any = None
-_OSM_SNAPSHOT: Any = None
 
 
 def init_pack_worker(
@@ -41,15 +40,13 @@ def init_pack_worker(
     image_size: int,
     world_model: bool,
     calib_bytes: bytes,
-    osm_graph_snapshot_path: Optional[str] = None,
 ) -> None:
     """Build this process's raw dataset + resize transform once (reused per sample)."""
-    global _DS, _RESIZE, _TO_PIL, _DATASET_VALUE, _CALIB_BYTES, _OSM_SNAPSHOT
+    global _DS, _RESIZE, _TO_PIL, _DATASET_VALUE, _CALIB_BYTES
     from torchvision import transforms
 
     _DATASET_VALUE = dataset_value
     _CALIB_BYTES = calib_bytes
-    _OSM_SNAPSHOT = None
     _TO_PIL = transforms.ToPILImage()
     _RESIZE = transforms.Resize((image_size, image_size))
     if dataset_value == "nvidia/PhysicalAI-Autonomous-Vehicles":
@@ -79,12 +76,6 @@ def init_pack_worker(
         )
         _DS = L2DDataset(repo_id=dataset_value, episodes=l2d_episodes,
                          include_world_model_windows=world_model, root=raw_path)
-        if osm_graph_snapshot_path is not None:
-            from data_parsing.l2d import load_l2d_osm_graph_snapshot
-
-            _OSM_SNAPSHOT = load_l2d_osm_graph_snapshot(
-                osm_graph_snapshot_path
-            )
 
 
 def _jpeg(frame_tensor, output_size: int | None = None) -> bytes:
@@ -307,16 +298,6 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
     navigation_members = sample.get("navigation_members")
     if navigation_members is not None:
         members.update(navigation_members)
-    elif _DATASET_VALUE == "yaak-ai/L2D" and _OSM_SNAPSHOT is not None:
-        from data_parsing.l2d import l2d_reactive_navigation_members
-
-        members.update(
-            l2d_reactive_navigation_members(
-                _OSM_SNAPSHOT,
-                sample["route_waypoints_lon_lat"],
-                sample["pose_current"],
-            )
-        )
     else:
         map_tile = sample.get("map_tile")
         if map_tile is not None and float(map_tile.abs().max()) > 0:
@@ -352,7 +333,6 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
         TRAJECTORY_XY_MEMBER,
         encode_bev_segmentation,
         encode_trajectory_xy,
-        wgs84_future_to_ego_xy,
     )
 
     trajectory_xy = sample.get("trajectory_xy_m")
@@ -362,22 +342,6 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
             trajectory_xy,
             trajectory_valid,
         )
-    elif _OSM_SNAPSHOT is not None:
-        pose = sample.get("pose_current")
-        gps_future = sample.get("gps_future")
-        if pose is not None and gps_future is not None:
-            trajectory_xy, trajectory_valid = wgs84_future_to_ego_xy(
-                gps_future,
-                current_latitude_deg=float(pose["latitude_deg"]),
-                current_longitude_deg=float(pose["longitude_deg"]),
-                heading_deg_cw_from_north=float(
-                    pose["heading_deg_cw_from_north"]
-                ),
-            )
-            members[TRAJECTORY_XY_MEMBER] = encode_trajectory_xy(
-                trajectory_xy,
-                trajectory_valid,
-            )
 
     bev_target = sample.get("bev_segmentation_target")
     bev_valid = sample.get("bev_segmentation_valid")
