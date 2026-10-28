@@ -66,11 +66,13 @@ def read_region(pbf_path: str | Path, cells: frozenset[tuple[int, int]]) -> tupl
     path = str(pbf_path)
     near: set[int] = set()
     for item in osmium.FileProcessor(path, osmium.osm.NODE):
+        assert isinstance(item, osmium.osm.Node)
         if _cell(item.lon, item.lat) in cells:
             near.add(int(item.id))
     ways: list[OSMWay] = []
     referenced: set[int] = set()
     for item in osmium.FileProcessor(path, osmium.osm.WAY):
+        assert isinstance(item, osmium.osm.Way)
         if item.tags.get("highway") not in DRIVABLE_HIGHWAYS:
             continue
         refs = tuple(int(node.ref) for node in item.nodes)
@@ -80,6 +82,7 @@ def read_region(pbf_path: str | Path, cells: frozenset[tuple[int, int]]) -> tupl
         referenced.update(refs)
     nodes: dict[int, OSMNode] = {}
     for item in osmium.FileProcessor(path, osmium.osm.NODE):
+        assert isinstance(item, osmium.osm.Node)
         if item.id not in referenced:
             continue
         kept = {key: item.tags[key] for key in _POINT_TAG_KEYS if key in item.tags}
