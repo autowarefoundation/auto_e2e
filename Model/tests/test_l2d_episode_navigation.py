@@ -87,8 +87,7 @@ def test_registered_map_image_adds_road_surface_osm_leaves_out(rasterizer):
         ORIGIN_LON + (ego[0] + waypoints_east_north[:, 0]) * DLON,
         ORIGIN_LAT + (ego[1] + waypoints_east_north[:, 1]) * DLAT,
     ])
-    # The test image draws a road running along local north; rotate it to east.
-    image = _image(1.25, -np.pi / 2, waypoints_east_north[:, [1, 0]] * [1, -1])
+    image = _image(1.25, 0.0, waypoints_east_north, road_along_east=True)
     without = decode_sample_navigation(navigation.sample_members(frame))[0]
     members = navigation.sample_members(frame, map_image=image, waypoints_lon_lat=waypoint_lon_lat)
     with_image, _, metadata = decode_sample_navigation(members)
@@ -116,20 +115,22 @@ def test_grid_yaw_removes_meridian_convergence():
 def test_episode_graph_from_region_is_local_and_deterministic():
     from data_parsing.l2d.episode_navigation import episode_lane_graph_from_region
     from data_parsing.l2d.osm_lane_graph import OSMNode, OSMWay
+    from data_parsing.l2d.osm_pbf_region import RegionIndex
 
     nodes = {i: OSMNode(i, ORIGIN_LON + (i - 1) * 100.0 * DLON, ORIGIN_LAT) for i in range(1, 5)}
     nodes[9] = OSMNode(9, ORIGIN_LON + 0.5, ORIGIN_LAT)
     nodes[10] = OSMNode(10, ORIGIN_LON + 0.501, ORIGIN_LAT)
     ways = [OSMWay(1, (1, 2, 3, 4), {"highway": "secondary"}), OSMWay(2, (9, 10), {"highway": "primary"})]
     lon, lat, _, _ = _eastbound_drive()
+    region = RegionIndex(nodes, ways)
     graph, digest = episode_lane_graph_from_region(
-        nodes, ways, longitudes_deg=lon, latitudes_deg=lat, region_sha256="b" * 64, episode_id="3",
+        region, longitudes_deg=lon, latitudes_deg=lat, region_sha256="b" * 64, episode_id="3",
     )
     assert {lane["osm_way_id"] for lane in graph["lanes"]} == {1}
     assert graph["frame"]["origin_longitude_deg"] == pytest.approx(lon[0], abs=1e-6)
     assert graph["provenance"]["osm_region_sha256"] == "b" * 64
     again, again_digest = episode_lane_graph_from_region(
-        nodes, ways, longitudes_deg=lon, latitudes_deg=lat, region_sha256="b" * 64, episode_id="3",
+        region, longitudes_deg=lon, latitudes_deg=lat, region_sha256="b" * 64, episode_id="3",
     )
     assert again_digest == digest and len(digest) == 64
 
@@ -161,3 +162,14 @@ def test_pack_helper_builds_one_navigation_per_sampled_episode(rasterizer, tmp_p
     assert summary["osm_region_sha256"] == digest and summary["route_valid_episodes"] == 2
     with pytest.raises(ValueError, match="pinned"):
         _l2d_episode_navigation(_Dataset(), {2}, osm_region_path=str(path), osm_region_sha256="0" * 64)
+
+
+def test_junction_turns_come_from_consecutive_route_lanes():
+    from data_parsing.l2d.episode_navigation import _distance_along
+    from data_parsing.l2d.osm_lane_graph import turn_maneuver
+
+    assert turn_maneuver(0.0, np.pi / 2) == "left" and turn_maneuver(0.0, -np.pi / 2) == "right"
+    assert turn_maneuver(0.0, 0.2) == "straight" and turn_maneuver(0.0, np.pi) == "u_turn"
+    # Distance to the lane end is measured from the projection, not a vertex.
+    line = np.asarray([[0.0, 0.0], [400.0, 0.0]])
+    assert _distance_along(line, np.asarray([150.0, 2.0])) == pytest.approx(250.0)
