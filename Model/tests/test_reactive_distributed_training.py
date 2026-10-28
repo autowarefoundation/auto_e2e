@@ -255,7 +255,7 @@ def _write_source(
                 REACTIVE_BEVFORMER_FRAME_OFFSETS
             ),
         })
-    if dataset == KITSCENES_DATASET_NAME:
+    if dataset in (KITSCENES_DATASET_NAME, L2D_DATASET_NAME):
         frame_payload = b"frame-pool-test-jpeg"
         archive_path = root / "frame_pool.tar"
         with tarfile.open(archive_path, "w") as archive:
@@ -1026,7 +1026,8 @@ def test_rank_staging_verifies_tar_and_manifest_digests(tmp_path):
         str(source).encode()
     ).hexdigest()[:16]
     assert (staged / "manifest.json").is_file()
-    assert sorted(path.name for path in staged.glob("*.tar")) == [
+    # L2D stages its T8 frame pool next to the shard.
+    assert sorted(path.name for path in staged.glob("*.tar") if path.name != "frame_pool.tar") == [
         assignments[0][0].shard_name
     ]
     assert packed_sample_tar_paths(staged) == (
@@ -3395,6 +3396,11 @@ def test_stage_b_validation_emits_route_metrics(monkeypatch):
         route_loss=RouteReconstructionLoss(),
     )
     monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
+    # Route metrics are under test; the toy batch carries no T8 camera context.
+    import training.reactive_stage_runner as reactive_stage_runner_module
+
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_front_projection", lambda *_a, **_k: None)
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_camera_history", lambda *_a, **_k: (None, None))
 
     metrics = _evaluate_global_reactive(
         model,
@@ -3712,6 +3718,11 @@ def test_bev_only_validation_does_not_require_trajectory(monkeypatch):
         training_scope=ReactiveTrainingScope.BEV_ONLY,
     )
     monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
+    # Route metrics are under test; the toy batch carries no T8 camera context.
+    import training.reactive_stage_runner as reactive_stage_runner_module
+
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_front_projection", lambda *_a, **_k: None)
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_camera_history", lambda *_a, **_k: (None, None))
 
     metrics = _evaluate_global_reactive(
         model,
