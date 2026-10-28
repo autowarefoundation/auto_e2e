@@ -14,7 +14,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -28,8 +28,8 @@ from navigation.supervision import build_route_supervision
 from navigation.valhalla import LocalLaneSequenceResolver, ProviderRoute, _wgs84_to_local_enu
 
 from .map_image import MAP_IMAGE_VERSION, bev_layers, register
-from .osm_lane_graph import OSMNode, OSMWay, build_osm_lane_graph
-from .osm_pbf_region import clip_cells, subregion
+from .osm_lane_graph import build_osm_lane_graph, turn_maneuver
+from .osm_pbf_region import RegionIndex, clip_cells
 
 L2D_NAVIGATION_VERSION = "l2d_osm_navigation_v1"
 ANCHOR_PERIOD_NS = 500_000_000
@@ -47,7 +47,9 @@ def episode_lane_graph(payload: Mapping[str, Any], trace_enu_m: np.ndarray, marg
     high = trace_enu_m[:, :2].max(axis=0) + margin_m
 
     def inside(points: Any) -> bool:
-        values = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+        # OSM vertices can lie hundreds of metres apart, so a road crossing
+        # the box with both vertices outside it must still count.
+        values = _densified(np.asarray(points, dtype=np.float64).reshape(-1, 2), TRACE_STEP_M)
         return bool(np.any(np.all((values >= low) & (values <= high), axis=1)))
 
     lanes = [lane for lane in payload["lanes"] if inside(lane["centerline_enu_m"])]
@@ -69,6 +71,42 @@ def episode_lane_graph(payload: Mapping[str, Any], trace_enu_m: np.ndarray, marg
     return {**payload, "lanes": trimmed, "semantic": semantic}
 
 
+def _point_to_polyline_distance(point: np.ndarray, line: np.ndarray) -> float:
+    line = np.asarray(line, dtype=np.float64)[:, :2]
+    starts, vectors = line[:-1], line[1:] - line[:-1]
+    lengths = np.einsum("ij,ij->i", vectors, vectors)
+    t = np.clip(np.divide(np.einsum("ij,ij->i", point[:2] - starts, vectors), lengths, out=np.zeros_like(lengths), where=lengths > 0.0), 0.0, 1.0)
+    return float(np.linalg.norm(starts + t[:, None] * vectors - point[:2], axis=1).min())
+
+
+def _distance_along(line: np.ndarray, point: np.ndarray) -> float:
+    """Metres from ``point``'s projection on the polyline to its end."""
+    line = np.asarray(line, dtype=np.float64)[:, :2]
+    starts, vectors = line[:-1], line[1:] - line[:-1]
+    lengths = np.einsum("ij,ij->i", vectors, vectors)
+    t = np.clip(np.divide(np.einsum("ij,ij->i", point[:2] - starts, vectors), lengths, out=np.zeros_like(lengths), where=lengths > 0.0), 0.0, 1.0)
+    nearest = int(np.argmin(np.linalg.norm(starts + t[:, None] * vectors - point[:2], axis=1)))
+    segment_lengths = np.sqrt(lengths)
+    return float((1.0 - t[nearest]) * segment_lengths[nearest] + segment_lengths[nearest + 1:].sum())
+
+
+def _end_heading(line: np.ndarray, *, at_end: bool) -> float:
+    points = np.asarray(line, dtype=np.float64)[:, :2]
+    delta = points[-1] - points[-2] if at_end else points[1] - points[0]
+    return float(np.arctan2(delta[1], delta[0]))
+
+
+def _densified(points: np.ndarray, step_m: float) -> np.ndarray:
+    """The polyline with extra vertices so no gap exceeds ``step_m``."""
+    if len(points) < 2:
+        return points
+    parts = [points[:1]]
+    for start, end in zip(points[:-1], points[1:]):
+        count = max(1, int(np.ceil(np.linalg.norm(end - start) / step_m)))
+        parts.append(start + (end - start) * (np.arange(1, count + 1)[:, None] / count))
+    return np.concatenate(parts)
+
+
 def _grid_yaw(longitudes: np.ndarray, latitudes: np.ndarray, headings_deg_cw_from_north: np.ndarray, frame: MapFrame) -> np.ndarray:
     """Ego yaw in the projected map frame, counter-clockwise from grid east.
 
@@ -88,8 +126,7 @@ def _grid_yaw(longitudes: np.ndarray, latitudes: np.ndarray, headings_deg_cw_fro
 
 
 def episode_lane_graph_from_region(
-    nodes: Mapping[int, OSMNode],
-    ways: Iterable[OSMWay],
+    region: RegionIndex,
     *,
     longitudes_deg: np.ndarray,
     latitudes_deg: np.ndarray,
@@ -102,7 +139,7 @@ def episode_lane_graph_from_region(
     episode's own, which a single country-wide frame would not.
     """
     cells = clip_cells(zip(longitudes_deg, latitudes_deg), buffer_m=EPISODE_MAP_MARGIN_M)
-    near_nodes, near_ways = subregion(nodes, ways, cells)
+    near_nodes, near_ways = region.subregion(cells)
     graph = build_osm_lane_graph(
         near_nodes,
         near_ways,
@@ -167,6 +204,7 @@ class L2DEpisodeNavigation:
             origin_longitude_deg=float(frame["origin_longitude_deg"]),
             projection=str(frame["projection"]),
         )
+        self.longitudes, self.latitudes = longitudes, latitudes
         self.positions = _wgs84_to_local_enu(np.column_stack([latitudes, longitudes]), self.frame)
         self.yaws = _grid_yaw(longitudes, latitudes, headings_deg_cw_from_north, self.frame)
         self.lane_graph_sha256 = lane_graph_sha256
@@ -185,10 +223,18 @@ class L2DEpisodeNavigation:
             revision=1,
         )
         self.rasterizer = rasterizer
-        self._anchor_cache: dict[int, NavigationRaster] = {}
-        self.episode_navigation_sha256 = hashlib.sha256(
-            f"{L2D_NAVIGATION_VERSION}|{self.episode_id}|{lane_graph_sha256}|{self.route.route_id}".encode()
-        ).hexdigest()
+        # Samples arrive in frame order, so only the latest anchor is reused;
+        # keeping every anchor would hold about 8 MB per half second.
+        self._anchor: tuple[int, NavigationRaster] | None = None
+        # route_id hashes only the request, so the trace and the cut
+        # parameters enter the digest themselves.
+        digest = hashlib.sha256(
+            f"{L2D_NAVIGATION_VERSION}|{self.episode_id}|{lane_graph_sha256}|{self.route.route_id}|"
+            f"{EPISODE_MAP_MARGIN_M}|{TRACE_STEP_M}|{ANCHOR_PERIOD_NS}|".encode()
+        )
+        for values in (longitudes, latitudes, np.asarray(headings_deg_cw_from_north, dtype=np.float64), self.timestamps):
+            digest.update(np.ascontiguousarray(values).tobytes())
+        self.episode_navigation_sha256 = digest.hexdigest()
 
     def _pose(self, frame_idx: int) -> EgoPose:
         return EgoPose(
@@ -206,10 +252,11 @@ class L2DEpisodeNavigation:
 
     def raster_for_frame(self, frame_idx: int) -> NavigationRaster:
         anchor_idx = self.anchor_index(frame_idx)
-        anchor = self._anchor_cache.get(anchor_idx)
-        if anchor is None:
+        if self._anchor is not None and self._anchor[0] == anchor_idx:
+            anchor = self._anchor[1]
+        else:
             anchor = self.rasterizer.render(self.navigation_map, self.route, self._pose(anchor_idx))
-            self._anchor_cache[anchor_idx] = anchor
+            self._anchor = (anchor_idx, anchor)
         if anchor_idx == frame_idx:
             return anchor
         return self.rasterizer.warp(anchor, self._pose(frame_idx))
@@ -226,7 +273,12 @@ class L2DEpisodeNavigation:
         if map_image is None or waypoints_lon_lat is None:
             return raster, none
         waypoints = _wgs84_to_local_enu(np.column_stack([waypoints_lon_lat[:, 1], waypoints_lon_lat[:, 0]]), self.frame)
-        registration = register(map_image, waypoints[:, :2] - self.positions[frame_idx, :2])
+        # The tile is north-up, so it maps true east to the pixel row axis:
+        # its rotation is minus the grid angle of true east at the ego.
+        true_east = float(_grid_yaw(
+            self.longitudes[frame_idx:frame_idx + 1], self.latitudes[frame_idx:frame_idx + 1], np.asarray([90.0]), self.frame,
+        )[0])
+        registration = register(map_image, waypoints[:, :2] - self.positions[frame_idx, :2], expected_rotation_rad=-true_east)
         if registration is None:
             return raster, none
         forward, left = self.rasterizer.geometry.pixel_center_grids()
@@ -248,19 +300,22 @@ class L2DEpisodeNavigation:
                     "destination_visible": False, "current_route_lane_id": "",
                     "maneuver_lookahead_m": MANEUVER_LOOKAHEAD_M}
         position = self.positions[frame_idx, :2]
-        distances = [
-            float(np.min(np.linalg.norm(segment.centerline_enu_m[:, :2] - position, axis=1)))
-            for segment in self.route.lane_sequence
-        ]
-        active = int(np.argmin(distances))
-        maneuver, travelled = Maneuver.STRAIGHT, 0.0
-        for segment in self.route.lane_sequence[active:]:
+        sequence = self.route.lane_sequence
+        # OSM vertices are sparse, so the distance is to the polyline, not
+        # its vertices (as KITScenes measures it).
+        active = min(range(len(sequence)), key=lambda index: _point_to_polyline_distance(position, sequence[index].centerline_enu_m))
+        # OSM lanes end at junctions, so a turn is the heading change from
+        # one route lane to the next, within the lookahead.
+        maneuver = Maneuver.STRAIGHT
+        travelled = _distance_along(sequence[active].centerline_enu_m, position)
+        for current, following in zip(sequence[active:], sequence[active + 1:]):
             if travelled > MANEUVER_LOOKAHEAD_M:
                 break
-            if segment.maneuver in (Maneuver.LEFT, Maneuver.RIGHT, Maneuver.U_TURN, Maneuver.MERGE, Maneuver.EXIT):
-                maneuver = segment.maneuver
+            turn = Maneuver(turn_maneuver(_end_heading(current.centerline_enu_m, at_end=True), _end_heading(following.centerline_enu_m, at_end=False)))
+            if turn is not Maneuver.STRAIGHT:
+                maneuver = turn
                 break
-            travelled += float(np.linalg.norm(np.diff(segment.centerline_enu_m[:, :2], axis=0), axis=1).sum())
+            travelled += float(np.linalg.norm(np.diff(following.centerline_enu_m[:, :2], axis=0), axis=1).sum())
         x_forward, _ = self.rasterizer.geometry.pixel_center_grids()
         ahead = (x_forward >= 0.0) & (x_forward <= MANEUVER_LOOKAHEAD_M)
         return {
