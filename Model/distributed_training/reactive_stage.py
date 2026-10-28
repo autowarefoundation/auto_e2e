@@ -3285,6 +3285,7 @@ def _evaluate_global_reactive(
                     required=stage in {
                         ReactiveTrainingStage.NUPLAN_FULL,
                         ReactiveTrainingStage.KITSCENES_FINETUNE,
+                        ReactiveTrainingStage.L2D_CONTINUATION,
                     },
                 )
                 camera_history_tiles, history_projections = (
@@ -3295,6 +3296,7 @@ def _evaluate_global_reactive(
                         required=stage in {
                             ReactiveTrainingStage.NUPLAN_FULL,
                             ReactiveTrainingStage.KITSCENES_FINETUNE,
+                            ReactiveTrainingStage.L2D_CONTINUATION,
                         },
                     )
                 )
