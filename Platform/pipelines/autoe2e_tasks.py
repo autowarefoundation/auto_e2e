@@ -324,39 +324,6 @@ def label_unit(
     )
 
 
-# Clip the OSM extract this far around every pose and route waypoint: far
-# wider than the raster, so map matching keeps the connectivity of the roads
-# an episode drives near.
-L2D_OSM_REGION_BUFFER_M = 1000.0
-
-
-def _l2d_track_points(raw_root: Path, episodes: List[int]) -> list:
-    """Every (longitude, latitude) of the episodes' poses and route waypoints."""
-    import numpy as np
-    import pyarrow as pa
-    import pyarrow.compute as pc
-    import pyarrow.parquet as pq
-
-    wanted = set(episodes)
-    points = []
-    seen = set()
-    for path in sorted((raw_root / "data").rglob("*.parquet")):
-        table = pq.read_table(
-            path, columns=["episode_index", "observation.state.vehicle", "observation.state.waypoints"],
-        )
-        table = table.filter(pc.is_in(table["episode_index"], value_set=pa.array(sorted(wanted))))
-        if not table.num_rows:
-            continue
-        seen.update(int(e) for e in pc.unique(table["episode_index"]).to_pylist())
-        vehicle = np.asarray(table["observation.state.vehicle"].to_pylist(), dtype=np.float64)
-        points.extend(zip(vehicle[:, 4], vehicle[:, 3]))
-        for route in table["observation.state.waypoints"].to_pylist():
-            points.extend((float(lon), float(lat)) for lon, lat in route)
-    if seen != wanted:
-        raise ValueError(f"L2D data files lack episodes {sorted(wanted - seen)[:5]}")
-    return points
-
-
 @task(
     container_image=DATA_PREP_IMAGE,
     pod_template=_DO_NOT_DISRUPT,
@@ -370,6 +337,8 @@ def _l2d_track_points(raw_root: Path, episodes: List[int]) -> list:
 )
 def build_l2d_osm_region(plan: SourcePlan, datasets_bucket: str) -> ManifestRef:
     """Clip the snapshot's OSM extract to the episodes' tracks, once per plan."""
+    from data_parsing.l2d.dataset import track_points
+    from data_parsing.l2d.navigation_contract import OSM_REGION_BUFFER_M
     from data_parsing.l2d.osm_pbf_region import clip_cells, file_sha256, read_region, region_bytes
 
     from Platform.pipelines.l2d_snapshot import L2D_OSM_UNIT
@@ -380,8 +349,8 @@ def build_l2d_osm_region(plan: SourcePlan, datasets_bucket: str) -> ManifestRef:
     data_units = sorted({u for partition in plan.partitions for u in partition if u.startswith("data.")})
     materialize_units(s3, datasets_bucket, [by_id[u] for u in [L2D_OSM_UNIT, *data_units]], raw_root)
     episodes = sorted(int(e) for group in plan.partition_groups for e in group)
-    points = _l2d_track_points(raw_root, episodes)
-    cells = clip_cells(points, buffer_m=L2D_OSM_REGION_BUFFER_M)
+    points = track_points(raw_root, episodes)
+    cells = clip_cells(map(tuple, points), buffer_m=OSM_REGION_BUFFER_M)
     (pbf,) = sorted((raw_root / "osm").glob("*.osm.pbf"))
     nodes, ways = read_region(pbf, cells)
     payload = region_bytes(nodes, ways, provenance={
@@ -390,7 +359,7 @@ def build_l2d_osm_region(plan: SourcePlan, datasets_bucket: str) -> ManifestRef:
         "osm_extract": pbf.name,
         "osm_extract_sha256": file_sha256(pbf),
         "episodes": episodes,
-        "buffer_m": L2D_OSM_REGION_BUFFER_M,
+        "buffer_m": OSM_REGION_BUFFER_M,
         "cell_count": len(cells),
     })
     digest = sha256_bytes(payload)
