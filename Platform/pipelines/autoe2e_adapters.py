@@ -50,6 +50,12 @@ def current_pack_version(dataset: AutoE2EDataset) -> str:
     contracts = ".".join(f"{key}={value}" for key, value in sorted(pack_contracts().items()))
     if dataset is AutoE2EDataset.NUPLAN:
         return f"{contracts}+{NUPLAN_PACK_TASK_VERSION}"
+    if dataset is AutoE2EDataset.L2D:
+        # Region clipping, lane graph, and map image rules decide L2D bytes
+        # as much as the shared contracts do.
+        from data_parsing.l2d.navigation_contract import L2D_NAVIGATION_CONTRACT
+
+        return f"{contracts}+{L2D_NAVIGATION_CONTRACT}"
     return contracts
 
 
