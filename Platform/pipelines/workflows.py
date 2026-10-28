@@ -8921,6 +8921,10 @@ def _map_dataset_partitions(
                 world_model=True,
                 source_split=source_split,
                 data_role=data_role,
+                # map_task needs every input bound; the fan-out has no OSM
+                # region, so an L2D pack here fails with a clear error.
+                osm_region_path="",
+                osm_region_sha256="",
             ),
             concurrency=pack_concurrency,
         )
@@ -8944,6 +8948,8 @@ def _map_dataset_partitions(
             reasoning_labels=None,
             source_split=source_split,
             data_role=data_role,
+            osm_region_path="",
+            osm_region_sha256="",
         ),
         concurrency=pack_concurrency,
     )
