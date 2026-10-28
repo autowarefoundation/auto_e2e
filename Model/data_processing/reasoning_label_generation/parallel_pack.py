@@ -175,7 +175,7 @@ def decode_row(
 ) -> tuple[
     tuple[Any, int],
     Dict[str, bytes],
-    Optional[bytes | Dict[str, bytes]],
+    Optional[Dict[str, Optional[bytes]]],
 ]:
     """Decode one physical row's cameras and navigation context.
 
@@ -214,7 +214,7 @@ def decode_row(
             ): _jpeg(visual[view])
             for view in range(visual.shape[0])
         }
-        extras = None
+        extras: Optional[Dict[str, Optional[bytes]]] = None
         if include_map:
             front_frame_id = (
                 f"kitscenes-{UID_SCHEMA_VERSION}-{scene_id}-"
