@@ -133,15 +133,42 @@ def parse_region(payload: bytes) -> tuple[dict[int, OSMNode], list[OSMWay], dict
     return nodes, ways, dict(region["provenance"])
 
 
+class RegionIndex:
+    """Cell to way lookup over a region, built once per pack.
+
+    Ways are indexed by every cell their segments pass through, sampled a
+    quarter cell apart, so a way whose vertices all lie outside a cell but
+    whose segment crosses it is still found; scanning the whole region per
+    episode would make every pack as slow as the largest region.
+    """
+
+    def __init__(self, nodes: Mapping[int, OSMNode], ways: Iterable[OSMWay]) -> None:
+        self.nodes = dict(nodes)
+        self.ways = list(ways)
+        self._by_cell: dict[tuple[int, int], list[int]] = {}
+        step = CELL_DEG / 4.0
+        for index, way in enumerate(self.ways):
+            cells: set[tuple[int, int]] = set()
+            points = [(self.nodes[ref].longitude_deg, self.nodes[ref].latitude_deg) for ref in way.node_ids]
+            for (lon0, lat0), (lon1, lat1) in zip(points[:-1], points[1:]):
+                count = max(1, math.ceil(max(abs(lon1 - lon0), abs(lat1 - lat0)) / step))
+                for k in range(count + 1):
+                    cells.add(_cell(lon0 + (lon1 - lon0) * k / count, lat0 + (lat1 - lat0) * k / count))
+            for cell in cells:
+                self._by_cell.setdefault(cell, []).append(index)
+
+    def subregion(self, cells: frozenset[tuple[int, int]]) -> tuple[dict[int, OSMNode], list[OSMWay]]:
+        """The ways that pass through ``cells``, with the nodes they use."""
+        indices = sorted({index for cell in cells for index in self._by_cell.get(cell, ())})
+        kept = [self.ways[index] for index in indices]
+        used = {ref for way in kept for ref in way.node_ids}
+        return {ref: self.nodes[ref] for ref in used}, kept
+
+
 def subregion(
     nodes: Mapping[int, OSMNode],
     ways: Iterable[OSMWay],
     cells: frozenset[tuple[int, int]],
 ) -> tuple[dict[int, OSMNode], list[OSMWay]]:
-    """The ways of a region that touch ``cells``, with the nodes they use."""
-    kept = [
-        way for way in ways
-        if any(_cell(nodes[ref].longitude_deg, nodes[ref].latitude_deg) in cells for ref in way.node_ids)
-    ]
-    used = {ref for way in kept for ref in way.node_ids}
-    return {ref: nodes[ref] for ref in used}, kept
+    """The ways of a region that pass through ``cells``, with the nodes they use."""
+    return RegionIndex(nodes, ways).subregion(cells)
