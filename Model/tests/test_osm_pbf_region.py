@@ -76,3 +76,15 @@ def test_region_round_trips_canonically_and_subregions_keep_whole_ways():
     assert [way.way_id for way in near_ways] == [10]
     # Node 3 lies outside the cells but its way touches them, so it stays.
     assert sorted(near_nodes) == [1, 2, 3]
+
+
+def test_region_index_finds_ways_whose_segment_crosses_the_cells():
+    from data_parsing.l2d.osm_lane_graph import OSMNode, OSMWay
+    from data_parsing.l2d.osm_pbf_region import RegionIndex
+
+    # A motorway segment 15 km long with no vertex near the track.
+    nodes = {1: OSMNode(1, 8.30, 49.0), 2: OSMNode(2, 8.50, 49.0)}
+    index = RegionIndex(nodes, [OSMWay(5, (1, 2), {"highway": "motorway"})])
+    near_nodes, near_ways = index.subregion(clip_cells([(8.40, 49.0)], buffer_m=100.0))
+    assert [way.way_id for way in near_ways] == [5] and sorted(near_nodes) == [1, 2]
+    assert index.subregion(clip_cells([(8.40, 49.2)], buffer_m=100.0)) == ({}, [])
