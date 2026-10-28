@@ -99,6 +99,9 @@ class SourcePlan:
     # partitions read shared file units but pack episodes).
     partition_groups: List[List[str]] = field(default_factory=list)
     partition_limits: List[int] = field(default_factory=list)
+    # Units feed several partitions (nuPlan archives, L2D files), so the
+    # lineage names no single partition for them.
+    shared_units: bool = False
     labels: bool = False
     console: bool = False
     pack_params: Dict[str, str] = field(default_factory=dict)
@@ -207,6 +210,7 @@ def read_l2d(spec: DatasetSpec, payload: bytes) -> SourcePlan:
         units=units,
         partitions=partitions,
         partition_groups=groups,
+        shared_units=True,
         labels=False,
         console=False,
         pack_params=dict(spec.pack_params),
@@ -265,6 +269,7 @@ def read_nuplan(spec: DatasetSpec, payload: bytes) -> SourcePlan:
         snapshot_manifest_sha256=spec.source_manifest.sha256,
         units=units,
         partitions=[],
+        shared_units=True,
         labels=False,
         pack_params=dict(spec.pack_params),
     )
