@@ -109,3 +109,18 @@ def test_lane_graph_renders_every_osm_channel_through_the_shared_rasterizer():
                  "ROAD_LEVEL_VALID"):
         assert name in filled, name
     assert math.isfinite(float(np.asarray(raster.map_context).sum()))
+
+
+def test_reverse_one_way_lanes_keep_left_neighbours_on_the_left():
+    from data_parsing.l2d.osm_lane_graph import OSMNode, OSMWay, build_osm_lane_graph
+
+    nodes = {1: OSMNode(1, ORIGIN_LON, ORIGIN_LAT), 2: OSMNode(2, ORIGIN_LON + 100.0 * DLON, ORIGIN_LAT)}
+    graph = build_osm_lane_graph(
+        nodes, [OSMWay(7, (1, 2), {"highway": "secondary", "oneway": "-1", "lanes": "2"})],
+        origin_longitude_deg=ORIGIN_LON, origin_latitude_deg=ORIGIN_LAT, map_version="t", provenance={},
+    )
+    lanes = {lane["lane_index"]: lane for lane in graph["lanes"]}
+    # Traffic runs west, so its left is south: the left lane has the lower y.
+    left, right = lanes[0], lanes[1]
+    assert right["left_adjacent"].endswith(":0") and left["right_adjacent"].endswith(":1")
+    assert np.mean(np.asarray(left["centerline_enu_m"])[:, 1]) < np.mean(np.asarray(right["centerline_enu_m"])[:, 1])
