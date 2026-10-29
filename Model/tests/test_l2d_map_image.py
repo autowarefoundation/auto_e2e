@@ -89,3 +89,12 @@ def test_road_surface_lands_on_the_bev_grid_in_ego_coordinates():
     on_road = road[np.abs(left) <= 3.0]
     off_road = road[np.abs(left) >= 8.0]
     assert on_road.mean() > 0.9 and off_road.mean() < 0.05
+
+
+def test_road_mask_reads_the_route_overlay_and_compressed_fills_as_road():
+    tile = np.zeros((1, 4, 3), dtype=np.uint8)
+    tile[0, 0] = DOT                 # route overlay painted on the road
+    tile[0, 1] = (242, 248, 182)     # secondary fill after video compression
+    tile[0, 2] = BACKGROUND
+    tile[0, 3] = (216, 200, 216)     # Carto landuse, not road
+    assert road_mask(tile)[0].tolist() == [True, True, False, False]
