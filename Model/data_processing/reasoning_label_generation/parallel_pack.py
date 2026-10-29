@@ -272,6 +272,111 @@ def decode_row(
     return (ep_idx, frame_index), l2d_cams, extras
 
 
+def _l2d_episode_video_frames(ep_idx: int, video_key: str, frame_indices: set, encode: Any) -> Dict[int, Any]:
+    """Decode the wanted frames of one episode's video in one forward pass.
+
+    The row path asks LeRobot for one timestamp at a time, which seeks back
+    to a keyframe and decodes forward for every row and camera. Reading the
+    episode once from its first frame decodes each frame once. Frames are
+    chosen exactly as LeRobot chooses them: the frame nearest to
+    ``from_timestamp + index / fps``. ``encode(index, frame)`` turns each
+    chosen frame into bytes at once, so no decoded 1920x1080 frame outlives
+    its encoding.
+    """
+    import av
+    import numpy as np
+    import torch
+
+    meta = _DS.lerobot_dataset.meta
+    episode = meta.episodes[ep_idx]
+    if int(episode["episode_index"]) != ep_idx:
+        raise ValueError(f"L2D meta row {ep_idx} is episode {episode['episode_index']}")
+    path = _DS.lerobot_dataset.root / meta.get_video_file_path(ep_idx, video_key)
+    start = float(episode[f"videos/{video_key}/from_timestamp"])
+    fps = float(meta.fps)
+    wanted = sorted(frame_indices)
+    out: Dict[int, Any] = {}
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        container.seek(int(start / stream.time_base), stream=stream, backward=True, any_frame=False)
+        best: Dict[int, tuple] = {}
+        for frame in container.decode(stream):
+            seconds = float(frame.pts * stream.time_base) - start
+            index = int(round(seconds * fps))
+            if index < wanted[0] - 1:
+                continue
+            if index > wanted[-1] + 1:
+                break
+            if index in frame_indices:
+                error = abs(seconds - index / fps)
+                if index not in best or error < best[index][0]:
+                    rgb = frame.to_ndarray(format="rgb24")
+                    # Same float CHW in [0, 1] that LeRobot returns, so the
+                    # JPEG bytes are identical to the row path.
+                    tensor = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).float() / 255.0
+                    best[index] = (error, encode(index, tensor))
+    missing = [index for index in wanted if index not in best]
+    if missing:
+        raise ValueError(f"L2D episode {ep_idx} {video_key} lacks frames {missing[:5]}")
+    for index, (_, encoded) in best.items():
+        out[index] = encoded
+    return out
+
+
+def decode_l2d_episode(task: tuple[int, list, list]) -> list:
+    """Decode every wanted row of one L2D episode, one pass per video.
+
+    ``task`` is ``(episode, frame indices, current frame indices)``. Returns
+    ``decode_row``-shaped results for each frame, in frame order.
+    """
+    from data_processing.contract_versions import UID_SCHEMA_VERSION
+    from reactive_training_contracts import (
+        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+        REACTIVE_FRONT_CAMERA_INDEX,
+    )
+
+    from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
+
+    ep_idx, frames, current = task
+    frames, current = set(frames), set(current)
+    front = CAMERA_NAMES[REACTIVE_FRONT_CAMERA_INDEX]
+
+    def camera_encoder(name: str):
+        def encode(index: int, tensor) -> tuple:
+            native = (
+                _jpeg(tensor, REACTIVE_FRONT_CAMERA_IMAGE_SIZE)
+                if name == front and index in current
+                else None
+            )
+            return _jpeg(tensor), native
+        return encode
+
+    def map_encoder(_index: int, tile) -> tuple:
+        if float(tile.abs().max()) > 0:
+            return _jpeg(tile), _native_png(tile)
+        return None, None
+
+    by_camera = {name: _l2d_episode_video_frames(ep_idx, name, frames, camera_encoder(name)) for name in CAMERA_NAMES}
+    maps = _l2d_episode_video_frames(ep_idx, MAP_VIEW_NAME, current, map_encoder) if current else {}
+    results = []
+    for frame_index in sorted(frames):
+        cams = {
+            f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{view}": by_camera[name][frame_index][0]
+            for view, name in enumerate(CAMERA_NAMES)
+        }
+        extras = None
+        if frame_index in current:
+            map_jpeg, map_png = maps[frame_index]
+            extras = {
+                "map_jpeg": map_jpeg,
+                "map_png": map_png,
+                "front_camera_native_jpeg": by_camera[front][frame_index][1],
+                "front_camera_fpn_jpeg": cams[f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{REACTIVE_FRONT_CAMERA_INDEX}"],
+            }
+        results.append(((ep_idx, frame_index), cams, extras))
+    return results
+
+
 def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
     """Decode + encode sample ``si`` into per-sample members + a frame-pool
     contribution.
