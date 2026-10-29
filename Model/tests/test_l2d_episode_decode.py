@@ -35,7 +35,19 @@ def _fake_dataset(tmp_path: Path, start_s: float, key: str):
         episodes={3: {"episode_index": 3, f"videos/{key}/from_timestamp": start_s}},
         get_video_file_path=lambda episode, video_key: Path("videos/file-000.mp4"),
     )
-    return SimpleNamespace(lerobot_dataset=SimpleNamespace(meta=meta, root=tmp_path))
+    timestamps = [index / 10 for index in range(20)]
+
+    class _Rows:
+        def select_columns(self, _columns):
+            return self
+
+        def __getitem__(self, _rows):
+            return {"timestamp": timestamps}
+
+    return SimpleNamespace(
+        lerobot_dataset=SimpleNamespace(meta=meta, root=tmp_path, hf_dataset=_Rows(), tolerance_s=1e-4),
+        _episode_ranges={3: (0, len(timestamps))},
+    )
 
 
 def test_episode_frames_are_offset_by_the_episode_start(tmp_path, monkeypatch):
@@ -48,6 +60,24 @@ def test_episode_frames_are_offset_by_the_episode_start(tmp_path, monkeypatch):
 
 
 def test_missing_frames_fail_instead_of_packing_short(tmp_path, monkeypatch):
+    # The file ends 1 s into this episode, so its frame 15 does not exist.
     monkeypatch.setattr(pp, "_DS", _fake_dataset(tmp_path, 3.0, "cam"))
     with pytest.raises(ValueError, match="lacks frames"):
-        pp._l2d_episode_video_frames(3, "cam", {5, 20}, lambda index, tensor: index)
+        pp._l2d_episode_video_frames(3, "cam", {5, 15}, lambda index, tensor: index)
+
+
+def test_frames_outside_the_episode_are_refused(tmp_path, monkeypatch):
+    # Index 20 would read the next episode's video in the shared file.
+    monkeypatch.setattr(pp, "_DS", _fake_dataset(tmp_path, 1.0, "cam"))
+    with pytest.raises(IndexError, match="leave the episode"):
+        pp._l2d_episode_video_frames(3, "cam", {19, 20}, lambda index, tensor: index)
+
+
+def test_frames_off_their_timestamps_are_refused(tmp_path, monkeypatch):
+    dataset = _fake_dataset(tmp_path, 1.0, "cam")
+    dataset.lerobot_dataset.tolerance_s = 0.0
+    timestamps = [index / 10 + 0.04 for index in range(20)]
+    dataset.lerobot_dataset.hf_dataset.__class__.__getitem__ = lambda self, rows: {"timestamp": timestamps}
+    monkeypatch.setattr(pp, "_DS", dataset)
+    with pytest.raises(ValueError, match="off their timestamps"):
+        pp._l2d_episode_video_frames(3, "cam", {2}, lambda index, tensor: index)
