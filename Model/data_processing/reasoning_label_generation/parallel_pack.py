@@ -298,10 +298,15 @@ def _l2d_episode_video_frames(ep_idx: int, video_key: str, frame_indices: set, e
     out: Dict[int, Any] = {}
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
-        container.seek(int(start / stream.time_base), stream=stream, backward=True, any_frame=False)
+        time_base = stream.time_base
+        if time_base is None:
+            raise ValueError(f"{path} has no video time base")
+        container.seek(int(start / time_base), stream=stream, backward=True, any_frame=False)
         best: Dict[int, tuple] = {}
         for frame in container.decode(stream):
-            seconds = float(frame.pts * stream.time_base) - start
+            if frame.pts is None:
+                continue
+            seconds = float(frame.pts * time_base) - start
             index = int(round(seconds * fps))
             if index < wanted[0] - 1:
                 continue
@@ -337,8 +342,8 @@ def decode_l2d_episode(task: tuple[int, list, list]) -> list:
 
     from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
 
-    ep_idx, frames, current = task
-    frames, current = set(frames), set(current)
+    ep_idx, frame_list, current_list = task
+    frames, current = set(frame_list), set(current_list)
     front = CAMERA_NAMES[REACTIVE_FRONT_CAMERA_INDEX]
 
     def camera_encoder(name: str):
