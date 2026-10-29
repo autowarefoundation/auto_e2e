@@ -28,7 +28,9 @@ _ROAD_COLORS = np.asarray([
     (247, 250, 191),  # secondary
     (255, 255, 255),  # tertiary, unclassified, residential, service
 ], dtype=np.float64)
-_ROAD_TOLERANCE = 10.0
+# Video compression shifts road fills by up to about 12 levels on real
+# tiles; the land background stays more than 20 away from every fill.
+_ROAD_TOLERANCE = 14.0
 _MIN_DOTS = 3
 _MAX_RESIDUAL_PX = 3.0
 _MIN_METERS_PER_PIXEL, _MAX_METERS_PER_PIXEL = 0.1, 5.0
@@ -178,10 +180,16 @@ def register(
 
 
 def road_mask(image: np.ndarray) -> np.ndarray:
-    """Pixels drawn in a Carto road fill colour."""
-    rgb = image.astype(np.float64)[..., None, :]
-    distance = np.sqrt(((rgb - _ROAD_COLORS) ** 2).sum(axis=-1)).min(axis=-1)
-    return distance <= _ROAD_TOLERANCE
+    """Pixels drawn in a Carto road fill colour, or under the route overlay.
+
+    The planned route is painted in blue over the road it follows, so those
+    pixels are road too; on real tiles they were the largest missed share.
+    """
+    rgb = image.astype(np.float64)
+    distance = np.sqrt(((rgb[..., None, :] - _ROAD_COLORS) ** 2).sum(axis=-1)).min(axis=-1)
+    red, green, blue = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    route = (blue > 200) & (red < 140) & (green < 160) & (blue - red > 80)
+    return (distance <= _ROAD_TOLERANCE) | route
 
 
 def bev_layers(
