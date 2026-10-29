@@ -295,6 +295,18 @@ def _l2d_episode_video_frames(ep_idx: int, video_key: str, frame_indices: set, e
     start = float(episode[f"videos/{video_key}/from_timestamp"])
     fps = float(meta.fps)
     wanted = sorted(frame_indices)
+    # One mp4 holds consecutive episodes, so an index outside this episode
+    # would silently read a neighbour's video.
+    ep_start, ep_end = _DS._episode_ranges[ep_idx]
+    if wanted[0] < 0 or wanted[-1] >= ep_end - ep_start:
+        raise IndexError(f"L2D episode {ep_idx} frames {wanted[0]}..{wanted[-1]} leave the episode")
+    # LeRobot looks a row up at from_timestamp + its timestamp column, not
+    # index / fps; read the same column so both paths aim at one time.
+    timestamps = np.asarray(
+        _DS.lerobot_dataset.hf_dataset.select_columns(["timestamp"])[ep_start:ep_end]["timestamp"],
+        dtype=np.float64,
+    ).reshape(-1)
+    tolerance = float(getattr(_DS.lerobot_dataset, "tolerance_s", 1e-4))
     out: Dict[int, Any] = {}
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
@@ -313,7 +325,7 @@ def _l2d_episode_video_frames(ep_idx: int, video_key: str, frame_indices: set, e
             if index > wanted[-1] + 1:
                 break
             if index in frame_indices:
-                error = abs(seconds - index / fps)
+                error = abs(seconds - float(timestamps[index]))
                 if index not in best or error < best[index][0]:
                     rgb = frame.to_ndarray(format="rgb24")
                     # Same float CHW in [0, 1] that LeRobot returns, so the
@@ -323,18 +335,25 @@ def _l2d_episode_video_frames(ep_idx: int, video_key: str, frame_indices: set, e
     missing = [index for index in wanted if index not in best]
     if missing:
         raise ValueError(f"L2D episode {ep_idx} {video_key} lacks frames {missing[:5]}")
+    # LeRobot refuses a frame further than its tolerance from the query; a
+    # dropped or variable-rate frame must fail here too, not pick a neighbour.
+    late = [index for index in wanted if best[index][0] > tolerance]
+    if late:
+        raise ValueError(f"L2D episode {ep_idx} {video_key} frames {late[:5]} are off their timestamps")
     for index, (_, encoded) in best.items():
         out[index] = encoded
     return out
 
 
-def decode_l2d_episode(task: tuple[int, list, list]) -> list:
-    """Decode every wanted row of one L2D episode, one pass per video.
+def decode_l2d_video(task: tuple[int, str, list, list]) -> tuple[int, str, Dict[int, Any]]:
+    """Decode one episode's frames of one video in one forward pass.
 
-    ``task`` is ``(episode, frame indices, current frame indices)``. Returns
-    ``decode_row``-shaped results for each frame, in frame order.
+    ``task`` is ``(episode, video key, frame indices, current frame
+    indices)``. Cameras return ``(jpeg, native front jpeg or None)`` per
+    frame, the map video ``(jpeg or None, png or None)`` for current frames.
+    One task per episode and video keeps every worker busy even when a
+    partition holds a single episode.
     """
-    from data_processing.contract_versions import UID_SCHEMA_VERSION
     from reactive_training_contracts import (
         REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
         REACTIVE_FRONT_CAMERA_INDEX,
@@ -342,41 +361,66 @@ def decode_l2d_episode(task: tuple[int, list, list]) -> list:
 
     from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
 
-    ep_idx, frame_list, current_list = task
-    frames, current = set(frame_list), set(current_list)
+    ep_idx, video_key, frame_list, current_list = task
+    current = set(current_list)
+    if video_key == MAP_VIEW_NAME:
+        def encode(_index: int, tile) -> tuple:
+            if float(tile.abs().max()) > 0:
+                return _jpeg(tile), _native_png(tile)
+            return None, None
+        return ep_idx, video_key, _l2d_episode_video_frames(ep_idx, video_key, current, encode)
     front = CAMERA_NAMES[REACTIVE_FRONT_CAMERA_INDEX]
 
-    def camera_encoder(name: str):
-        def encode(index: int, tensor) -> tuple:
-            native = (
-                _jpeg(tensor, REACTIVE_FRONT_CAMERA_IMAGE_SIZE)
-                if name == front and index in current
-                else None
-            )
-            return _jpeg(tensor), native
-        return encode
+    def encode_camera(index: int, tensor) -> tuple:
+        native = (
+            _jpeg(tensor, REACTIVE_FRONT_CAMERA_IMAGE_SIZE)
+            if video_key == front and index in current
+            else None
+        )
+        return _jpeg(tensor), native
 
-    def map_encoder(_index: int, tile) -> tuple:
-        if float(tile.abs().max()) > 0:
-            return _jpeg(tile), _native_png(tile)
-        return None, None
+    return ep_idx, video_key, _l2d_episode_video_frames(ep_idx, video_key, set(frame_list), encode_camera)
 
-    by_camera = {name: _l2d_episode_video_frames(ep_idx, name, frames, camera_encoder(name)) for name in CAMERA_NAMES}
-    maps = _l2d_episode_video_frames(ep_idx, MAP_VIEW_NAME, current, map_encoder) if current else {}
+
+def l2d_video_tasks(decode_tasks: list) -> list:
+    """Split ``decode_row`` tasks into one task per (episode, video)."""
+    from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
+
+    tasks: list[tuple[int, str, list, list]] = []
+    for episode in sorted({group for group, _, _ in decode_tasks}):
+        rows = [task for task in decode_tasks if task[0] == episode]
+        frames = [frame for _, frame, _ in rows]
+        current = [frame for _, frame, is_current in rows if is_current]
+        tasks.extend((episode, key, frames, current) for key in CAMERA_NAMES)
+        if current:
+            tasks.append((episode, MAP_VIEW_NAME, frames, current))
+    return tasks
+
+
+def assemble_l2d_rows(decoded: list, decode_tasks: list) -> list:
+    """``decode_row``-shaped results from per-video decodes, in task order."""
+    from data_processing.contract_versions import UID_SCHEMA_VERSION
+    from reactive_training_contracts import REACTIVE_FRONT_CAMERA_INDEX
+
+    from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
+
+    by_video = {(episode, key): frames for episode, key, frames in decoded}
+    front = CAMERA_NAMES[REACTIVE_FRONT_CAMERA_INDEX]
     results = []
-    for frame_index in sorted(frames):
+    for ep_idx, frame_index, is_current in sorted(decode_tasks):
+        prefix = f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}"
         cams = {
-            f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{view}": by_camera[name][frame_index][0]
+            f"{prefix}-c{view}": by_video[(ep_idx, name)][frame_index][0]
             for view, name in enumerate(CAMERA_NAMES)
         }
         extras = None
-        if frame_index in current:
-            map_jpeg, map_png = maps[frame_index]
+        if is_current:
+            map_jpeg, map_png = by_video[(ep_idx, MAP_VIEW_NAME)][frame_index]
             extras = {
                 "map_jpeg": map_jpeg,
                 "map_png": map_png,
-                "front_camera_native_jpeg": by_camera[front][frame_index][1],
-                "front_camera_fpn_jpeg": cams[f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{REACTIVE_FRONT_CAMERA_INDEX}"],
+                "front_camera_native_jpeg": by_video[(ep_idx, front)][frame_index][1],
+                "front_camera_fpn_jpeg": cams[f"{prefix}-c{REACTIVE_FRONT_CAMERA_INDEX}"],
             }
         results.append(((ep_idx, frame_index), cams, extras))
     return results
