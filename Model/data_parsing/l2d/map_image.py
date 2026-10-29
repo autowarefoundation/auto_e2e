@@ -28,6 +28,11 @@ _ROAD_COLORS = np.asarray([
     (247, 250, 191),  # secondary
     (255, 255, 255),  # tertiary, unclassified, residential, service
 ], dtype=np.float64)
+# Carto fills a road fill could be mistaken for.
+_NON_ROAD_COLORS = np.asarray([
+    (255, 241, 186),  # beach
+    (242, 239, 233),  # land background
+], dtype=np.float64)
 # Video compression shifts road fills by up to about 12 levels on real
 # tiles; the land background stays more than 20 away from every fill.
 _ROAD_TOLERANCE = 14.0
@@ -187,9 +192,19 @@ def road_mask(image: np.ndarray) -> np.ndarray:
     """
     rgb = image.astype(np.float64)
     distance = np.sqrt(((rgb[..., None, :] - _ROAD_COLORS) ** 2).sum(axis=-1)).min(axis=-1)
+    # A fill nearer to a Carto non-road colour (beach sits 13 from the
+    # secondary yellow) is not road, however close it is to a road fill.
+    nearest_other = np.sqrt(((rgb[..., None, :] - _NON_ROAD_COLORS) ** 2).sum(axis=-1)).min(axis=-1)
+    fill = (distance <= _ROAD_TOLERANCE) & (distance < nearest_other)
     red, green, blue = rgb[..., 0], rgb[..., 1], rgb[..., 2]
     route = (blue > 200) & (red < 140) & (green < 160) & (blue - red > 80)
-    return (distance <= _ROAD_TOLERANCE) | route
+    # Route dots and transport icons are blue too; only route pixels joined
+    # to a road fill are the line drawn over a road.
+    from scipy import ndimage
+
+    labels, _ = ndimage.label(route)
+    touching = np.unique(labels[route & ndimage.binary_dilation(fill, iterations=2)])
+    return fill | np.isin(labels, touching[touching > 0])
 
 
 def bev_layers(
