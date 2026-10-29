@@ -43,8 +43,8 @@ def test_episode_frames_are_offset_by_the_episode_start(tmp_path, monkeypatch):
     monkeypatch.setattr(pp, "_DS", _fake_dataset(tmp_path, 1.0, "cam"))
     frames = pp._l2d_episode_video_frames(3, "cam", {2, 5}, lambda index, tensor: float(tensor.mean()))
     assert sorted(frames) == [2, 5]
-    assert frames[2] == pytest.approx(12 * 20 / 255.0, abs=0.03)
-    assert frames[5] == pytest.approx(15 * 20 / 255.0, abs=0.03)
+    assert frames[2] == pytest.approx((12 * 20 % 255) / 255.0, abs=0.03)
+    assert frames[5] == pytest.approx((15 * 20 % 255) / 255.0, abs=0.03)
 
 
 def test_missing_frames_fail_instead_of_packing_short(tmp_path, monkeypatch):
