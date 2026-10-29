@@ -92,9 +92,20 @@ def test_road_surface_lands_on_the_bev_grid_in_ego_coordinates():
 
 
 def test_road_mask_reads_the_route_overlay_and_compressed_fills_as_road():
-    tile = np.zeros((1, 4, 3), dtype=np.uint8)
+    tile = np.zeros((1, 6, 3), dtype=np.uint8)
     tile[0, 0] = DOT                 # route overlay painted on the road
     tile[0, 1] = (242, 248, 182)     # secondary fill after video compression
     tile[0, 2] = BACKGROUND
     tile[0, 3] = (216, 200, 216)     # Carto landuse, not road
-    assert road_mask(tile)[0].tolist() == [True, True, False, False]
+    tile[0, 4] = (255, 241, 186)     # beach, 13 from the secondary yellow
+    tile[0, 5] = BACKGROUND
+    assert road_mask(tile)[0].tolist() == [True, True, False, False, False, False]
+
+
+def test_blue_away_from_any_road_is_not_road():
+    tile = np.full((20, 20, 3), BACKGROUND, dtype=np.uint8)
+    tile[2:5, 2:5] = DOT             # a route dot or transport icon on land
+    tile[10:12, :] = ROAD
+    tile[10:12, 8:11] = DOT          # route line over the road
+    mask = road_mask(tile)
+    assert not mask[2:5, 2:5].any() and mask[10:12, 8:11].all()
