@@ -14,7 +14,7 @@ import json
 L2D_NAVIGATION_VERSION = "l2d_osm_navigation_v1"
 OSM_REGION_SCHEMA_VERSION = "l2d_osm_region_v1"
 OSM_LANE_GRAPH_BUILDER_VERSION = "osm_lane_graph_builder_v2"
-MAP_IMAGE_VERSION = "l2d_map_image_v2"
+MAP_IMAGE_VERSION = "l2d_map_image_v3"
 ANCHOR_PERIOD_NS = 500_000_000
 # The OSM extract is clipped this far around every pose and route waypoint:
 # far wider than the raster, so map matching keeps road connectivity.
