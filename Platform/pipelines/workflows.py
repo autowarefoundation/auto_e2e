@@ -2673,11 +2673,34 @@ def data_processing(
         ]
         import inspect
         inspect.signature(parallel_pack.init_row_worker).bind(*row_init)
+        if dataset == Dataset.L2D:
+            # One forward pass per episode video instead of a seek per row.
+            episode_tasks = []
+            for episode in sorted({group for group, _, _ in decode_tasks}):
+                episode_rows = [task for task in decode_tasks if task[0] == episode]
+                episode_tasks.append((
+                    episode,
+                    [frame for _, frame, _ in episode_rows],
+                    [frame for _, frame, is_current in episode_rows if is_current],
+                ))
+            row_workers = max(1, min(row_workers, len(episode_tasks)))
+            decode_function = parallel_pack.decode_l2d_episode
+            work = episode_tasks
+        else:
+            decode_function = parallel_pack.decode_row
+            work = decode_tasks
+
+        def _decoded_rows(pool):
+            for result in pool.map(decode_function, work):
+                if dataset == Dataset.L2D:
+                    yield from result
+                else:
+                    yield result
+
         with ProcessPoolExecutor(max_workers=row_workers, mp_context=ctx,
                                  initializer=parallel_pack.init_row_worker,
                                  initargs=row_init) as rpool:
-            for row_key, cam_jpegs, row_extras in rpool.map(
-                    parallel_pack.decode_row, decode_tasks):
+            for row_key, cam_jpegs, row_extras in _decoded_rows(rpool):
                 row_map[row_key] = (cam_jpegs, row_extras)
                 for fid, blob in cam_jpegs.items():
                     _write_pool(fid, blob)
