@@ -52,6 +52,8 @@ def _contract() -> str:
         "map_image": MAP_IMAGE_VERSION,
         "anchor_period_ns": ANCHOR_PERIOD_NS,
         "region_buffer_m": OSM_REGION_BUFFER_M,
+        # Each partition renders from a region cut to its own episodes.
+        "region_scope": "partition",
         "episode_margin_m": EPISODE_MAP_MARGIN_M,
         "trace_step_m": TRACE_STEP_M,
         "maneuver_lookahead_m": MANEUVER_LOOKAHEAD_M,
