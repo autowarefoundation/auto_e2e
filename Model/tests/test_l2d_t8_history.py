@@ -94,3 +94,28 @@ def test_track_points_read_the_real_l2d_parquet_schema(tmp_path):
     points = track_points(tmp_path, [7])
     assert points.shape == (4, 2)
     assert points[:, 0] == pytest.approx([8.4] * 4)
+
+
+def test_track_points_split_by_episode_in_one_read(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    from data_parsing.l2d.dataset import track_points_by_episode
+
+    table = pa.table({
+        "episode_index": pa.array([4, 4, 9], pa.int64()),
+        "observation.state.vehicle": pa.array(
+            [[0, 0, 0, 49.0, 8.4, 0, 0, 0], [0, 0, 0, 49.0, 8.4, 0, 0, 0], [0, 0, 0, 52.5, 13.4, 0, 0, 0]],
+            pa.list_(pa.float32(), 8),
+        ),
+        "observation.state.waypoints": pa.array(
+            [[[8.4, 49.0]] * 10, [[8.4, 49.0]] * 10, [[13.4, 52.5]] * 10],
+            pa.large_list(pa.large_list(pa.float32())),
+        ),
+    })
+    (tmp_path / "data" / "chunk-000").mkdir(parents=True)
+    pq.write_table(table, tmp_path / "data" / "chunk-000" / "file-000.parquet")
+    points = track_points_by_episode(tmp_path, [4, 9])
+    # Each episode keeps only its own places, deduplicated.
+    assert points[4].shape == (1, 2) and points[9][0, 1] == pytest.approx(52.5)
+    with pytest.raises(ValueError, match="lack episodes"):
+        track_points_by_episode(tmp_path, [4, 11])
