@@ -200,7 +200,12 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
             raise ValueError(f"{dataset_id}: OSM region was not built from the snapshot's OSM extract")
         if provenance["snapshot_manifest_sha256"] != lineage["raw"]["snapshot_manifest_sha256"]:
             raise ValueError(f"{dataset_id}: OSM region was built for another snapshot")
+        if pack.get("osm_regions") and "episodes" not in provenance:
+            raise ValueError(f"{dataset_id}: per-partition OSM region names no episodes")
         episodes_of[region["sha256"]] = set(provenance["episodes"]) if "episodes" in provenance else None
+    # One region per published partition, no more and no fewer.
+    if pack.get("osm_regions") and len(regions) != int(lineage["views"]["partitions"]):
+        raise ValueError(f"{dataset_id}: {len(regions)} OSM regions for {lineage['views']['partitions']} partitions")
     if regions:
         # Every packed partition must have rendered from one of these regions,
         # and that region must cover the partition's episodes.
@@ -217,6 +222,8 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
                 raise ValueError(f"{dataset_id}: partition {partition['partition_id']} used another OSM region")
             covered = episodes_of[used]
             packed = {int(e["episode_index"]) for e in navigation.get("episodes", [])}
+            if not packed:
+                raise ValueError(f"{dataset_id}: partition {partition['partition_id']} has samples but lists no episodes")
             if covered is not None and not packed <= covered:
                 raise ValueError(f"{dataset_id}: partition {partition['partition_id']} packed episodes its region lacks")
     return {"dataset_id": dataset_id, "units": len(units), "labels": labels_checked}
