@@ -175,7 +175,6 @@ def audit(prepared, run, metric_source, output):
         shared_metric_commit=SOURCE_COMMIT,
         shared_metric_sha256=SOURCE_SHA256,
         horizons_4_5="N/A",
-        scientific_status="Provisional; historical cross-hardware optimizer gate remains failed",
     )
     try:
         for track in execution["tracks"]:
