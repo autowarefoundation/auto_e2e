@@ -182,13 +182,16 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
             labels_checked += 1
     from Platform.pipelines.l2d_snapshot import L2D_OSM_UNIT
 
-    region = lineage["pack"].get("osm_region")
-    # L2D map channels come only from the region, so its lineage must name one.
-    if lineage["spec"]["dataset"] == "l2d" and region is None:
+    # One region per partition; datasets packed before that name one region.
+    pack = lineage["pack"]
+    regions = pack.get("osm_regions") or ([pack["osm_region"]] if pack.get("osm_region") else [])
+    # L2D map channels come only from the regions, so its lineage must name them.
+    if lineage["spec"]["dataset"] == "l2d" and not regions:
         raise ValueError(f"{dataset_id}: L2D lineage names no OSM region")
-    if region is not None:
-        # The region is derived from the snapshot's OSM unit; it must still be
-        # the bytes every pack rendered navigation from, and name that unit.
+    episodes_of: dict[str, set | None] = {}
+    for region in regions:
+        # Each region is derived from the snapshot's OSM unit; it must still be
+        # the bytes its packs rendered navigation from, and name that unit.
         region_payload = _s3_bytes(s3, region["uri"], region["version_id"])
         if sha256_bytes(region_payload) != region["sha256"]:
             raise ValueError(f"{dataset_id}: OSM region changed")
@@ -197,16 +200,25 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
             raise ValueError(f"{dataset_id}: OSM region was not built from the snapshot's OSM extract")
         if provenance["snapshot_manifest_sha256"] != lineage["raw"]["snapshot_manifest_sha256"]:
             raise ValueError(f"{dataset_id}: OSM region was built for another snapshot")
-        # Every packed partition must have rendered from this same region.
+        episodes_of[region["sha256"]] = set(provenance["episodes"]) if "episodes" in provenance else None
+    if regions:
+        # Every packed partition must have rendered from one of these regions,
+        # and that region must cover the partition's episodes.
         for partition in json.loads(views_payload)["partitions"]:
             manifest_payload = s3.get_object(Bucket=bucket, Key=f"{partition['prefix']}/manifest.json")["Body"].read()
             if sha256_bytes(manifest_payload) != partition["manifest_sha256"]:
                 raise ValueError(f"{dataset_id}: partition {partition['partition_id']} manifest changed")
             manifest = json.loads(manifest_payload)
-            if int(manifest.get("total_samples", 0)) and (
-                (manifest.get("navigation") or {}).get("osm_region_sha256") != region["sha256"]
-            ):
+            if not int(manifest.get("total_samples", 0)):
+                continue
+            navigation = manifest.get("navigation") or {}
+            used = navigation.get("osm_region_sha256")
+            if used not in episodes_of:
                 raise ValueError(f"{dataset_id}: partition {partition['partition_id']} used another OSM region")
+            covered = episodes_of[used]
+            packed = {int(e["episode_index"]) for e in navigation.get("episodes", [])}
+            if covered is not None and not packed <= covered:
+                raise ValueError(f"{dataset_id}: partition {partition['partition_id']} packed episodes its region lacks")
     return {"dataset_id": dataset_id, "units": len(units), "labels": labels_checked}
 
 
