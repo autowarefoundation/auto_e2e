@@ -1,0 +1,20 @@
+# SIMFORGE-D1.5 KITScenes evaluation. Install in this order (see README.md):
+#   1. torch==2.8.0 from the PyTorch index that matches your CUDA driver (not listed here)
+#   2. the flash-attn==2.8.3 prebuilt wheel for torch 2.8 (not listed here)
+#   3. pip install -r Model/accuracy_benchmark/simforge/requirements.txt
+#
+# Versions are those of the environment that produced the reported results
+# (Linux x86_64, Python 3.12, CUDA 12.8, NVIDIA A40). The list covers the imports
+# of this benchmark and of the Alpamayo 1.5 reference code it runs
+# (torch, transformers, hydra, einops, numpy, scipy); requests and huggingface_hub
+# provide sparse KITScenes access and the model download, Pillow decodes images
+# and writes lossless crops, matplotlib draws the plots.
+transformers==4.57.1
+hydra-core==1.3.7
+einops==0.8.2
+numpy==2.5.2
+scipy==1.18.1
+pillow==12.3.0
+requests==2.34.2
+huggingface_hub==0.36.2
+matplotlib==3.11.2

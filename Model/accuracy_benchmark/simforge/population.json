@@ -1,0 +1,1354 @@
+{
+ "anchor_start_frame": 40,
+ "anchor_stride_frames": 90,
+ "anchors": [
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-00fc1b9b-005e-554c-7733-c4c0adeca015-f000040",
+   "scene_id": "00fc1b9b-005e-554c-7733-c4c0adeca015"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-02be7d74-6f74-9167-c8a2-84fc961c0fbd-f000040",
+   "scene_id": "02be7d74-6f74-9167-c8a2-84fc961c0fbd"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-03ed2585-0729-92ad-98af-fdd9ac1c3a80-f000040",
+   "scene_id": "03ed2585-0729-92ad-98af-fdd9ac1c3a80"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-03ed2585-0729-92ad-98af-fdd9ac1c3a80-f000130",
+   "scene_id": "03ed2585-0729-92ad-98af-fdd9ac1c3a80"
+  },
+  {
+   "available_future_steps": 239,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-04a39028-c434-6cff-b3f4-9f8dbb9aa078-f000040",
+   "scene_id": "04a39028-c434-6cff-b3f4-9f8dbb9aa078"
+  },
+  {
+   "available_future_steps": 149,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-04a39028-c434-6cff-b3f4-9f8dbb9aa078-f000130",
+   "scene_id": "04a39028-c434-6cff-b3f4-9f8dbb9aa078"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-04a39028-c434-6cff-b3f4-9f8dbb9aa078-f000220",
+   "scene_id": "04a39028-c434-6cff-b3f4-9f8dbb9aa078"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-0638dbd2-172d-142e-de9f-9bc5c6ca2b0f-f000040",
+   "scene_id": "0638dbd2-172d-142e-de9f-9bc5c6ca2b0f"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-0cfdeb83-2a4a-00d2-a500-787346d98e63-f000040",
+   "scene_id": "0cfdeb83-2a4a-00d2-a500-787346d98e63"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-0cfdeb83-2a4a-00d2-a500-787346d98e63-f000130",
+   "scene_id": "0cfdeb83-2a4a-00d2-a500-787346d98e63"
+  },
+  {
+   "available_future_steps": 79,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-0dd003b2-0988-0da3-bf75-ee91deaa9ce6-f000040",
+   "scene_id": "0dd003b2-0988-0da3-bf75-ee91deaa9ce6"
+  },
+  {
+   "available_future_steps": 209,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-0f8ffa88-e84d-eaa2-4ef1-62bb539f8e03-f000040",
+   "scene_id": "0f8ffa88-e84d-eaa2-4ef1-62bb539f8e03"
+  },
+  {
+   "available_future_steps": 119,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-0f8ffa88-e84d-eaa2-4ef1-62bb539f8e03-f000130",
+   "scene_id": "0f8ffa88-e84d-eaa2-4ef1-62bb539f8e03"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-10edd8d1-2326-5e5e-6e32-654009fdf287-f000040",
+   "scene_id": "10edd8d1-2326-5e5e-6e32-654009fdf287"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-142f1419-b6f2-4215-4055-6eb161f63043-f000040",
+   "scene_id": "142f1419-b6f2-4215-4055-6eb161f63043"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-18775d16-38f0-156e-4733-07553c14186b-f000040",
+   "scene_id": "18775d16-38f0-156e-4733-07553c14186b"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-1db9c8a0-d836-07b4-340d-43bd91c97955-f000040",
+   "scene_id": "1db9c8a0-d836-07b4-340d-43bd91c97955"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-236144ec-a0fd-6f16-09d8-514f31a202d3-f000040",
+   "scene_id": "236144ec-a0fd-6f16-09d8-514f31a202d3"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-2381584f-2ac6-83c1-cfe8-cbf5b1d2cfda-f000040",
+   "scene_id": "2381584f-2ac6-83c1-cfe8-cbf5b1d2cfda"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-2381584f-2ac6-83c1-cfe8-cbf5b1d2cfda-f000130",
+   "scene_id": "2381584f-2ac6-83c1-cfe8-cbf5b1d2cfda"
+  },
+  {
+   "available_future_steps": 309,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-2673dca8-c7f5-c2d9-78eb-a06e201776dc-f000040",
+   "scene_id": "2673dca8-c7f5-c2d9-78eb-a06e201776dc"
+  },
+  {
+   "available_future_steps": 219,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-2673dca8-c7f5-c2d9-78eb-a06e201776dc-f000130",
+   "scene_id": "2673dca8-c7f5-c2d9-78eb-a06e201776dc"
+  },
+  {
+   "available_future_steps": 129,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-2673dca8-c7f5-c2d9-78eb-a06e201776dc-f000220",
+   "scene_id": "2673dca8-c7f5-c2d9-78eb-a06e201776dc"
+  },
+  {
+   "available_future_steps": 39,
+   "frame_index": 310,
+   "sample_uid": "kitscenes-v1-2673dca8-c7f5-c2d9-78eb-a06e201776dc-f000310",
+   "scene_id": "2673dca8-c7f5-c2d9-78eb-a06e201776dc"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-2a28c841-e21c-ddf5-948b-cf50f021a670-f000040",
+   "scene_id": "2a28c841-e21c-ddf5-948b-cf50f021a670"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-324fb34d-3cc0-7fd5-765c-d3e2266041f4-f000040",
+   "scene_id": "324fb34d-3cc0-7fd5-765c-d3e2266041f4"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-35b08325-d022-4e7e-23ca-6523644f13d3-f000040",
+   "scene_id": "35b08325-d022-4e7e-23ca-6523644f13d3"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-35eb1fee-cf5c-deda-96db-d9c8007c522d-f000040",
+   "scene_id": "35eb1fee-cf5c-deda-96db-d9c8007c522d"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-3689ea5c-1275-629a-8fa1-34142129eae5-f000040",
+   "scene_id": "3689ea5c-1275-629a-8fa1-34142129eae5"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-38fd42fe-67df-73e0-670d-27862b697f2c-f000040",
+   "scene_id": "38fd42fe-67df-73e0-670d-27862b697f2c"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-3919596d-7f1e-3bd5-ca67-052aba651bf6-f000040",
+   "scene_id": "3919596d-7f1e-3bd5-ca67-052aba651bf6"
+  },
+  {
+   "available_future_steps": 449,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-39ed6bdc-3e24-5a74-9d13-19b57dc035d9-f000040",
+   "scene_id": "39ed6bdc-3e24-5a74-9d13-19b57dc035d9"
+  },
+  {
+   "available_future_steps": 359,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-39ed6bdc-3e24-5a74-9d13-19b57dc035d9-f000130",
+   "scene_id": "39ed6bdc-3e24-5a74-9d13-19b57dc035d9"
+  },
+  {
+   "available_future_steps": 269,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-39ed6bdc-3e24-5a74-9d13-19b57dc035d9-f000220",
+   "scene_id": "39ed6bdc-3e24-5a74-9d13-19b57dc035d9"
+  },
+  {
+   "available_future_steps": 179,
+   "frame_index": 310,
+   "sample_uid": "kitscenes-v1-39ed6bdc-3e24-5a74-9d13-19b57dc035d9-f000310",
+   "scene_id": "39ed6bdc-3e24-5a74-9d13-19b57dc035d9"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 400,
+   "sample_uid": "kitscenes-v1-39ed6bdc-3e24-5a74-9d13-19b57dc035d9-f000400",
+   "scene_id": "39ed6bdc-3e24-5a74-9d13-19b57dc035d9"
+  },
+  {
+   "available_future_steps": 459,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-3a616875-9aef-1054-c506-2c105451c6e9-f000040",
+   "scene_id": "3a616875-9aef-1054-c506-2c105451c6e9"
+  },
+  {
+   "available_future_steps": 369,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-3a616875-9aef-1054-c506-2c105451c6e9-f000130",
+   "scene_id": "3a616875-9aef-1054-c506-2c105451c6e9"
+  },
+  {
+   "available_future_steps": 279,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-3a616875-9aef-1054-c506-2c105451c6e9-f000220",
+   "scene_id": "3a616875-9aef-1054-c506-2c105451c6e9"
+  },
+  {
+   "available_future_steps": 189,
+   "frame_index": 310,
+   "sample_uid": "kitscenes-v1-3a616875-9aef-1054-c506-2c105451c6e9-f000310",
+   "scene_id": "3a616875-9aef-1054-c506-2c105451c6e9"
+  },
+  {
+   "available_future_steps": 99,
+   "frame_index": 400,
+   "sample_uid": "kitscenes-v1-3a616875-9aef-1054-c506-2c105451c6e9-f000400",
+   "scene_id": "3a616875-9aef-1054-c506-2c105451c6e9"
+  },
+  {
+   "available_future_steps": 119,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-3acd59be-14aa-6cf1-14df-0bb17bb6595c-f000040",
+   "scene_id": "3acd59be-14aa-6cf1-14df-0bb17bb6595c"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-3b1a16a1-ebf3-4190-4fd5-73b459bc6cd6-f000040",
+   "scene_id": "3b1a16a1-ebf3-4190-4fd5-73b459bc6cd6"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-3b1a16a1-ebf3-4190-4fd5-73b459bc6cd6-f000130",
+   "scene_id": "3b1a16a1-ebf3-4190-4fd5-73b459bc6cd6"
+  },
+  {
+   "available_future_steps": 99,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-3ba62d26-12d4-c3bc-df8f-fbe7a5c99f47-f000040",
+   "scene_id": "3ba62d26-12d4-c3bc-df8f-fbe7a5c99f47"
+  },
+  {
+   "available_future_steps": 149,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-3cd1a6eb-e020-f12a-c1e9-457a883fb969-f000040",
+   "scene_id": "3cd1a6eb-e020-f12a-c1e9-457a883fb969"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-3cd1a6eb-e020-f12a-c1e9-457a883fb969-f000130",
+   "scene_id": "3cd1a6eb-e020-f12a-c1e9-457a883fb969"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-45ac20f8-36b9-92b1-6f91-35811ffc140c-f000040",
+   "scene_id": "45ac20f8-36b9-92b1-6f91-35811ffc140c"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-45ac20f8-36b9-92b1-6f91-35811ffc140c-f000130",
+   "scene_id": "45ac20f8-36b9-92b1-6f91-35811ffc140c"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-4bcb0526-6b76-32f7-0b16-f5e720fa1ca6-f000040",
+   "scene_id": "4bcb0526-6b76-32f7-0b16-f5e720fa1ca6"
+  },
+  {
+   "available_future_steps": 119,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-4c944492-078c-d0ea-1948-b9cfe797860d-f000040",
+   "scene_id": "4c944492-078c-d0ea-1948-b9cfe797860d"
+  },
+  {
+   "available_future_steps": 189,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-50df6381-ca49-2a1c-1360-95660989f096-f000040",
+   "scene_id": "50df6381-ca49-2a1c-1360-95660989f096"
+  },
+  {
+   "available_future_steps": 99,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-50df6381-ca49-2a1c-1360-95660989f096-f000130",
+   "scene_id": "50df6381-ca49-2a1c-1360-95660989f096"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-51d6f5e5-7c50-2631-8cda-395ac448f247-f000040",
+   "scene_id": "51d6f5e5-7c50-2631-8cda-395ac448f247"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-51d6f5e5-7c50-2631-8cda-395ac448f247-f000130",
+   "scene_id": "51d6f5e5-7c50-2631-8cda-395ac448f247"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-546bc7e5-42a9-feae-e2a4-11017281ab2e-f000040",
+   "scene_id": "546bc7e5-42a9-feae-e2a4-11017281ab2e"
+  },
+  {
+   "available_future_steps": 79,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-54cd7acd-3f87-9d32-b605-9cd85fc6b7bb-f000040",
+   "scene_id": "54cd7acd-3f87-9d32-b605-9cd85fc6b7bb"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-59dc3fbb-355e-a774-0cef-f4c1f7528ae8-f000040",
+   "scene_id": "59dc3fbb-355e-a774-0cef-f4c1f7528ae8"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-59dc3fbb-355e-a774-0cef-f4c1f7528ae8-f000130",
+   "scene_id": "59dc3fbb-355e-a774-0cef-f4c1f7528ae8"
+  },
+  {
+   "available_future_steps": 129,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-5aaa3555-2bdc-bbd6-b240-35a1bccbe73e-f000040",
+   "scene_id": "5aaa3555-2bdc-bbd6-b240-35a1bccbe73e"
+  },
+  {
+   "available_future_steps": 39,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-5aaa3555-2bdc-bbd6-b240-35a1bccbe73e-f000130",
+   "scene_id": "5aaa3555-2bdc-bbd6-b240-35a1bccbe73e"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-5bf1c78c-46c7-2e4d-7295-00a1de902965-f000040",
+   "scene_id": "5bf1c78c-46c7-2e4d-7295-00a1de902965"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-5d443f77-d840-c7ff-55cd-beeec5249316-f000040",
+   "scene_id": "5d443f77-d840-c7ff-55cd-beeec5249316"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-61a2563e-7d1f-afc5-f329-052dceca584d-f000040",
+   "scene_id": "61a2563e-7d1f-afc5-f329-052dceca584d"
+  },
+  {
+   "available_future_steps": 259,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-67abb4e2-88be-bea0-4eb7-b423b5fc7787-f000040",
+   "scene_id": "67abb4e2-88be-bea0-4eb7-b423b5fc7787"
+  },
+  {
+   "available_future_steps": 169,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-67abb4e2-88be-bea0-4eb7-b423b5fc7787-f000130",
+   "scene_id": "67abb4e2-88be-bea0-4eb7-b423b5fc7787"
+  },
+  {
+   "available_future_steps": 79,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-67abb4e2-88be-bea0-4eb7-b423b5fc7787-f000220",
+   "scene_id": "67abb4e2-88be-bea0-4eb7-b423b5fc7787"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-6848358c-4147-804f-def6-628b1b8bf75f-f000040",
+   "scene_id": "6848358c-4147-804f-def6-628b1b8bf75f"
+  },
+  {
+   "available_future_steps": 559,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-6f47eb66-9043-845f-5043-6731c294de25-f000040",
+   "scene_id": "6f47eb66-9043-845f-5043-6731c294de25"
+  },
+  {
+   "available_future_steps": 469,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-6f47eb66-9043-845f-5043-6731c294de25-f000130",
+   "scene_id": "6f47eb66-9043-845f-5043-6731c294de25"
+  },
+  {
+   "available_future_steps": 379,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-6f47eb66-9043-845f-5043-6731c294de25-f000220",
+   "scene_id": "6f47eb66-9043-845f-5043-6731c294de25"
+  },
+  {
+   "available_future_steps": 289,
+   "frame_index": 310,
+   "sample_uid": "kitscenes-v1-6f47eb66-9043-845f-5043-6731c294de25-f000310",
+   "scene_id": "6f47eb66-9043-845f-5043-6731c294de25"
+  },
+  {
+   "available_future_steps": 199,
+   "frame_index": 400,
+   "sample_uid": "kitscenes-v1-6f47eb66-9043-845f-5043-6731c294de25-f000400",
+   "scene_id": "6f47eb66-9043-845f-5043-6731c294de25"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 490,
+   "sample_uid": "kitscenes-v1-6f47eb66-9043-845f-5043-6731c294de25-f000490",
+   "scene_id": "6f47eb66-9043-845f-5043-6731c294de25"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-703ee0c4-7726-5fae-b531-3311110f4706-f000040",
+   "scene_id": "703ee0c4-7726-5fae-b531-3311110f4706"
+  },
+  {
+   "available_future_steps": 119,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-7080aa7f-1f6d-0cd9-5efd-352426c5f51d-f000040",
+   "scene_id": "7080aa7f-1f6d-0cd9-5efd-352426c5f51d"
+  },
+  {
+   "available_future_steps": 229,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-766aceef-95a7-052c-b366-6cae96bdfd08-f000040",
+   "scene_id": "766aceef-95a7-052c-b366-6cae96bdfd08"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-766aceef-95a7-052c-b366-6cae96bdfd08-f000130",
+   "scene_id": "766aceef-95a7-052c-b366-6cae96bdfd08"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-766aceef-95a7-052c-b366-6cae96bdfd08-f000220",
+   "scene_id": "766aceef-95a7-052c-b366-6cae96bdfd08"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-77c7c33c-a491-78cc-4b70-8f3db4527cb8-f000040",
+   "scene_id": "77c7c33c-a491-78cc-4b70-8f3db4527cb8"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-77c7c33c-a491-78cc-4b70-8f3db4527cb8-f000130",
+   "scene_id": "77c7c33c-a491-78cc-4b70-8f3db4527cb8"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-840e435a-a1d3-500b-58fc-7998ef3758f9-f000040",
+   "scene_id": "840e435a-a1d3-500b-58fc-7998ef3758f9"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-840e435a-a1d3-500b-58fc-7998ef3758f9-f000130",
+   "scene_id": "840e435a-a1d3-500b-58fc-7998ef3758f9"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-85dbe6d6-47e0-7359-85cc-df98edf61ec3-f000040",
+   "scene_id": "85dbe6d6-47e0-7359-85cc-df98edf61ec3"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-85dbe6d6-47e0-7359-85cc-df98edf61ec3-f000130",
+   "scene_id": "85dbe6d6-47e0-7359-85cc-df98edf61ec3"
+  },
+  {
+   "available_future_steps": 189,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-8c501afb-5a9b-e881-1c7d-99c21f39b1cc-f000040",
+   "scene_id": "8c501afb-5a9b-e881-1c7d-99c21f39b1cc"
+  },
+  {
+   "available_future_steps": 99,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-8c501afb-5a9b-e881-1c7d-99c21f39b1cc-f000130",
+   "scene_id": "8c501afb-5a9b-e881-1c7d-99c21f39b1cc"
+  },
+  {
+   "available_future_steps": 189,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-8d3308e6-b9d2-1f69-d6b1-ac4dc7fb5db9-f000040",
+   "scene_id": "8d3308e6-b9d2-1f69-d6b1-ac4dc7fb5db9"
+  },
+  {
+   "available_future_steps": 99,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-8d3308e6-b9d2-1f69-d6b1-ac4dc7fb5db9-f000130",
+   "scene_id": "8d3308e6-b9d2-1f69-d6b1-ac4dc7fb5db9"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-8dcfc2ba-200e-154a-4283-95f5a073b488-f000040",
+   "scene_id": "8dcfc2ba-200e-154a-4283-95f5a073b488"
+  },
+  {
+   "available_future_steps": 79,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-8fb5bd8e-16c6-7e28-712a-55fe1550d314-f000040",
+   "scene_id": "8fb5bd8e-16c6-7e28-712a-55fe1550d314"
+  },
+  {
+   "available_future_steps": 79,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-916b4c97-ff53-61b9-2544-6f118916ac7a-f000040",
+   "scene_id": "916b4c97-ff53-61b9-2544-6f118916ac7a"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-93b7a937-b81a-c07e-0479-c84e8acbfd89-f000040",
+   "scene_id": "93b7a937-b81a-c07e-0479-c84e8acbfd89"
+  },
+  {
+   "available_future_steps": 209,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-93bcdd59-4141-3fed-17c7-7f1de5026f79-f000040",
+   "scene_id": "93bcdd59-4141-3fed-17c7-7f1de5026f79"
+  },
+  {
+   "available_future_steps": 119,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-93bcdd59-4141-3fed-17c7-7f1de5026f79-f000130",
+   "scene_id": "93bcdd59-4141-3fed-17c7-7f1de5026f79"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-950dda14-fa6e-bb94-1557-3f1c5d50c2db-f000040",
+   "scene_id": "950dda14-fa6e-bb94-1557-3f1c5d50c2db"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-95bac4b1-6724-24c5-33d9-12a5955f72b3-f000040",
+   "scene_id": "95bac4b1-6724-24c5-33d9-12a5955f72b3"
+  },
+  {
+   "available_future_steps": 209,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-97a94a07-e9a4-fc20-81aa-821b432cae7f-f000040",
+   "scene_id": "97a94a07-e9a4-fc20-81aa-821b432cae7f"
+  },
+  {
+   "available_future_steps": 119,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-97a94a07-e9a4-fc20-81aa-821b432cae7f-f000130",
+   "scene_id": "97a94a07-e9a4-fc20-81aa-821b432cae7f"
+  },
+  {
+   "available_future_steps": 99,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-97dabcaa-1326-de39-cd3b-a06f172cc391-f000040",
+   "scene_id": "97dabcaa-1326-de39-cd3b-a06f172cc391"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-9e40e0fc-78c9-a5df-678b-3ca32593544f-f000040",
+   "scene_id": "9e40e0fc-78c9-a5df-678b-3ca32593544f"
+  },
+  {
+   "available_future_steps": 359,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-9ffae20c-9fcd-2bf7-363c-4a27aee7b99b-f000040",
+   "scene_id": "9ffae20c-9fcd-2bf7-363c-4a27aee7b99b"
+  },
+  {
+   "available_future_steps": 269,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-9ffae20c-9fcd-2bf7-363c-4a27aee7b99b-f000130",
+   "scene_id": "9ffae20c-9fcd-2bf7-363c-4a27aee7b99b"
+  },
+  {
+   "available_future_steps": 179,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-9ffae20c-9fcd-2bf7-363c-4a27aee7b99b-f000220",
+   "scene_id": "9ffae20c-9fcd-2bf7-363c-4a27aee7b99b"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 310,
+   "sample_uid": "kitscenes-v1-9ffae20c-9fcd-2bf7-363c-4a27aee7b99b-f000310",
+   "scene_id": "9ffae20c-9fcd-2bf7-363c-4a27aee7b99b"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-a5ef9e38-ce23-04ad-40ce-7e71e5f59e5a-f000040",
+   "scene_id": "a5ef9e38-ce23-04ad-40ce-7e71e5f59e5a"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-a724baf7-428b-eadc-9721-9de6195b0c3b-f000040",
+   "scene_id": "a724baf7-428b-eadc-9721-9de6195b0c3b"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-a724baf7-428b-eadc-9721-9de6195b0c3b-f000130",
+   "scene_id": "a724baf7-428b-eadc-9721-9de6195b0c3b"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-a83fd3b2-984d-7acf-a7f6-c9b91906d294-f000040",
+   "scene_id": "a83fd3b2-984d-7acf-a7f6-c9b91906d294"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-ab1cafcc-a47a-c515-c921-a148afddcc1e-f000040",
+   "scene_id": "ab1cafcc-a47a-c515-c921-a148afddcc1e"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-acbbe9df-02f6-68a8-46fe-b2c6acb40d9f-f000040",
+   "scene_id": "acbbe9df-02f6-68a8-46fe-b2c6acb40d9f"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-ae85d240-f64e-16a5-f580-ab8a6b4f8653-f000040",
+   "scene_id": "ae85d240-f64e-16a5-f580-ab8a6b4f8653"
+  },
+  {
+   "available_future_steps": 459,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-af665a7a-3262-4b3e-6c96-3e8b9fbe90d3-f000040",
+   "scene_id": "af665a7a-3262-4b3e-6c96-3e8b9fbe90d3"
+  },
+  {
+   "available_future_steps": 369,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-af665a7a-3262-4b3e-6c96-3e8b9fbe90d3-f000130",
+   "scene_id": "af665a7a-3262-4b3e-6c96-3e8b9fbe90d3"
+  },
+  {
+   "available_future_steps": 279,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-af665a7a-3262-4b3e-6c96-3e8b9fbe90d3-f000220",
+   "scene_id": "af665a7a-3262-4b3e-6c96-3e8b9fbe90d3"
+  },
+  {
+   "available_future_steps": 189,
+   "frame_index": 310,
+   "sample_uid": "kitscenes-v1-af665a7a-3262-4b3e-6c96-3e8b9fbe90d3-f000310",
+   "scene_id": "af665a7a-3262-4b3e-6c96-3e8b9fbe90d3"
+  },
+  {
+   "available_future_steps": 99,
+   "frame_index": 400,
+   "sample_uid": "kitscenes-v1-af665a7a-3262-4b3e-6c96-3e8b9fbe90d3-f000400",
+   "scene_id": "af665a7a-3262-4b3e-6c96-3e8b9fbe90d3"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-b0b4b2b5-63ce-0a08-b371-3577c1f0f8d4-f000040",
+   "scene_id": "b0b4b2b5-63ce-0a08-b371-3577c1f0f8d4"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-b0b4b2b5-63ce-0a08-b371-3577c1f0f8d4-f000130",
+   "scene_id": "b0b4b2b5-63ce-0a08-b371-3577c1f0f8d4"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-b2f44b75-f4f2-6f24-2a84-d54c3ca404ee-f000040",
+   "scene_id": "b2f44b75-f4f2-6f24-2a84-d54c3ca404ee"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-b2f44b75-f4f2-6f24-2a84-d54c3ca404ee-f000130",
+   "scene_id": "b2f44b75-f4f2-6f24-2a84-d54c3ca404ee"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-b3dd3c95-fe32-d1b6-66d3-3677e8c33ce6-f000040",
+   "scene_id": "b3dd3c95-fe32-d1b6-66d3-3677e8c33ce6"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-b574fe64-7961-4aed-8fc0-16be9d13360a-f000040",
+   "scene_id": "b574fe64-7961-4aed-8fc0-16be9d13360a"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-b9c27408-5f4d-6fbb-9fe4-7bd8b2e46969-f000040",
+   "scene_id": "b9c27408-5f4d-6fbb-9fe4-7bd8b2e46969"
+  },
+  {
+   "available_future_steps": 229,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-ba2f9a7d-a115-9696-a431-72c7265413ff-f000040",
+   "scene_id": "ba2f9a7d-a115-9696-a431-72c7265413ff"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-ba2f9a7d-a115-9696-a431-72c7265413ff-f000130",
+   "scene_id": "ba2f9a7d-a115-9696-a431-72c7265413ff"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-ba2f9a7d-a115-9696-a431-72c7265413ff-f000220",
+   "scene_id": "ba2f9a7d-a115-9696-a431-72c7265413ff"
+  },
+  {
+   "available_future_steps": 329,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-ba826f49-37df-54f1-1f9e-b3df77208a5d-f000040",
+   "scene_id": "ba826f49-37df-54f1-1f9e-b3df77208a5d"
+  },
+  {
+   "available_future_steps": 239,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-ba826f49-37df-54f1-1f9e-b3df77208a5d-f000130",
+   "scene_id": "ba826f49-37df-54f1-1f9e-b3df77208a5d"
+  },
+  {
+   "available_future_steps": 149,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-ba826f49-37df-54f1-1f9e-b3df77208a5d-f000220",
+   "scene_id": "ba826f49-37df-54f1-1f9e-b3df77208a5d"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 310,
+   "sample_uid": "kitscenes-v1-ba826f49-37df-54f1-1f9e-b3df77208a5d-f000310",
+   "scene_id": "ba826f49-37df-54f1-1f9e-b3df77208a5d"
+  },
+  {
+   "available_future_steps": 189,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-bb2f22e1-82e1-2aaa-6837-a91792df0dc1-f000040",
+   "scene_id": "bb2f22e1-82e1-2aaa-6837-a91792df0dc1"
+  },
+  {
+   "available_future_steps": 99,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-bb2f22e1-82e1-2aaa-6837-a91792df0dc1-f000130",
+   "scene_id": "bb2f22e1-82e1-2aaa-6837-a91792df0dc1"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-bc171ed9-da3d-1f58-6321-39e8af48e7eb-f000040",
+   "scene_id": "bc171ed9-da3d-1f58-6321-39e8af48e7eb"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-bc3300c2-0bae-0ced-64c5-c5bf8ebc51c2-f000040",
+   "scene_id": "bc3300c2-0bae-0ced-64c5-c5bf8ebc51c2"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-be5138b4-7c33-c308-455a-4a685e4190d8-f000040",
+   "scene_id": "be5138b4-7c33-c308-455a-4a685e4190d8"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-c16f7986-4705-4a1f-a95d-93635e7f2106-f000040",
+   "scene_id": "c16f7986-4705-4a1f-a95d-93635e7f2106"
+  },
+  {
+   "available_future_steps": 119,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-c1bf5a93-e889-43bd-2a51-62789e146bd1-f000040",
+   "scene_id": "c1bf5a93-e889-43bd-2a51-62789e146bd1"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-c1d9c491-7123-504e-f609-6b9cd96b833a-f000040",
+   "scene_id": "c1d9c491-7123-504e-f609-6b9cd96b833a"
+  },
+  {
+   "available_future_steps": 179,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-c34c778f-ad8c-0aa9-7e1a-c86a73f887c7-f000040",
+   "scene_id": "c34c778f-ad8c-0aa9-7e1a-c86a73f887c7"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-c34c778f-ad8c-0aa9-7e1a-c86a73f887c7-f000130",
+   "scene_id": "c34c778f-ad8c-0aa9-7e1a-c86a73f887c7"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-c542e25e-dc7e-9e5a-e4b8-e751e97f147f-f000040",
+   "scene_id": "c542e25e-dc7e-9e5a-e4b8-e751e97f147f"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-c71eb5a2-9d20-3d95-7279-965c62243e04-f000040",
+   "scene_id": "c71eb5a2-9d20-3d95-7279-965c62243e04"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-c71eb5a2-9d20-3d95-7279-965c62243e04-f000130",
+   "scene_id": "c71eb5a2-9d20-3d95-7279-965c62243e04"
+  },
+  {
+   "available_future_steps": 149,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-c73fd01c-40ef-afb3-094a-c6c73e6847bb-f000040",
+   "scene_id": "c73fd01c-40ef-afb3-094a-c6c73e6847bb"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-c73fd01c-40ef-afb3-094a-c6c73e6847bb-f000130",
+   "scene_id": "c73fd01c-40ef-afb3-094a-c6c73e6847bb"
+  },
+  {
+   "available_future_steps": 179,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-c78f7cc6-635d-92ed-ff81-d8c4edc44804-f000040",
+   "scene_id": "c78f7cc6-635d-92ed-ff81-d8c4edc44804"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-c78f7cc6-635d-92ed-ff81-d8c4edc44804-f000130",
+   "scene_id": "c78f7cc6-635d-92ed-ff81-d8c4edc44804"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-cc31f13d-c543-3a37-5088-8e4b9440a21d-f000040",
+   "scene_id": "cc31f13d-c543-3a37-5088-8e4b9440a21d"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-cc31f13d-c543-3a37-5088-8e4b9440a21d-f000130",
+   "scene_id": "cc31f13d-c543-3a37-5088-8e4b9440a21d"
+  },
+  {
+   "available_future_steps": 259,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-ced33ece-6a08-ef0a-8feb-d2b19cc90208-f000040",
+   "scene_id": "ced33ece-6a08-ef0a-8feb-d2b19cc90208"
+  },
+  {
+   "available_future_steps": 169,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-ced33ece-6a08-ef0a-8feb-d2b19cc90208-f000130",
+   "scene_id": "ced33ece-6a08-ef0a-8feb-d2b19cc90208"
+  },
+  {
+   "available_future_steps": 79,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-ced33ece-6a08-ef0a-8feb-d2b19cc90208-f000220",
+   "scene_id": "ced33ece-6a08-ef0a-8feb-d2b19cc90208"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-cf8cfcba-f035-8a1c-2d17-65103b910ad4-f000040",
+   "scene_id": "cf8cfcba-f035-8a1c-2d17-65103b910ad4"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-cf8cfcba-f035-8a1c-2d17-65103b910ad4-f000130",
+   "scene_id": "cf8cfcba-f035-8a1c-2d17-65103b910ad4"
+  },
+  {
+   "available_future_steps": 359,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-d427b10f-7b2c-824f-a3d2-651e57fc821d-f000040",
+   "scene_id": "d427b10f-7b2c-824f-a3d2-651e57fc821d"
+  },
+  {
+   "available_future_steps": 269,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-d427b10f-7b2c-824f-a3d2-651e57fc821d-f000130",
+   "scene_id": "d427b10f-7b2c-824f-a3d2-651e57fc821d"
+  },
+  {
+   "available_future_steps": 179,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-d427b10f-7b2c-824f-a3d2-651e57fc821d-f000220",
+   "scene_id": "d427b10f-7b2c-824f-a3d2-651e57fc821d"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 310,
+   "sample_uid": "kitscenes-v1-d427b10f-7b2c-824f-a3d2-651e57fc821d-f000310",
+   "scene_id": "d427b10f-7b2c-824f-a3d2-651e57fc821d"
+  },
+  {
+   "available_future_steps": 79,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-d5388adc-7931-b637-5d8c-f11ead33c41b-f000040",
+   "scene_id": "d5388adc-7931-b637-5d8c-f11ead33c41b"
+  },
+  {
+   "available_future_steps": 319,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-d7b1c9c6-e178-e094-81ab-00aee41b6524-f000040",
+   "scene_id": "d7b1c9c6-e178-e094-81ab-00aee41b6524"
+  },
+  {
+   "available_future_steps": 229,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-d7b1c9c6-e178-e094-81ab-00aee41b6524-f000130",
+   "scene_id": "d7b1c9c6-e178-e094-81ab-00aee41b6524"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-d7b1c9c6-e178-e094-81ab-00aee41b6524-f000220",
+   "scene_id": "d7b1c9c6-e178-e094-81ab-00aee41b6524"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 310,
+   "sample_uid": "kitscenes-v1-d7b1c9c6-e178-e094-81ab-00aee41b6524-f000310",
+   "scene_id": "d7b1c9c6-e178-e094-81ab-00aee41b6524"
+  },
+  {
+   "available_future_steps": 389,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-d96782f8-760b-8970-bfad-2a3552d207a4-f000040",
+   "scene_id": "d96782f8-760b-8970-bfad-2a3552d207a4"
+  },
+  {
+   "available_future_steps": 299,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-d96782f8-760b-8970-bfad-2a3552d207a4-f000130",
+   "scene_id": "d96782f8-760b-8970-bfad-2a3552d207a4"
+  },
+  {
+   "available_future_steps": 209,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-d96782f8-760b-8970-bfad-2a3552d207a4-f000220",
+   "scene_id": "d96782f8-760b-8970-bfad-2a3552d207a4"
+  },
+  {
+   "available_future_steps": 119,
+   "frame_index": 310,
+   "sample_uid": "kitscenes-v1-d96782f8-760b-8970-bfad-2a3552d207a4-f000310",
+   "scene_id": "d96782f8-760b-8970-bfad-2a3552d207a4"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-da084a65-8bd0-7d8b-ba1b-3a3c0ea0832b-f000040",
+   "scene_id": "da084a65-8bd0-7d8b-ba1b-3a3c0ea0832b"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-dbba76d9-91ec-b44f-f3d3-6348d55f7849-f000040",
+   "scene_id": "dbba76d9-91ec-b44f-f3d3-6348d55f7849"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-dbba76d9-91ec-b44f-f3d3-6348d55f7849-f000130",
+   "scene_id": "dbba76d9-91ec-b44f-f3d3-6348d55f7849"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-dbce1c0b-1db9-0088-49fc-508171f4d52a-f000040",
+   "scene_id": "dbce1c0b-1db9-0088-49fc-508171f4d52a"
+  },
+  {
+   "available_future_steps": 99,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-dda6802f-9e7b-df89-0f5f-f3382a674e55-f000040",
+   "scene_id": "dda6802f-9e7b-df89-0f5f-f3382a674e55"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-de354ef1-ca5b-01ae-e04e-099d36e2e1c4-f000040",
+   "scene_id": "de354ef1-ca5b-01ae-e04e-099d36e2e1c4"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-e57f9b38-09d1-efd7-fd05-14daa2cafa82-f000040",
+   "scene_id": "e57f9b38-09d1-efd7-fd05-14daa2cafa82"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-e57f9b38-09d1-efd7-fd05-14daa2cafa82-f000130",
+   "scene_id": "e57f9b38-09d1-efd7-fd05-14daa2cafa82"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-e6826f0a-c5c1-c4bb-87cf-8a6dcafad029-f000040",
+   "scene_id": "e6826f0a-c5c1-c4bb-87cf-8a6dcafad029"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-e6826f0a-c5c1-c4bb-87cf-8a6dcafad029-f000130",
+   "scene_id": "e6826f0a-c5c1-c4bb-87cf-8a6dcafad029"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-e6e18423-1964-2ec2-1abe-302f0eceff32-f000040",
+   "scene_id": "e6e18423-1964-2ec2-1abe-302f0eceff32"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-e6e18423-1964-2ec2-1abe-302f0eceff32-f000130",
+   "scene_id": "e6e18423-1964-2ec2-1abe-302f0eceff32"
+  },
+  {
+   "available_future_steps": 109,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-e8dae25a-d0a9-bac2-dba2-c6e22223d53f-f000040",
+   "scene_id": "e8dae25a-d0a9-bac2-dba2-c6e22223d53f"
+  },
+  {
+   "available_future_steps": 209,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-e983ab19-07f4-c6a3-2068-96cdde9f516b-f000040",
+   "scene_id": "e983ab19-07f4-c6a3-2068-96cdde9f516b"
+  },
+  {
+   "available_future_steps": 119,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-e983ab19-07f4-c6a3-2068-96cdde9f516b-f000130",
+   "scene_id": "e983ab19-07f4-c6a3-2068-96cdde9f516b"
+  },
+  {
+   "available_future_steps": 239,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-eca7bf3a-32dd-0761-72e5-c8655aa143dd-f000040",
+   "scene_id": "eca7bf3a-32dd-0761-72e5-c8655aa143dd"
+  },
+  {
+   "available_future_steps": 149,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-eca7bf3a-32dd-0761-72e5-c8655aa143dd-f000130",
+   "scene_id": "eca7bf3a-32dd-0761-72e5-c8655aa143dd"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 220,
+   "sample_uid": "kitscenes-v1-eca7bf3a-32dd-0761-72e5-c8655aa143dd-f000220",
+   "scene_id": "eca7bf3a-32dd-0761-72e5-c8655aa143dd"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-ed483615-48ce-22f2-c4d6-4c99785a652a-f000040",
+   "scene_id": "ed483615-48ce-22f2-c4d6-4c99785a652a"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-f0b1b61b-e17e-797b-e65d-065c8a0360e5-f000040",
+   "scene_id": "f0b1b61b-e17e-797b-e65d-065c8a0360e5"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-f0b1b61b-e17e-797b-e65d-065c8a0360e5-f000130",
+   "scene_id": "f0b1b61b-e17e-797b-e65d-065c8a0360e5"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-f0e0c753-301c-c983-937f-e317aa14428c-f000040",
+   "scene_id": "f0e0c753-301c-c983-937f-e317aa14428c"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-f0e0c753-301c-c983-937f-e317aa14428c-f000130",
+   "scene_id": "f0e0c753-301c-c983-937f-e317aa14428c"
+  },
+  {
+   "available_future_steps": 204,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-f10a3467-081f-a39b-df28-67eb510457aa-f000040",
+   "scene_id": "f10a3467-081f-a39b-df28-67eb510457aa"
+  },
+  {
+   "available_future_steps": 114,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-f10a3467-081f-a39b-df28-67eb510457aa-f000130",
+   "scene_id": "f10a3467-081f-a39b-df28-67eb510457aa"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-f6bb38bc-c2c9-0744-e351-bdeef0ad069c-f000040",
+   "scene_id": "f6bb38bc-c2c9-0744-e351-bdeef0ad069c"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-f745d301-740f-2824-3260-7c31c6e6720e-f000040",
+   "scene_id": "f745d301-740f-2824-3260-7c31c6e6720e"
+  },
+  {
+   "available_future_steps": 89,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-f7a2812c-0b10-0c8a-69a0-019e11f38c5e-f000040",
+   "scene_id": "f7a2812c-0b10-0c8a-69a0-019e11f38c5e"
+  },
+  {
+   "available_future_steps": 139,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-f88f4a8e-3fe3-7148-2fa9-e450385431d5-f000040",
+   "scene_id": "f88f4a8e-3fe3-7148-2fa9-e450385431d5"
+  },
+  {
+   "available_future_steps": 49,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-f88f4a8e-3fe3-7148-2fa9-e450385431d5-f000130",
+   "scene_id": "f88f4a8e-3fe3-7148-2fa9-e450385431d5"
+  },
+  {
+   "available_future_steps": 99,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-fbb55f13-3c3d-9d2b-d70f-9b462bd225d3-f000040",
+   "scene_id": "fbb55f13-3c3d-9d2b-d70f-9b462bd225d3"
+  },
+  {
+   "available_future_steps": 159,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-fd274f08-b4e8-b13c-d754-a9b24d6cab13-f000040",
+   "scene_id": "fd274f08-b4e8-b13c-d754-a9b24d6cab13"
+  },
+  {
+   "available_future_steps": 69,
+   "frame_index": 130,
+   "sample_uid": "kitscenes-v1-fd274f08-b4e8-b13c-d754-a9b24d6cab13-f000130",
+   "scene_id": "fd274f08-b4e8-b13c-d754-a9b24d6cab13"
+  },
+  {
+   "available_future_steps": 59,
+   "frame_index": 40,
+   "sample_uid": "kitscenes-v1-fdcc7efa-1a3c-66ac-4889-f19100d33831-f000040",
+   "scene_id": "fdcc7efa-1a3c-66ac-4889-f19100d33831"
+  }
+ ],
+ "dataset_repo_id": "KIT-MRT/KITScenes-Multimodal",
+ "dataset_revision": "6fde0034446669e2ed7235e4c7fe323cd23d599d",
+ "frequency_hz": 10,
+ "horizon_counts": {
+  "1s": 202,
+  "2s": 202,
+  "3s": 202,
+  "4s": 200,
+  "5s": 186
+ },
+ "keyframe_count": 202,
+ "minimum_future_steps": 30,
+ "population_id": "issue210-kitscenes-val-anchor40-stride90-min3s",
+ "scene_count": 117,
+ "scene_usable_frames": {
+  "00fc1b9b-005e-554c-7733-c4c0adeca015": 100,
+  "02be7d74-6f74-9167-c8a2-84fc961c0fbd": 100,
+  "03ed2585-0729-92ad-98af-fdd9ac1c3a80": 200,
+  "04a39028-c434-6cff-b3f4-9f8dbb9aa078": 280,
+  "0638dbd2-172d-142e-de9f-9bc5c6ca2b0f": 100,
+  "0cfdeb83-2a4a-00d2-a500-787346d98e63": 180,
+  "0dd003b2-0988-0da3-bf75-ee91deaa9ce6": 120,
+  "0f8ffa88-e84d-eaa2-4ef1-62bb539f8e03": 250,
+  "10edd8d1-2326-5e5e-6e32-654009fdf287": 150,
+  "142f1419-b6f2-4215-4055-6eb161f63043": 100,
+  "18775d16-38f0-156e-4733-07553c14186b": 110,
+  "1db9c8a0-d836-07b4-340d-43bd91c97955": 100,
+  "236144ec-a0fd-6f16-09d8-514f31a202d3": 100,
+  "2381584f-2ac6-83c1-cfe8-cbf5b1d2cfda": 200,
+  "2673dca8-c7f5-c2d9-78eb-a06e201776dc": 350,
+  "2a28c841-e21c-ddf5-948b-cf50f021a670": 130,
+  "324fb34d-3cc0-7fd5-765c-d3e2266041f4": 100,
+  "35b08325-d022-4e7e-23ca-6523644f13d3": 150,
+  "35eb1fee-cf5c-deda-96db-d9c8007c522d": 100,
+  "3689ea5c-1275-629a-8fa1-34142129eae5": 150,
+  "38fd42fe-67df-73e0-670d-27862b697f2c": 150,
+  "3919596d-7f1e-3bd5-ca67-052aba651bf6": 150,
+  "39ed6bdc-3e24-5a74-9d13-19b57dc035d9": 490,
+  "3a616875-9aef-1054-c506-2c105451c6e9": 500,
+  "3acd59be-14aa-6cf1-14df-0bb17bb6595c": 160,
+  "3b1a16a1-ebf3-4190-4fd5-73b459bc6cd6": 180,
+  "3ba62d26-12d4-c3bc-df8f-fbe7a5c99f47": 140,
+  "3cd1a6eb-e020-f12a-c1e9-457a883fb969": 190,
+  "45ac20f8-36b9-92b1-6f91-35811ffc140c": 200,
+  "4bcb0526-6b76-32f7-0b16-f5e720fa1ca6": 100,
+  "4c944492-078c-d0ea-1948-b9cfe797860d": 160,
+  "50df6381-ca49-2a1c-1360-95660989f096": 230,
+  "51d6f5e5-7c50-2631-8cda-395ac448f247": 180,
+  "546bc7e5-42a9-feae-e2a4-11017281ab2e": 100,
+  "54cd7acd-3f87-9d32-b605-9cd85fc6b7bb": 120,
+  "59dc3fbb-355e-a774-0cef-f4c1f7528ae8": 200,
+  "5aaa3555-2bdc-bbd6-b240-35a1bccbe73e": 170,
+  "5bf1c78c-46c7-2e4d-7295-00a1de902965": 150,
+  "5d443f77-d840-c7ff-55cd-beeec5249316": 110,
+  "61a2563e-7d1f-afc5-f329-052dceca584d": 100,
+  "67abb4e2-88be-bea0-4eb7-b423b5fc7787": 300,
+  "6848358c-4147-804f-def6-628b1b8bf75f": 100,
+  "6f47eb66-9043-845f-5043-6731c294de25": 600,
+  "703ee0c4-7726-5fae-b531-3311110f4706": 150,
+  "7080aa7f-1f6d-0cd9-5efd-352426c5f51d": 160,
+  "766aceef-95a7-052c-b366-6cae96bdfd08": 270,
+  "77c7c33c-a491-78cc-4b70-8f3db4527cb8": 200,
+  "840e435a-a1d3-500b-58fc-7998ef3758f9": 180,
+  "85dbe6d6-47e0-7359-85cc-df98edf61ec3": 200,
+  "8c501afb-5a9b-e881-1c7d-99c21f39b1cc": 230,
+  "8d3308e6-b9d2-1f69-d6b1-ac4dc7fb5db9": 230,
+  "8dcfc2ba-200e-154a-4283-95f5a073b488": 150,
+  "8fb5bd8e-16c6-7e28-712a-55fe1550d314": 120,
+  "916b4c97-ff53-61b9-2544-6f118916ac7a": 120,
+  "93b7a937-b81a-c07e-0479-c84e8acbfd89": 100,
+  "93bcdd59-4141-3fed-17c7-7f1de5026f79": 250,
+  "950dda14-fa6e-bb94-1557-3f1c5d50c2db": 100,
+  "95bac4b1-6724-24c5-33d9-12a5955f72b3": 110,
+  "97a94a07-e9a4-fc20-81aa-821b432cae7f": 250,
+  "97dabcaa-1326-de39-cd3b-a06f172cc391": 140,
+  "9e40e0fc-78c9-a5df-678b-3ca32593544f": 100,
+  "9ffae20c-9fcd-2bf7-363c-4a27aee7b99b": 400,
+  "a5ef9e38-ce23-04ad-40ce-7e71e5f59e5a": 100,
+  "a724baf7-428b-eadc-9721-9de6195b0c3b": 200,
+  "a83fd3b2-984d-7acf-a7f6-c9b91906d294": 130,
+  "ab1cafcc-a47a-c515-c921-a148afddcc1e": 100,
+  "acbbe9df-02f6-68a8-46fe-b2c6acb40d9f": 130,
+  "ae85d240-f64e-16a5-f580-ab8a6b4f8653": 150,
+  "af665a7a-3262-4b3e-6c96-3e8b9fbe90d3": 500,
+  "b0b4b2b5-63ce-0a08-b371-3577c1f0f8d4": 180,
+  "b2f44b75-f4f2-6f24-2a84-d54c3ca404ee": 180,
+  "b3dd3c95-fe32-d1b6-66d3-3677e8c33ce6": 130,
+  "b574fe64-7961-4aed-8fc0-16be9d13360a": 130,
+  "b9c27408-5f4d-6fbb-9fe4-7bd8b2e46969": 100,
+  "ba2f9a7d-a115-9696-a431-72c7265413ff": 270,
+  "ba826f49-37df-54f1-1f9e-b3df77208a5d": 370,
+  "bb2f22e1-82e1-2aaa-6837-a91792df0dc1": 230,
+  "bc171ed9-da3d-1f58-6321-39e8af48e7eb": 130,
+  "bc3300c2-0bae-0ced-64c5-c5bf8ebc51c2": 110,
+  "be5138b4-7c33-c308-455a-4a685e4190d8": 150,
+  "c16f7986-4705-4a1f-a95d-93635e7f2106": 100,
+  "c1bf5a93-e889-43bd-2a51-62789e146bd1": 160,
+  "c1d9c491-7123-504e-f609-6b9cd96b833a": 100,
+  "c34c778f-ad8c-0aa9-7e1a-c86a73f887c7": 220,
+  "c542e25e-dc7e-9e5a-e4b8-e751e97f147f": 100,
+  "c71eb5a2-9d20-3d95-7279-965c62243e04": 180,
+  "c73fd01c-40ef-afb3-094a-c6c73e6847bb": 190,
+  "c78f7cc6-635d-92ed-ff81-d8c4edc44804": 220,
+  "cc31f13d-c543-3a37-5088-8e4b9440a21d": 180,
+  "ced33ece-6a08-ef0a-8feb-d2b19cc90208": 300,
+  "cf8cfcba-f035-8a1c-2d17-65103b910ad4": 200,
+  "d427b10f-7b2c-824f-a3d2-651e57fc821d": 400,
+  "d5388adc-7931-b637-5d8c-f11ead33c41b": 120,
+  "d7b1c9c6-e178-e094-81ab-00aee41b6524": 360,
+  "d96782f8-760b-8970-bfad-2a3552d207a4": 430,
+  "da084a65-8bd0-7d8b-ba1b-3a3c0ea0832b": 100,
+  "dbba76d9-91ec-b44f-f3d3-6348d55f7849": 200,
+  "dbce1c0b-1db9-0088-49fc-508171f4d52a": 150,
+  "dda6802f-9e7b-df89-0f5f-f3382a674e55": 140,
+  "de354ef1-ca5b-01ae-e04e-099d36e2e1c4": 150,
+  "e57f9b38-09d1-efd7-fd05-14daa2cafa82": 180,
+  "e6826f0a-c5c1-c4bb-87cf-8a6dcafad029": 200,
+  "e6e18423-1964-2ec2-1abe-302f0eceff32": 180,
+  "e8dae25a-d0a9-bac2-dba2-c6e22223d53f": 150,
+  "e983ab19-07f4-c6a3-2068-96cdde9f516b": 250,
+  "eca7bf3a-32dd-0761-72e5-c8655aa143dd": 280,
+  "ed483615-48ce-22f2-c4d6-4c99785a652a": 100,
+  "f0b1b61b-e17e-797b-e65d-065c8a0360e5": 200,
+  "f0e0c753-301c-c983-937f-e317aa14428c": 200,
+  "f10a3467-081f-a39b-df28-67eb510457aa": 245,
+  "f6bb38bc-c2c9-0744-e351-bdeef0ad069c": 100,
+  "f745d301-740f-2824-3260-7c31c6e6720e": 130,
+  "f7a2812c-0b10-0c8a-69a0-019e11f38c5e": 130,
+  "f88f4a8e-3fe3-7148-2fa9-e450385431d5": 180,
+  "fbb55f13-3c3d-9d2b-d70f-9b462bd225d3": 140,
+  "fd274f08-b4e8-b13c-d754-a9b24d6cab13": 200,
+  "fdcc7efa-1a3c-66ac-4889-f19100d33831": 100
+ },
+ "schema_version": "simforge_kitscenes_population_v1",
+ "source_split": "val",
+ "status": "issue210_rule_candidate_anchor_list_not_published_by_maintainers"
+}
