@@ -315,8 +315,9 @@ def _l2d_episode_video_frames(ep_idx: int, video_key: str, frame_indices: set, e
     out: Dict[int, Any] = {}
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
-        # Frame-parallel decoding; frames and bytes are unchanged.
-        stream.thread_type = "AUTO"
+        # One decode thread: up to 12 workers share a 15-CPU pod, and FFmpeg
+        # would size its thread pool from the node's CPU count instead.
+        stream.codec_context.thread_count = 1
         time_base = stream.time_base
         if time_base is None:
             raise ValueError(f"{path} has no video time base")
