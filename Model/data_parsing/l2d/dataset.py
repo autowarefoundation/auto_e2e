@@ -650,25 +650,31 @@ class L2DDataset(Dataset):
 
 
 def track_points(data_root: str | Path, episodes: list[int], *, decimals: int = 4) -> np.ndarray:
-    """Distinct ``[longitude, latitude]`` of the episodes' poses and route waypoints.
+    """Distinct ``[longitude, latitude]`` of the episodes' poses and route waypoints."""
+    by_episode = track_points_by_episode(data_root, episodes, decimals=decimals)
+    return np.unique(np.concatenate(list(by_episode.values())), axis=0)
 
-    Reads the LeRobot parquet files directly, so no video is opened. Points
-    are rounded to ``decimals`` degrees (about 10 m) and deduplicated, which
-    keeps the result small however many frames the episodes have.
+
+def track_points_by_episode(data_root: str | Path, episodes: list[int], *, decimals: int = 4) -> dict[int, np.ndarray]:
+    """Distinct ``[longitude, latitude]`` of each episode's poses and route waypoints.
+
+    Reads the LeRobot parquet files once, so no video is opened and a
+    dataset of many partitions does not reread its data per partition.
+    Points are rounded to ``decimals`` degrees (about 10 m) and deduplicated
+    per episode, which keeps the result small however many frames there are.
     """
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
     wanted = set(int(episode) for episode in episodes)
-    seen: set[int] = set()
-    points = np.empty((0, 2))
+    found: dict[int, np.ndarray] = {}
 
     def flat(column) -> np.ndarray:
         # Nested lists flatten in Arrow without building Python objects.
-        values = column.combine_chunks()
         # Real L2D waypoints are large_list<large_list<float>>, vehicle a
         # fixed_size_list<float>[8].
+        values = column.combine_chunks()
         while pa.types.is_list(values.type) or pa.types.is_large_list(values.type) or pa.types.is_fixed_size_list(values.type):
             values = values.flatten()
         return values.to_numpy(zero_copy_only=False).astype(np.float64)
@@ -680,15 +686,19 @@ def track_points(data_root: str | Path, episodes: list[int], *, decimals: int = 
         table = table.filter(pc.is_in(table["episode_index"], value_set=pa.array(sorted(wanted))))
         if not table.num_rows:
             continue
-        seen.update(int(e) for e in pc.unique(table["episode_index"]).to_pylist())
+        episode_of_row = np.asarray(table["episode_index"].to_numpy(zero_copy_only=False), dtype=np.int64)
         vehicle = flat(table["observation.state.vehicle"]).reshape(table.num_rows, -1)
-        routes = flat(table["observation.state.waypoints"]).reshape(-1, 2)
-        batch = np.round(np.concatenate([vehicle[:, [_LONGITUDE, _LATITUDE]], routes]), decimals)
-        # Deduplicate per file, so memory follows distinct places, not frames.
-        points = np.unique(np.concatenate([points, batch[np.isfinite(batch).all(axis=1)]]), axis=0)
-    if seen != wanted:
-        raise ValueError(f"L2D data files lack episodes {sorted(wanted - seen)[:5]}")
-    return points
+        routes = flat(table["observation.state.waypoints"]).reshape(table.num_rows, -1, 2)
+        for episode in np.unique(episode_of_row):
+            rows = episode_of_row == episode
+            batch = np.round(np.concatenate([vehicle[rows][:, [_LONGITUDE, _LATITUDE]], routes[rows].reshape(-1, 2)]), decimals)
+            batch = batch[np.isfinite(batch).all(axis=1)]
+            previous = found.get(int(episode))
+            found[int(episode)] = np.unique(batch if previous is None else np.concatenate([previous, batch]), axis=0)
+    missing = sorted(wanted - set(found))
+    if missing:
+        raise ValueError(f"L2D data files lack episodes {missing[:5]}")
+    return found
 
 
 
