@@ -396,11 +396,12 @@ class MapFusion(enum.Enum):
 def _row_decode_worker_count(dataset: Dataset, row_count: int) -> int:
     """Bound row decoders by each parser's per-process memory footprint."""
     # Each KITScenes child reparses the scene's Lanelet2 map and calibration.
-    # Two children can exceed the 64 GiB pod limit on large scenes. L2D workers
-    # also retain six camera decoders, so cap them below the generic limit.
+    # Two children can exceed the 64 GiB pod limit on large scenes. An L2D
+    # child decodes one episode video at a time, so the pod's 15 CPUs, not
+    # memory, bound it.
     max_workers = {
         Dataset.KITSCENES: 1,
-        Dataset.L2D: 4,
+        Dataset.L2D: 12,
     }.get(dataset, 16)
     return max(1, min(max_workers, row_count))
 
