@@ -155,6 +155,11 @@ def init_row_worker(
             allow_mapless=allow_mapless,
         )
     else:
+        import torch
+
+        # Up to 12 L2D workers share a 15-CPU pod; torch would otherwise give
+        # each of them one intra-op thread per node CPU and throttle them all.
+        torch.set_num_threads(1)
         from data_parsing.l2d import L2DDataset
         l2d_episodes = (
             [int(episode) for episode in episodes]
@@ -310,6 +315,8 @@ def _l2d_episode_video_frames(ep_idx: int, video_key: str, frame_indices: set, e
     out: Dict[int, Any] = {}
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
+        # Frame-parallel decoding; frames and bytes are unchanged.
+        stream.thread_type = "AUTO"
         time_base = stream.time_base
         if time_base is None:
             raise ValueError(f"{path} has no video time base")
