@@ -269,16 +269,16 @@ Bytes and identity:
 | Artifact | Where | Identity |
 |---|---|---|
 | OSM extract | the snapshot's `osm` unit | tar digest in the snapshot manifest |
-| OSM region (ways near every pose and waypoint, 1 km buffer) | `l2d/osm-regions/<sha256>.json`, built once per plan by `build_l2d_osm_region` | its SHA-256 in every partition manifest and in the lineage `pack.osm_region`; `verify_lineage` rechecks both and the source unit |
+| OSM regions (ways near each partition's poses and waypoints, 1 km buffer) | `l2d/osm-regions/<sha256>.json`, one per partition, cut by `build_l2d_osm_region` after one PBF read per plan | each SHA-256 in its partition manifest and in the lineage `pack.osm_regions`; `verify_lineage` rechecks every region, its source unit, and that each partition stays within its region's episodes |
 | Every rule that decides the bytes (buffers, margins, lane widths, highway set, versions) | `navigation_contract.py` | `L2D_NAVIGATION_CONTRACT`, part of the L2D `pack_version` and so of `dataset_id` |
 
 Each episode builds its own lane graph from the region with its own UTM
 origin, and GPS heading is turned into grid yaw, since meridian convergence
 reaches several degrees across Germany.
 
-Open for scale (100k episodes): one region per dataset makes every pack read
-the whole region and the plan carry every episode's units. Per-partition
-subregions and an episode index outside the manifest would bound both.
+Open for scale (100k episodes): the plan carries every episode's units, and
+the region task holds all episodes' ways in memory once. An episode index
+outside the manifest and a sharded region read would bound both.
 
 ## 5. `wf_autoe2e` Stages
 
