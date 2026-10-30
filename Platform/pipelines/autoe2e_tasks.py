@@ -355,7 +355,20 @@ def build_l2d_osm_region(plan: SourcePlan, datasets_bucket: str) -> List[Manifes
     materialize_units(s3, datasets_bucket, [by_id[u] for u in [L2D_OSM_UNIT, *data_units]], raw_root)
     episodes = sorted(int(e) for group in plan.partition_groups for e in group)
     points = track_points_by_episode(raw_root, episodes)
-    cells_of = {episode: clip_cells(map(tuple, points[episode]), buffer_m=OSM_REGION_BUFFER_M) for episode in episodes}
+    def partition_cells(lonlat) -> frozenset:
+        """Cells around an episode, one ring wider than its own queries.
+
+        Points here are rounded to about 10 m, while packs query cells around
+        the exact poses; near a cell edge the two can differ by one cell.
+        """
+        if not len(lonlat):
+            # No finite GPS: packs build no navigation for it and fail there
+            # if it has samples, so the region needs nothing.
+            return frozenset()
+        base = clip_cells(map(tuple, lonlat), buffer_m=OSM_REGION_BUFFER_M)
+        return frozenset((lat + d_lat, lon + d_lon) for lat, lon in base for d_lat in (-1, 0, 1) for d_lon in (-1, 0, 1))
+
+    cells_of = {episode: partition_cells(points[episode]) for episode in episodes}
     (pbf,) = sorted((raw_root / "osm").glob("*.osm.pbf"))
     nodes, ways = read_region(pbf, frozenset().union(*cells_of.values()))
     index = RegionIndex(nodes, ways)
