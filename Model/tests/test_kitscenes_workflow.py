@@ -720,7 +720,7 @@ def test_old_geometry_pack_cache_is_not_aliased():
         (workflows.Dataset.KITSCENES, 1, 1),
         (workflows.Dataset.KITSCENES, 2, 1),
         (workflows.Dataset.KITSCENES, 10_000, 1),
-        (workflows.Dataset.L2D, 10_000, 4),
+        (workflows.Dataset.L2D, 10_000, 12),
     ),
 )
 def test_row_decode_workers_bound_dataset_memory(
