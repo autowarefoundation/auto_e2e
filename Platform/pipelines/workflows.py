@@ -2674,6 +2674,10 @@ def data_processing(
         ]
         import inspect
         inspect.signature(parallel_pack.init_row_worker).bind(*row_init)
+        if dataset == Dataset.L2D:
+            # One task per episode video; more processes would only start idle.
+            row_workers = max(1, min(row_workers, len(parallel_pack.l2d_video_tasks(decode_tasks))))
+
         def _decoded_rows(pool):
             if dataset == Dataset.L2D:
                 # One forward pass per episode video instead of a seek per
