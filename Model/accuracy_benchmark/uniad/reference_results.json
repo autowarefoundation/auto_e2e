@@ -1,0 +1,133 @@
+{
+  "description": "Archived October 14-15 original-image evaluation",
+  "coverage": {
+    "dense": {
+      "samples": 11035,
+      "scenes": 117,
+      "streams": 585,
+      "model_frames": 15130,
+      "sample_uid_sha256": "28c03331e86d6296d2a1c4da29bc5b28a06dc86a38bd3dc282224a8f06f03146"
+    },
+    "keyframes": {
+      "samples": 202,
+      "scenes": 117,
+      "streams": 202,
+      "model_frames": 1818
+    }
+  },
+  "hardware": {
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "elapsed_seconds": 61884,
+    "runtime_scope": "Dense plus keyframes, data staging and verification"
+  },
+  "metrics": {
+    "metric_grid": "10Hz evaluation interpolated from native2Hz predictions; fixed forward",
+    "canonical": {
+      "1": {
+        "ade_m": 1.8518548217935653,
+        "fde_m": 3.327464761931082,
+        "count": 11035
+      },
+      "2": {
+        "ade_m": 3.475972418542851,
+        "fde_m": 6.5283868234786535,
+        "count": 11035
+      },
+      "3": {
+        "ade_m": 5.096483789411848,
+        "fde_m": 9.868293094857297,
+        "count": 11035
+      }
+    },
+    "legacy_wgs84": {
+      "1": {
+        "ade_m": 1.8523367865585274,
+        "fde_m": 3.328317890819225,
+        "count": 11035
+      },
+      "2": {
+        "ade_m": 3.476806377469567,
+        "fde_m": 6.529824524964555,
+        "count": 11035
+      },
+      "3": {
+        "ade_m": 5.097616549882393,
+        "fde_m": 9.870252266421032,
+        "count": 11035
+      }
+    },
+    "canonical_constant_velocity": {
+      "1": {
+        "ade_m": 0.1652617080995597,
+        "fde_m": 0.39643470276050846,
+        "count": 11035
+      },
+      "2": {
+        "ade_m": 0.5402870887115168,
+        "fde_m": 1.4311923233942252,
+        "count": 11035
+      },
+      "3": {
+        "ade_m": 1.116820660519824,
+        "fde_m": 3.0356942595151946,
+        "count": 11035
+      }
+    },
+    "comparison_202_canonical": {
+      "1": {
+        "ade_m": 1.9057340562861815,
+        "fde_m": 3.428424059861724,
+        "count": 202
+      },
+      "2": {
+        "ade_m": 3.579684842898985,
+        "fde_m": 6.734727479985458,
+        "count": 202
+      },
+      "3": {
+        "ade_m": 5.245812520590726,
+        "fde_m": 10.141133840916893,
+        "count": 202
+      }
+    },
+    "comparison_202_constant_velocity": {
+      "1": {
+        "ade_m": 0.16796154622034606,
+        "fde_m": 0.4061374506581086,
+        "count": 202
+      },
+      "2": {
+        "ade_m": 0.5570454538093352,
+        "fde_m": 1.4841300251185159,
+        "count": 202
+      },
+      "3": {
+        "ade_m": 1.1621811960955384,
+        "fde_m": 3.1949956210260333,
+        "count": 202
+      }
+    },
+    "horizons_4_5": "N/A",
+    "accuracy_improvement": "No meaningful change from prior original-image dense run",
+    "zero_shot": true,
+    "nuScenes_pretrained": true,
+    "fine_tuning": false,
+    "speed_scaling": false,
+    "camera_ablation_deployed": false
+  },
+  "packaged_gpu_replay_verified": false,
+  "provenance": {
+    "uniad_commit": "609ee083ea51c3521c323f1279dfc4cee0e60467",
+    "asset_repo": "OpenDriveLab/UniAD2.0_R101_nuScenes",
+    "asset_revision": "ea565f376a6998bade2bfc528d6b8d71590e73df",
+    "asset_sha256": {
+      "ckpts/uniad_base_e2e.pth": "4dcdc34c09f964e377f608dbb764f003844a9ccc62b4a0469f94375302ed76d0",
+      "data/motion_anchor_infos_mode6.pkl": "05c84020204841eb45a1599228e4452b021213a83d8f7a63b40b47531f0cac6b"
+    },
+    "config_sha256": "2d45be9b330f8e82456203e2d6374053bd7b80171c5316412dfa88b32e187b8c",
+    "raw_dataset_revision": "6fde0034446669e2ed7235e4c7fe323cd23d599d",
+    "mirror_revision": "7262c151599c1b5e4a99f0da9c3196ff9ff615fe",
+    "shared_metric_commit": "40a75cf8a26b60f6b094125e3924fe0bdb427b02",
+    "shared_metric_sha256": "02568b4cd213171c14dfb59825811fded7db1449a60b02f14cfbd0a082d6f722"
+  }
+}

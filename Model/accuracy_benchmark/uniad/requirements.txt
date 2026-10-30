@@ -1,0 +1,33 @@
+# Isolated UniAD inference environment: Linux, Python 3.9, CUDA 11.8.
+# Install PyTorch/MMCV first and mmdet3d separately as described in README.md.
+# Do not install this file into AutoE2E's Python 3.12 training/CI environment.
+numpy==1.22.4
+scipy==1.13.1
+pandas==1.2.2
+matplotlib==3.5.3
+numba==0.53.0
+llvmlite==0.36.0
+pillow==11.3.0
+opencv-python==4.8.0.76
+Shapely==1.8.5.post1
+mmdet==2.26.0
+mmsegmentation==0.29.1
+mmcls==0.25.0
+nuscenes-devkit==1.1.11
+lyft-dataset-sdk==0.0.8
+plyfile==1.1.3
+scikit-image==0.19.3
+scikit-learn==1.6.1
+trimesh==2.35.39
+pyquaternion==0.9.9
+motmetrics==1.1.3
+networkx==2.5
+pytorch-lightning==1.2.5
+torchmetrics==0.6.2
+einops==0.8.1
+casadi==3.6.7
+ipython==8.12.3
+yapf==0.40.1
+pyproj==3.6.1
+huggingface_hub==1.8.0
+tensorboard==2.21.0
