@@ -109,6 +109,8 @@ def test_nuplan_archives_are_shared_units():
 
     plan = _plan(["maps", "db-1"], [["maps", "db-1"]], labels=False, dataset=AutoE2EDataset.NUPLAN)
     plan.units = [UnitRef(u, f"k/{u}.zip", "crc64nvme:8BLx0oBv5Jo=", "", "") for u in ("maps", "db-1")]
+    # read_nuplan declares this; the hand-built plan must too.
+    plan.shared_units = True
     rows = unit_rows(plan, [], [PartitionView("g0", "p", "7" * 64, 10, ["maps", "db-1"])])
     assert {r.partition_id for r in rows} == {"*"}
     assert {r.raw_index_sha256 for r in rows} == {None}

@@ -21,6 +21,7 @@ from Platform.pipelines.autoe2e_snapshot import iter_units, parse_manifest
 KITSCENES_UPSTREAM = "KIT-MRT/KITScenes-Multimodal"
 L2D_UPSTREAM = "yaak-ai/L2D"
 NUPLAN_SNAPSHOT_SCHEMA = "nuplan_raw_snapshot_v1"
+L2D_MAX_PARTITION_EPISODES = 64
 _KITSCENES_SPLIT_NAMES = {"train": "kitscenes", "val": "kitscenes-val", "test": "kitscenes-test"}
 _NUPLAN_PACK_PARAMS = {"total_scenario_limit", "samples_per_shard", "max_rejection_fraction", "group_limit"}
 _NUPLAN_PACK_DEFAULTS = {
@@ -50,6 +51,12 @@ def current_pack_version(dataset: AutoE2EDataset) -> str:
     contracts = ".".join(f"{key}={value}" for key, value in sorted(pack_contracts().items()))
     if dataset is AutoE2EDataset.NUPLAN:
         return f"{contracts}+{NUPLAN_PACK_TASK_VERSION}"
+    if dataset is AutoE2EDataset.L2D:
+        # Region clipping, lane graph, and map image rules decide L2D bytes
+        # as much as the shared contracts do.
+        from data_parsing.l2d.navigation_contract import L2D_NAVIGATION_CONTRACT
+
+        return f"{contracts}+{L2D_NAVIGATION_CONTRACT}"
     return contracts
 
 
@@ -89,7 +96,13 @@ class SourcePlan:
     snapshot_manifest_sha256: str
     units: List[UnitRef] = field(default_factory=list)
     partitions: List[List[str]] = field(default_factory=list)
+    # Group ids each partition packs, when they are not its unit ids (L2D
+    # partitions read shared file units but pack episodes).
+    partition_groups: List[List[str]] = field(default_factory=list)
     partition_limits: List[int] = field(default_factory=list)
+    # Units feed several partitions (nuPlan archives, L2D files), so the
+    # lineage names no single partition for them.
+    shared_units: bool = False
     labels: bool = False
     console: bool = False
     pack_params: Dict[str, str] = field(default_factory=dict)
@@ -161,16 +174,55 @@ def read_kitscenes(spec: DatasetSpec, payload: bytes) -> SourcePlan:
 
 
 def read_l2d(spec: DatasetSpec, payload: bytes) -> SourcePlan:
+    """Plan an L2D build: partitions of episodes over shared file units.
+
+    The snapshot fixes the episodes and the OSM extract; ``partition_size``
+    is the only pack input and must be given, so equal content never gets two
+    dataset ids from a default.
+    """
+    from Platform.pipelines.l2d_snapshot import L2D_OSM_UNIT, partition_plan
+
     _check_pack_version(spec)
-    _reject_unknown(spec.pack_params, {"partition_size", "osm_graph_snapshot"})
-    if "osm_graph_snapshot" not in spec.pack_params:
-        raise ValueError(
-            "L2D Reactive packs need OSM navigation (14 map channels); "
-            "set pack_params['osm_graph_snapshot']"
-        )
-    raise NotImplementedError(
-        "the L2D packer does not receive osm_graph_snapshot_path from any task yet, "
-        "so it would emit 3 map channels that Reactive training rejects"
+    _reject_unknown(spec.pack_params, {"partition_size"})
+    if "partition_size" not in spec.pack_params:
+        raise ValueError("L2D pack_params must set partition_size")
+    if spec.reasoning is not None:
+        raise ValueError("L2D has no reasoning labels")
+    if spec.unit_limit:
+        raise ValueError("L2D units are shared files; acquire fewer episodes instead of unit_limit")
+    from reactive_training_contracts import REACTIVE_CAMERA_IMAGE_SIZE
+
+    # Reactive training reads only the 512 px camera contract; failing here
+    # beats packing and publishing a dataset that training then rejects.
+    if spec.image_size != REACTIVE_CAMERA_IMAGE_SIZE:
+        raise ValueError(f"L2D packs need image_size {REACTIVE_CAMERA_IMAGE_SIZE}")
+    partition_size = _int_param(spec.pack_params, "partition_size", 1, minimum=1)
+    # A pack holds every decoded row of its partition in memory (about
+    # 130 MB per episode), so the 64 GiB pack pod bounds the partition.
+    if partition_size > L2D_MAX_PARTITION_EPISODES:
+        raise ValueError(f"partition_size must be at most {L2D_MAX_PARTITION_EPISODES} episodes")
+    manifest, units = _unit_plan(spec, payload, upstream=L2D_UPSTREAM)
+    if L2D_OSM_UNIT not in {unit.unit_id for unit in units}:
+        raise ValueError("L2D snapshot has no OSM extract unit")
+    partitions, groups = partition_plan(manifest["provenance"], partition_size)
+    known = {unit.unit_id for unit in units}
+    missing = sorted({unit for partition in partitions for unit in partition} - known)
+    if missing:
+        raise ValueError(f"L2D episodes need units the snapshot lacks: {missing[:3]}")
+    return SourcePlan(
+        dataset=spec.dataset,
+        upstream=L2D_UPSTREAM,
+        revision=manifest["revision"],
+        split="train",
+        published_name="l2d",
+        snapshot_manifest_sha256=spec.source_manifest.sha256,
+        units=units,
+        partitions=partitions,
+        partition_groups=groups,
+        shared_units=True,
+        labels=False,
+        console=False,
+        pack_params=dict(spec.pack_params),
     )
 
 
@@ -226,6 +278,7 @@ def read_nuplan(spec: DatasetSpec, payload: bytes) -> SourcePlan:
         snapshot_manifest_sha256=spec.source_manifest.sha256,
         units=units,
         partitions=[],
+        shared_units=True,
         labels=False,
         pack_params=dict(spec.pack_params),
     )

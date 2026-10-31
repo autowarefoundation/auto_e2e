@@ -165,7 +165,8 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
     tar_digests.update({a["archive_id"]: nuplan_archive_digest(a) for a in snapshot.get("archives", [])})
     bucket = units_uri.split("/")[2]
     views_key = lineage["views"]["key"]
-    if sha256_bytes(s3.get_object(Bucket=bucket, Key=views_key)["Body"].read()) != lineage["views"]["sha256"]:
+    views_payload = s3.get_object(Bucket=bucket, Key=views_key)["Body"].read()
+    if sha256_bytes(views_payload) != lineage["views"]["sha256"]:
         raise ValueError(f"{dataset_id}: partition views manifest changed")
     labels_checked = 0
     for unit in units:
@@ -179,6 +180,52 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
             if sha256_bytes(s3.get_object(Bucket=bucket, Key=key)["Body"].read()) != unit.label_record_sha256:
                 raise ValueError(f"{dataset_id}: label record of {unit.unit_id} changed")
             labels_checked += 1
+    from Platform.pipelines.l2d_snapshot import L2D_OSM_UNIT
+
+    # One region per partition; datasets packed before that name one region.
+    pack = lineage["pack"]
+    regions = pack.get("osm_regions") or ([pack["osm_region"]] if pack.get("osm_region") else [])
+    # L2D map channels come only from the regions, so its lineage must name them.
+    if lineage["spec"]["dataset"] == "l2d" and not regions:
+        raise ValueError(f"{dataset_id}: L2D lineage names no OSM region")
+    episodes_of: dict[str, set | None] = {}
+    for region in regions:
+        # Each region is derived from the snapshot's OSM unit; it must still be
+        # the bytes its packs rendered navigation from, and name that unit.
+        region_payload = _s3_bytes(s3, region["uri"], region["version_id"])
+        if sha256_bytes(region_payload) != region["sha256"]:
+            raise ValueError(f"{dataset_id}: OSM region changed")
+        provenance = json.loads(region_payload)["provenance"]
+        if tar_digests.get(L2D_OSM_UNIT) != provenance["osm_unit_digest"]:
+            raise ValueError(f"{dataset_id}: OSM region was not built from the snapshot's OSM extract")
+        if provenance["snapshot_manifest_sha256"] != lineage["raw"]["snapshot_manifest_sha256"]:
+            raise ValueError(f"{dataset_id}: OSM region was built for another snapshot")
+        if pack.get("osm_regions") and "episodes" not in provenance:
+            raise ValueError(f"{dataset_id}: per-partition OSM region names no episodes")
+        episodes_of[region["sha256"]] = set(provenance["episodes"]) if "episodes" in provenance else None
+    # One region per published partition, no more and no fewer.
+    if pack.get("osm_regions") and len(regions) != int(lineage["views"]["partitions"]):
+        raise ValueError(f"{dataset_id}: {len(regions)} OSM regions for {lineage['views']['partitions']} partitions")
+    if regions:
+        # Every packed partition must have rendered from one of these regions,
+        # and that region must cover the partition's episodes.
+        for partition in json.loads(views_payload)["partitions"]:
+            manifest_payload = s3.get_object(Bucket=bucket, Key=f"{partition['prefix']}/manifest.json")["Body"].read()
+            if sha256_bytes(manifest_payload) != partition["manifest_sha256"]:
+                raise ValueError(f"{dataset_id}: partition {partition['partition_id']} manifest changed")
+            manifest = json.loads(manifest_payload)
+            if not int(manifest.get("total_samples", 0)):
+                continue
+            navigation = manifest.get("navigation") or {}
+            used = navigation.get("osm_region_sha256")
+            if used not in episodes_of:
+                raise ValueError(f"{dataset_id}: partition {partition['partition_id']} used another OSM region")
+            covered = episodes_of[used]
+            packed = {int(e["episode_index"]) for e in navigation.get("episodes", [])}
+            if not packed:
+                raise ValueError(f"{dataset_id}: partition {partition['partition_id']} has samples but lists no episodes")
+            if covered is not None and not packed <= covered:
+                raise ValueError(f"{dataset_id}: partition {partition['partition_id']} packed episodes its region lacks")
     return {"dataset_id": dataset_id, "units": len(units), "labels": labels_checked}
 
 

@@ -467,13 +467,41 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
                 "KITScenes fine-tuning requires the frozen Epoch 5 nuPlan "
                 "trajectory and route parent profile"
             )
+    elif stage is ReactiveTrainingStage.L2D_CONTINUATION and (
+        parent_profile
+        or parent_checkpoint_sha256
+        or parent_checkpoint_epoch
+    ):
+        # L2D continues the same frozen nuPlan parent that KITScenes
+        # fine-tunes from. L2D packs carry no BEV segmentation targets.
+        if (
+            training_scope is not ReactiveTrainingScope.MULTITASK
+            or not bool(config.get("freeze_bevformer", False))
+            or float(config["trajectory_weight"]) <= 0.0
+            or float(config["bev_weight"]) != 0.0
+            or float(config["route_weight"]) <= 0.0
+            or config.get("is_pretrained") is not True
+            or config.get("allow_random_bevformer_init") is not False
+            or parent_profile != "nuplan_trajectory_route_v1"
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                parent_checkpoint_sha256,
+            )
+            is None
+            or parent_checkpoint_epoch < 1
+        ):
+            raise ValueError(
+                "L2D continuation from a profiled parent requires the "
+                "frozen nuPlan trajectory and route parent profile"
+            )
     elif (
         parent_profile
         or parent_checkpoint_sha256
         or parent_checkpoint_epoch
     ):
         raise ValueError(
-            "parent checkpoint profile fields are reserved for KITScenes"
+            "parent checkpoint profile fields are reserved for KITScenes "
+            "and L2D continuation"
         )
     is_pretrained = config.get("is_pretrained")
     allow_random_init = config.get(
@@ -596,16 +624,21 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
         # nuPlan parent for a few steps; the parent contract above still holds.
         # It reads the whole corpus: the frozen validation split exists only
         # there, and the worker checks its exact sample identity.
-        kitscenes_finetune_smoke = (
-            stage is ReactiveTrainingStage.KITSCENES_FINETUNE
+        continuation_smoke = (
+            stage
+            in {
+                ReactiveTrainingStage.KITSCENES_FINETUNE,
+                ReactiveTrainingStage.L2D_CONTINUATION,
+            }
             and bool(parent_uri)
         )
-        if not bounded or not (nuplan_bev_smoke or kitscenes_finetune_smoke):
+        if not bounded or not (nuplan_bev_smoke or continuation_smoke):
             raise ValueError(
                 "single-worker smoke must be a one-epoch, 2-16 step, "
                 "batch-one pretrained run with no resume or Capacity Block: "
                 "either nuPlan BEV-only over at most two sources without a "
-                "parent, or KITScenes fine-tuning from its nuPlan parent"
+                "parent, or KITScenes or L2D continuation from its nuPlan "
+                "parent"
             )
 
 
@@ -2034,6 +2067,7 @@ def _train_fixed_steps(
     require_reactive_camera_context = objective.stage in {
         ReactiveTrainingStage.NUPLAN_FULL,
         ReactiveTrainingStage.KITSCENES_FINETUNE,
+        ReactiveTrainingStage.L2D_CONTINUATION,
     }
     trajectory_training_policy = reactive_training_policy(
         objective.stage
@@ -3251,6 +3285,7 @@ def _evaluate_global_reactive(
                     required=stage in {
                         ReactiveTrainingStage.NUPLAN_FULL,
                         ReactiveTrainingStage.KITSCENES_FINETUNE,
+                        ReactiveTrainingStage.L2D_CONTINUATION,
                     },
                 )
                 camera_history_tiles, history_projections = (
@@ -3261,6 +3296,7 @@ def _evaluate_global_reactive(
                         required=stage in {
                             ReactiveTrainingStage.NUPLAN_FULL,
                             ReactiveTrainingStage.KITSCENES_FINETUNE,
+                            ReactiveTrainingStage.L2D_CONTINUATION,
                         },
                     )
                 )

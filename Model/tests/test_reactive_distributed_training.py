@@ -237,8 +237,9 @@ def _write_source(
         "source_revision": "test-revision",
         "total_samples": sum(shard_counts),
     }
+    # Every Reactive stage, L2D included, now packs T8 camera context.
     if (
-        include_bev
+        (include_bev or dataset == L2D_DATASET_NAME)
         if include_direct_camera_context is None
         else include_direct_camera_context
     ):
@@ -254,7 +255,7 @@ def _write_source(
                 REACTIVE_BEVFORMER_FRAME_OFFSETS
             ),
         })
-    if dataset == KITSCENES_DATASET_NAME:
+    if dataset in (KITSCENES_DATASET_NAME, L2D_DATASET_NAME):
         frame_payload = b"frame-pool-test-jpeg"
         archive_path = root / "frame_pool.tar"
         with tarfile.open(archive_path, "w") as archive:
@@ -1025,7 +1026,8 @@ def test_rank_staging_verifies_tar_and_manifest_digests(tmp_path):
         str(source).encode()
     ).hexdigest()[:16]
     assert (staged / "manifest.json").is_file()
-    assert sorted(path.name for path in staged.glob("*.tar")) == [
+    # L2D stages its T8 frame pool next to the shard.
+    assert sorted(path.name for path in staged.glob("*.tar") if path.name != "frame_pool.tar") == [
         assignments[0][0].shard_name
     ]
     assert packed_sample_tar_paths(staged) == (
@@ -1178,6 +1180,12 @@ def test_fixed_step_resume_matches_uninterrupted_training(
     monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(dist, "get_rank", lambda: 0)
     monkeypatch.setattr(dist, "get_world_size", lambda: 1)
+    # Resume bookkeeping is under test, not the camera context every stage
+    # now requires, so the toy batches carry none.
+    import training.reactive_stage_runner as reactive_stage_runner_module
+
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_front_projection", lambda *_a, **_k: None)
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_camera_history", lambda *_a, **_k: (None, None))
     monkeypatch.setattr(
         reactive_stage_module,
         "reactive_gradient_parameter_groups",
@@ -1740,6 +1748,49 @@ def test_validate_stage_config_accepts_single_worker_kitscenes_finetune_smoke():
 )
 def test_validate_stage_config_bounds_single_worker_kitscenes_smoke(override, match):
     config = _kitscenes_single_worker_smoke_config()
+    config.update(override)
+
+    with pytest.raises(ValueError, match=match):
+        validate_reactive_stage_config(config)
+
+
+def _l2d_single_worker_smoke_config() -> dict[str, object]:
+    config = _kitscenes_single_worker_smoke_config()
+    config.update({"stage": "l2d_continuation", "parent_checkpoint_epoch": 5})
+    return config
+
+
+def test_validate_stage_config_accepts_l2d_continuation_from_profiled_parent():
+    config = _stage_config("l2d_continuation")
+    config.update({
+        "allow_random_bevformer_init": False,
+        "bev_weight": 0.0,
+        "is_pretrained": True,
+        "parent_profile": "nuplan_trajectory_route_v1",
+        "parent_checkpoint_sha256": "a" * 64,
+        "parent_checkpoint_epoch": 5,
+    })
+    validate_reactive_stage_config(config)
+    validate_reactive_stage_config(_l2d_single_worker_smoke_config())
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"bev_weight": 1.0}, "frozen nuPlan"),
+        ({"freeze_bevformer": False}, "frozen nuPlan"),
+        ({"parent_profile": "other"}, "frozen nuPlan"),
+        ({"parent_checkpoint_sha256": "b" * 63}, "frozen nuPlan"),
+        ({"parent_checkpoint_epoch": 0}, "frozen nuPlan"),
+        ({"parent_profile": ""}, "frozen nuPlan"),
+        ({"route_weight": 0.0}, "frozen nuPlan"),
+        ({"trajectory_weight": 0.0}, "frozen nuPlan"),
+        ({"parent_checkpoint_uri": ""}, "Stage A"),
+        ({"steps_per_epoch": 17}, "single-worker smoke"),
+    ],
+)
+def test_validate_stage_config_bounds_l2d_continuation(override, match):
+    config = _l2d_single_worker_smoke_config()
     config.update(override)
 
     with pytest.raises(ValueError, match=match):
@@ -2591,13 +2642,14 @@ def test_canary_dataset_uses_production_loader_contract(
     assert sample["map_context"].shape == (1, 14, 450, 300)
     assert sample["route_mask"].shape == (1, 2, 450, 300)
     assert bool(sample["bev_segmentation_available"][0]) is expected_bev
+    # Every stage, L2D included, carries the native front view and T8 history.
+    assert sample["front_camera_tile"].shape == (
+        1,
+        3,
+        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+    )
     if stage is ReactiveTrainingStage.NUPLAN_FULL:
-        assert sample["front_camera_tile"].shape == (
-            1,
-            3,
-            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
-            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
-        )
         statistics = discover_bev_training_statistics(
             [str(dataset)],
             val_fraction=0.5,
@@ -2619,7 +2671,7 @@ def test_canary_dataset_uses_production_loader_contract(
             calibration_stream = archive.extractfile(calibration_member)
             assert calibration_stream is not None
             calibration = json.loads(calibration_stream.read())
-        assert "projection" not in calibration
+        assert calibration["history_projection"]["reference_frame"] == "current_ego"
 
 
 def test_t8_temporal_batch_norm_is_synchronized():
@@ -3344,6 +3396,11 @@ def test_stage_b_validation_emits_route_metrics(monkeypatch):
         route_loss=RouteReconstructionLoss(),
     )
     monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
+    # Route metrics are under test; the toy batch carries no T8 camera context.
+    import training.reactive_stage_runner as reactive_stage_runner_module
+
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_front_projection", lambda *_a, **_k: None)
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_camera_history", lambda *_a, **_k: (None, None))
 
     metrics = _evaluate_global_reactive(
         model,
@@ -3661,6 +3718,11 @@ def test_bev_only_validation_does_not_require_trajectory(monkeypatch):
         training_scope=ReactiveTrainingScope.BEV_ONLY,
     )
     monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
+    # Route metrics are under test; the toy batch carries no T8 camera context.
+    import training.reactive_stage_runner as reactive_stage_runner_module
+
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_front_projection", lambda *_a, **_k: None)
+    monkeypatch.setattr(reactive_stage_runner_module, "resolve_reactive_camera_history", lambda *_a, **_k: (None, None))
 
     metrics = _evaluate_global_reactive(
         model,

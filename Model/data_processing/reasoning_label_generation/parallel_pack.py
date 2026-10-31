@@ -31,7 +31,6 @@ _RESIZE: Any = None
 _TO_PIL: Any = None
 _DATASET_VALUE: Any = None
 _CALIB_BYTES: Any = None
-_OSM_SNAPSHOT: Any = None
 
 
 def init_pack_worker(
@@ -41,15 +40,13 @@ def init_pack_worker(
     image_size: int,
     world_model: bool,
     calib_bytes: bytes,
-    osm_graph_snapshot_path: Optional[str] = None,
 ) -> None:
     """Build this process's raw dataset + resize transform once (reused per sample)."""
-    global _DS, _RESIZE, _TO_PIL, _DATASET_VALUE, _CALIB_BYTES, _OSM_SNAPSHOT
+    global _DS, _RESIZE, _TO_PIL, _DATASET_VALUE, _CALIB_BYTES
     from torchvision import transforms
 
     _DATASET_VALUE = dataset_value
     _CALIB_BYTES = calib_bytes
-    _OSM_SNAPSHOT = None
     _TO_PIL = transforms.ToPILImage()
     _RESIZE = transforms.Resize((image_size, image_size))
     if dataset_value == "nvidia/PhysicalAI-Autonomous-Vehicles":
@@ -79,12 +76,6 @@ def init_pack_worker(
         )
         _DS = L2DDataset(repo_id=dataset_value, episodes=l2d_episodes,
                          include_world_model_windows=world_model, root=raw_path)
-        if osm_graph_snapshot_path is not None:
-            from data_parsing.l2d import load_l2d_osm_graph_snapshot
-
-            _OSM_SNAPSHOT = load_l2d_osm_graph_snapshot(
-                osm_graph_snapshot_path
-            )
 
 
 def _jpeg(frame_tensor, output_size: int | None = None) -> bytes:
@@ -102,6 +93,18 @@ def _jpeg(frame_tensor, output_size: int | None = None) -> bytes:
     f = resize(_TO_PIL(t))
     b = io.BytesIO()
     f.save(b, format="JPEG", quality=90)
+    return b.getvalue()
+
+
+def _native_png(frame_tensor) -> bytes:
+    """Encode a raw (3,H,W) frame losslessly at its native size."""
+    import torch
+
+    t = frame_tensor.cpu()
+    if t.dtype.is_floating_point:
+        t = (t.clamp(0, 1) * 255.0).round().to(dtype=torch.uint8)
+    b = io.BytesIO()
+    _TO_PIL(t).save(b, format="PNG")
     return b.getvalue()
 
 
@@ -152,6 +155,11 @@ def init_row_worker(
             allow_mapless=allow_mapless,
         )
     else:
+        import torch
+
+        # Up to 12 L2D workers share a 15-CPU pod; torch would otherwise give
+        # each of them one intra-op thread per node CPU and throttle them all.
+        torch.set_num_threads(1)
         from data_parsing.l2d import L2DDataset
         l2d_episodes = (
             [int(episode) for episode in episodes]
@@ -172,14 +180,14 @@ def decode_row(
 ) -> tuple[
     tuple[Any, int],
     Dict[str, bytes],
-    Optional[bytes | Dict[str, bytes]],
+    Optional[Dict[str, Optional[bytes]]],
 ]:
     """Decode one physical row's cameras and navigation context.
 
     ``task`` = (ep_idx, frame_index) is a global identity, so the worker resolves
     the local row from its own _episode_ranges (robust across processes and
     partitions). KITScenes returns lossless schema-v8 navigation members for
-    current rows; other datasets return the optional map JPEG.
+    current rows; L2D returns the map JPEG and the lossless native map tile.
 
     Each unique row is decoded exactly once per partition: the parent maps this
     over the union of all samples' window rows. Map is skipped when all-zero (same rule as pack_sample). The
@@ -211,7 +219,7 @@ def decode_row(
             ): _jpeg(visual[view])
             for view in range(visual.shape[0])
         }
-        extras = None
+        extras: Optional[Dict[str, Optional[bytes]]] = None
         if include_map:
             front_frame_id = (
                 f"kitscenes-{UID_SCHEMA_VERSION}-{scene_id}-"
@@ -243,13 +251,187 @@ def decode_row(
     for v, cam_name in enumerate(CAMERA_NAMES):
         fid = f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{v}"
         l2d_cams[fid] = _jpeg(item[cam_name])
-    map_jpeg = None
+    extras = None
     if include_map:
+        from reactive_training_contracts import (
+            REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            REACTIVE_FRONT_CAMERA_INDEX,
+        )
+
+        # Current rows also carry the native front view and its FPN tile,
+        # the T8 front contract the nuPlan parent was trained with.
+        front_id = f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}-c{REACTIVE_FRONT_CAMERA_INDEX}"
+        extras = {
+            "map_jpeg": None,
+            "map_png": None,
+            "front_camera_native_jpeg": _jpeg(item[CAMERA_NAMES[REACTIVE_FRONT_CAMERA_INDEX]], REACTIVE_FRONT_CAMERA_IMAGE_SIZE),
+            "front_camera_fpn_jpeg": l2d_cams[front_id],
+        }
         map_tile = item[MAP_VIEW_NAME]
         mt = map_tile[0] if map_tile.ndim == 4 else map_tile
         if float(mt.abs().max()) > 0:
-            map_jpeg = _jpeg(mt)
-    return (ep_idx, frame_index), l2d_cams, map_jpeg
+            # map.jpg is the resized tile the map encoder reads; the lossless
+            # native tile is what navigation registers against, since JPEG
+            # and resizing both shift the road colours it classifies.
+            extras.update(map_jpeg=_jpeg(mt), map_png=_native_png(mt))
+    return (ep_idx, frame_index), l2d_cams, extras
+
+
+def _l2d_episode_video_frames(ep_idx: int, video_key: str, frame_indices: set, encode: Any) -> Dict[int, Any]:
+    """Decode the wanted frames of one episode's video in one forward pass.
+
+    The row path asks LeRobot for one timestamp at a time, which seeks back
+    to a keyframe and decodes forward for every row and camera. Reading the
+    episode once from its first frame decodes each frame once. Frames are
+    chosen exactly as LeRobot chooses them: the frame nearest to
+    ``from_timestamp + index / fps``. ``encode(index, frame)`` turns each
+    chosen frame into bytes at once, so no decoded 1920x1080 frame outlives
+    its encoding.
+    """
+    import av
+    import numpy as np
+    import torch
+
+    meta = _DS.lerobot_dataset.meta
+    episode = meta.episodes[ep_idx]
+    if int(episode["episode_index"]) != ep_idx:
+        raise ValueError(f"L2D meta row {ep_idx} is episode {episode['episode_index']}")
+    path = _DS.lerobot_dataset.root / meta.get_video_file_path(ep_idx, video_key)
+    start = float(episode[f"videos/{video_key}/from_timestamp"])
+    fps = float(meta.fps)
+    wanted = sorted(frame_indices)
+    # One mp4 holds consecutive episodes, so an index outside this episode
+    # would silently read a neighbour's video.
+    ep_start, ep_end = _DS._episode_ranges[ep_idx]
+    if wanted[0] < 0 or wanted[-1] >= ep_end - ep_start:
+        raise IndexError(f"L2D episode {ep_idx} frames {wanted[0]}..{wanted[-1]} leave the episode")
+    # LeRobot looks a row up at from_timestamp + its timestamp column, not
+    # index / fps; read the same column so both paths aim at one time.
+    timestamps = np.asarray(
+        _DS.lerobot_dataset.hf_dataset.select_columns(["timestamp"])[ep_start:ep_end]["timestamp"],
+        dtype=np.float64,
+    ).reshape(-1)
+    tolerance = float(getattr(_DS.lerobot_dataset, "tolerance_s", 1e-4))
+    out: Dict[int, Any] = {}
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        # One decode thread: up to 12 workers share a 15-CPU pod, and FFmpeg
+        # would size its thread pool from the node's CPU count instead.
+        stream.codec_context.thread_count = 1
+        time_base = stream.time_base
+        if time_base is None:
+            raise ValueError(f"{path} has no video time base")
+        container.seek(int(start / time_base), stream=stream, backward=True, any_frame=False)
+        best: Dict[int, tuple] = {}
+        for frame in container.decode(stream):
+            if frame.pts is None:
+                continue
+            seconds = float(frame.pts * time_base) - start
+            index = int(round(seconds * fps))
+            if index < wanted[0] - 1:
+                continue
+            if index > wanted[-1] + 1:
+                break
+            if index in frame_indices:
+                error = abs(seconds - float(timestamps[index]))
+                if index not in best or error < best[index][0]:
+                    rgb = frame.to_ndarray(format="rgb24")
+                    # Same float CHW in [0, 1] that LeRobot returns, so the
+                    # JPEG bytes are identical to the row path.
+                    tensor = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).float() / 255.0
+                    best[index] = (error, encode(index, tensor))
+    missing = [index for index in wanted if index not in best]
+    if missing:
+        raise ValueError(f"L2D episode {ep_idx} {video_key} lacks frames {missing[:5]}")
+    # LeRobot refuses a frame further than its tolerance from the query; a
+    # dropped or variable-rate frame must fail here too, not pick a neighbour.
+    late = [index for index in wanted if best[index][0] > tolerance]
+    if late:
+        raise ValueError(f"L2D episode {ep_idx} {video_key} frames {late[:5]} are off their timestamps")
+    for index, (_, encoded) in best.items():
+        out[index] = encoded
+    return out
+
+
+def decode_l2d_video(task: tuple[int, str, list, list]) -> tuple[int, str, Dict[int, Any]]:
+    """Decode one episode's frames of one video in one forward pass.
+
+    ``task`` is ``(episode, video key, frame indices, current frame
+    indices)``. Cameras return ``(jpeg, native front jpeg or None)`` per
+    frame, the map video ``(jpeg or None, png or None)`` for current frames.
+    One task per episode and video keeps every worker busy even when a
+    partition holds a single episode.
+    """
+    from reactive_training_contracts import (
+        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+        REACTIVE_FRONT_CAMERA_INDEX,
+    )
+
+    from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
+
+    ep_idx, video_key, frame_list, current_list = task
+    current = set(current_list)
+    if video_key == MAP_VIEW_NAME:
+        def encode(_index: int, tile) -> tuple:
+            if float(tile.abs().max()) > 0:
+                return _jpeg(tile), _native_png(tile)
+            return None, None
+        return ep_idx, video_key, _l2d_episode_video_frames(ep_idx, video_key, current, encode)
+    front = CAMERA_NAMES[REACTIVE_FRONT_CAMERA_INDEX]
+
+    def encode_camera(index: int, tensor) -> tuple:
+        native = (
+            _jpeg(tensor, REACTIVE_FRONT_CAMERA_IMAGE_SIZE)
+            if video_key == front and index in current
+            else None
+        )
+        return _jpeg(tensor), native
+
+    return ep_idx, video_key, _l2d_episode_video_frames(ep_idx, video_key, set(frame_list), encode_camera)
+
+
+def l2d_video_tasks(decode_tasks: list) -> list:
+    """Split ``decode_row`` tasks into one task per (episode, video)."""
+    from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
+
+    tasks: list[tuple[int, str, list, list]] = []
+    for episode in sorted({group for group, _, _ in decode_tasks}):
+        rows = [task for task in decode_tasks if task[0] == episode]
+        frames = [frame for _, frame, _ in rows]
+        current = [frame for _, frame, is_current in rows if is_current]
+        tasks.extend((episode, key, frames, current) for key in CAMERA_NAMES)
+        if current:
+            tasks.append((episode, MAP_VIEW_NAME, frames, current))
+    return tasks
+
+
+def assemble_l2d_rows(decoded: list, decode_tasks: list) -> list:
+    """``decode_row``-shaped results from per-video decodes, in task order."""
+    from data_processing.contract_versions import UID_SCHEMA_VERSION
+    from reactive_training_contracts import REACTIVE_FRONT_CAMERA_INDEX
+
+    from data_parsing.l2d.dataset import CAMERA_NAMES, MAP_VIEW_NAME
+
+    by_video = {(episode, key): frames for episode, key, frames in decoded}
+    front = CAMERA_NAMES[REACTIVE_FRONT_CAMERA_INDEX]
+    results = []
+    for ep_idx, frame_index, is_current in sorted(decode_tasks):
+        prefix = f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame_index:06d}"
+        cams = {
+            f"{prefix}-c{view}": by_video[(ep_idx, name)][frame_index][0]
+            for view, name in enumerate(CAMERA_NAMES)
+        }
+        extras = None
+        if is_current:
+            map_jpeg, map_png = by_video[(ep_idx, MAP_VIEW_NAME)][frame_index]
+            extras = {
+                "map_jpeg": map_jpeg,
+                "map_png": map_png,
+                "front_camera_native_jpeg": by_video[(ep_idx, front)][frame_index][1],
+                "front_camera_fpn_jpeg": cams[f"{prefix}-c{REACTIVE_FRONT_CAMERA_INDEX}"],
+            }
+        results.append(((ep_idx, frame_index), cams, extras))
+    return results
 
 
 def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
@@ -292,16 +474,6 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
     navigation_members = sample.get("navigation_members")
     if navigation_members is not None:
         members.update(navigation_members)
-    elif _DATASET_VALUE == "yaak-ai/L2D" and _OSM_SNAPSHOT is not None:
-        from data_parsing.l2d import l2d_reactive_navigation_members
-
-        members.update(
-            l2d_reactive_navigation_members(
-                _OSM_SNAPSHOT,
-                sample["route_waypoints_lon_lat"],
-                sample["pose_current"],
-            )
-        )
     else:
         map_tile = sample.get("map_tile")
         if map_tile is not None and float(map_tile.abs().max()) > 0:
@@ -337,7 +509,6 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
         TRAJECTORY_XY_MEMBER,
         encode_bev_segmentation,
         encode_trajectory_xy,
-        wgs84_future_to_ego_xy,
     )
 
     trajectory_xy = sample.get("trajectory_xy_m")
@@ -347,22 +518,6 @@ def pack_sample(si: int) -> Tuple[str, int, Dict[str, bytes], Dict[str, bytes]]:
             trajectory_xy,
             trajectory_valid,
         )
-    elif _OSM_SNAPSHOT is not None:
-        pose = sample.get("pose_current")
-        gps_future = sample.get("gps_future")
-        if pose is not None and gps_future is not None:
-            trajectory_xy, trajectory_valid = wgs84_future_to_ego_xy(
-                gps_future,
-                current_latitude_deg=float(pose["latitude_deg"]),
-                current_longitude_deg=float(pose["longitude_deg"]),
-                heading_deg_cw_from_north=float(
-                    pose["heading_deg_cw_from_north"]
-                ),
-            )
-            members[TRAJECTORY_XY_MEMBER] = encode_trajectory_xy(
-                trajectory_xy,
-                trajectory_valid,
-            )
 
     bev_target = sample.get("bev_segmentation_target")
     bev_valid = sample.get("bev_segmentation_valid")

@@ -26,8 +26,10 @@ Usage
 
 from __future__ import annotations
 
+import functools
 import logging
 import sys
+from pathlib import Path
 from typing import Any, Iterator, TypedDict
 
 import torch
@@ -52,8 +54,17 @@ from .egomotion import (
     extract_egomotion,
 )
 from .world_model_windows import required_margins, stride_for_hz
+from reactive_training_contracts import (
+    REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+    REACTIVE_BEVFORMER_FRAME_OFFSETS,
+    REACTIVE_BEVFORMER_HISTORY_FRAMES,
+)
 
 logger = logging.getLogger(__name__)
+
+# observation.state.vehicle columns read as pose; the only place they are
+# interpreted (egomotion.py documents the full vector).
+_HEADING, _LATITUDE, _LONGITUDE = 1, 3, 4
 
 _VISUAL_HISTORY_DIM = 896
 
@@ -125,6 +136,7 @@ class L2DDataset(Dataset):
         self._wm_enabled = include_world_model_windows
         self._wm_num_frames = wm_num_frames
         self._wm_stride = stride_for_hz(source_hz, wm_hz)
+        self._source_hz = source_hz
 
         # Reasoning-clip mode: the offline teacher only needs the front camera at
         # the reasoning horizons, so lerobot decodes just those frames via
@@ -323,6 +335,88 @@ class L2DDataset(Dataset):
             out.append((ep_idx, r - ep_start))
         return out
 
+    def bevformer_history_rows(self, idx: int) -> list[tuple[int, int]]:
+        """Seven 0.5 s history rows, oldest first, as (episode, frame index).
+
+        L2D keeps 64 frames (6.4 s) of past before every sample, so the 3.5 s
+        T8 history the nuPlan parent's BEVFormer was trained on always fits.
+        """
+        ep_idx, row = self._samples[idx]
+        ep_start, _ = self._episode_ranges[ep_idx]
+        frame = row - ep_start
+        stride = round(REACTIVE_BEVFORMER_FRAME_INTERVAL_US / 1_000_000 * self._source_hz)
+        if stride <= 0 or not np.isclose(stride / self._source_hz, REACTIVE_BEVFORMER_FRAME_INTERVAL_US / 1_000_000):
+            raise ValueError("L2D source frequency cannot represent the T8 interval")
+        rows = [frame + offset * stride for offset in REACTIVE_BEVFORMER_FRAME_OFFSETS[:-1]]
+        if len(rows) != REACTIVE_BEVFORMER_HISTORY_FRAMES or rows[0] < 0:
+            raise IndexError("L2D T8 history leaves the episode")
+        # Row arithmetic assumes no dropped frames; check the clock as
+        # KITScenes does, 50 ms around each 0.5 s step.
+        _, timestamps = self._episode_numeric(ep_idx)
+        for offset, history_row in zip(REACTIVE_BEVFORMER_FRAME_OFFSETS[:-1], rows):
+            expected_ns = int(timestamps[frame]) + offset * REACTIVE_BEVFORMER_FRAME_INTERVAL_US * 1000
+            if abs(int(timestamps[history_row]) - expected_ns) > 50_000_000:
+                raise ValueError(f"L2D episode {ep_idx} T8 history frame {history_row} is off the 0.5 s grid")
+        return [(ep_idx, history_row) for history_row in rows]
+
+    def _episode_numeric(self, ep_idx: int) -> tuple[np.ndarray, np.ndarray]:
+        """Vehicle states and timestamps of one episode, kept for the last episode.
+
+        Samples arrive in episode order, so one cached episode saves reading
+        the whole episode from Arrow again for every sample.
+        """
+        cached = getattr(self, "_numeric_cache", None)
+        if cached is None or cached[0] != ep_idx:
+            ep_start, ep_end = self._episode_ranges[ep_idx]
+            cached = (ep_idx, self._get_vehicle_states_window(ep_start, ep_end), self._get_timestamps_window(ep_start, ep_end))
+            self._numeric_cache = cached
+        return cached[1], cached[2]
+
+    def bevformer_history_frame_ids(self, idx: int) -> list[list[str]]:
+        """Shared-pool frame IDs of the seven T8 history rows."""
+        return [
+            [f"l2d-{UID_SCHEMA_VERSION}-e{ep_idx:06d}-r{frame:06d}-c{view}" for view in range(len(CAMERA_NAMES))]
+            for ep_idx, frame in self.bevformer_history_rows(idx)
+        ]
+
+    def reactive_calibration_for(self, idx: int, *, image_size: int) -> dict[str, object]:
+        """Current, native-front, and current-ego-aligned T8 projections.
+
+        The same contract KITScenes writes. History cameras see the current
+        ego frame through the dead-reckoned planar motion between the poses.
+        """
+        from reactive_training_contracts import REACTIVE_FRONT_CAMERA_IMAGE_SIZE, REACTIVE_FRONT_CAMERA_INDEX
+
+        ep_idx, row = self._samples[idx]
+        ep_start, _ = self._episode_ranges[ep_idx]
+        states, timestamps = self._episode_numeric(ep_idx)
+        frame = row - ep_start
+        history_frames = [history_frame for _, history_frame in self.bevformer_history_rows(idx)]
+        # K @ [R|t] of the current frame; a history camera sees a current-ego
+        # point after moving it into that frame's ego: P @ history_from_current.
+        current = _projection_matrices(image_size)
+        poses = _dead_reckoned_poses(states, timestamps, history_frames[0], frame)
+        history_matrix = np.stack([
+            current @ np.linalg.inv(poses[history_frame - history_frames[0]])
+            for history_frame in history_frames
+        ]).astype(np.float32)
+        front = _projection_matrices(REACTIVE_FRONT_CAMERA_IMAGE_SIZE)[REACTIVE_FRONT_CAMERA_INDEX:REACTIVE_FRONT_CAMERA_INDEX + 1]
+        if not (np.isfinite(history_matrix).all() and np.isfinite(front).all()):
+            raise ValueError("L2D T8 projections are non-finite")
+        return {
+            "dataset": self.repo_id,
+            "geometry_type": "pinhole",
+            "image_size": image_size,
+            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+            "front_camera_image_size": REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
+            "front_camera_fpn_image_size": image_size,
+            "front_projection": {"matrix": front.tolist(), "type": "pinhole"},
+            "projection": {"matrix": current.astype(np.float32).tolist(), "type": "pinhole"},
+            "history_projection": {"matrix": history_matrix.tolist(), "reference_frame": "current_ego", "type": "pinhole"},
+            "temporal_frame_interval_us": REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
+            "temporal_frame_offsets": list(REACTIVE_BEVFORMER_FRAME_OFFSETS),
+        }
+
     def egomotion_for(self, idx: int):
         """(egomotion_history, trajectory_target) for sample ``idx`` without video decode."""
         ego_history, trajectory_target, _, _ = self.numeric_for(idx)
@@ -438,6 +532,24 @@ class L2DDataset(Dataset):
         path[:, 3] = timestamps
         return path
 
+    def episode_track(
+        self, episode_index: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return ``(longitude, latitude, heading, timestamp_ns)`` per frame.
+
+        Unlike :meth:`episode_path`, timestamps stay exact int64 nanoseconds,
+        which navigation needs for its 500 ms anchor grid.
+        """
+        ep_start, ep_end = self._episode_ranges[episode_index]
+        states = self._get_vehicle_states_window(ep_start, ep_end)
+        timestamps = self._get_timestamps_window(ep_start, ep_end)
+        return (
+            states[:, _LONGITUDE].astype(np.float64),
+            states[:, _LATITUDE].astype(np.float64),
+            states[:, _HEADING].astype(np.float64),
+            timestamps,
+        )
+
     def sample_pose_records(self) -> Iterator[dict[str, Any]]:
         """Yield exact per-sample pose rows for the partition geo parquet."""
         by_episode: dict[int, tuple[np.ndarray, np.ndarray]] = {}
@@ -535,3 +647,91 @@ class L2DDataset(Dataset):
             sample["future_frames"] = future_frames
 
         return sample
+
+
+def track_points(data_root: str | Path, episodes: list[int], *, decimals: int = 4) -> np.ndarray:
+    """Distinct ``[longitude, latitude]`` of the episodes' poses and route waypoints."""
+    by_episode = track_points_by_episode(data_root, episodes, decimals=decimals)
+    return np.unique(np.concatenate(list(by_episode.values())), axis=0)
+
+
+def track_points_by_episode(data_root: str | Path, episodes: list[int], *, decimals: int = 4) -> dict[int, np.ndarray]:
+    """Distinct ``[longitude, latitude]`` of each episode's poses and route waypoints.
+
+    Reads the LeRobot parquet files once, so no video is opened and a
+    dataset of many partitions does not reread its data per partition.
+    Points are rounded to ``decimals`` degrees (about 10 m) and deduplicated
+    per episode, which keeps the result small however many frames there are.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    wanted = set(int(episode) for episode in episodes)
+    found: dict[int, np.ndarray] = {}
+
+    def flat(column) -> np.ndarray:
+        # Nested lists flatten in Arrow without building Python objects.
+        # Real L2D waypoints are large_list<large_list<float>>, vehicle a
+        # fixed_size_list<float>[8].
+        values = column.combine_chunks()
+        while pa.types.is_list(values.type) or pa.types.is_large_list(values.type) or pa.types.is_fixed_size_list(values.type):
+            values = values.flatten()
+        return values.to_numpy(zero_copy_only=False).astype(np.float64)
+
+    for path in sorted(Path(data_root, "data").rglob("*.parquet")):
+        table = pq.read_table(
+            path, columns=["episode_index", "observation.state.vehicle", "observation.state.waypoints"],
+        )
+        table = table.filter(pc.is_in(table["episode_index"], value_set=pa.array(sorted(wanted))))
+        if not table.num_rows:
+            continue
+        episode_of_row = np.asarray(table["episode_index"].to_numpy(zero_copy_only=False), dtype=np.int64)
+        vehicle = flat(table["observation.state.vehicle"]).reshape(table.num_rows, -1)
+        routes = flat(table["observation.state.waypoints"]).reshape(table.num_rows, -1, 2)
+        for episode in np.unique(episode_of_row):
+            rows = episode_of_row == episode
+            batch = np.round(np.concatenate([vehicle[rows][:, [_LONGITUDE, _LATITUDE]], routes[rows].reshape(-1, 2)]), decimals)
+            batch = batch[np.isfinite(batch).all(axis=1)]
+            previous = found.get(int(episode))
+            found[int(episode)] = np.unique(batch if previous is None else np.concatenate([previous, batch]), axis=0)
+    missing = sorted(wanted - set(found))
+    if missing:
+        raise ValueError(f"L2D data files lack episodes {missing[:5]}")
+    return found
+
+
+
+@functools.lru_cache(maxsize=4)
+def _projection_matrices(image_size: int) -> np.ndarray:
+    """The rig projection at one size; it reads and hashes the extrinsics YAML."""
+    from .calibration import compute_l2d_projection_matrices
+
+    matrices = compute_l2d_projection_matrices(image_size).astype(np.float64)
+    matrices.setflags(write=False)
+    return matrices
+
+
+def _dead_reckoned_poses(states: np.ndarray, timestamps_ns: np.ndarray, first: int, current: int) -> np.ndarray:
+    """Current-ego-from-ego poses of frames ``first..current`` by dead reckoning.
+
+    L2D stores latitude and longitude as float32, about 0.4 m steps in
+    Germany, which would shift a 10 m distant point by tens of pixels between
+    T8 frames. Speed and heading integrated at 10 Hz give the 3.5 s relative
+    motion smoothly; GPS is not needed over so short a span.
+    """
+    span = states[first:current + 1].astype(np.float64)
+    seconds = np.diff(timestamps_ns[first:current + 1].astype(np.int64)) / 1e9
+    speed = span[:, 0] / 3.6  # km/h to m/s
+    heading = np.radians(span[:, _HEADING])
+    # Trapezoidal steps in ENU, true-north heading clockwise.
+    step_speed = 0.5 * (speed[:-1] + speed[1:])
+    step_heading = heading[:-1] + 0.5 * np.angle(np.exp(1j * (heading[1:] - heading[:-1])))
+    east = np.concatenate([[0.0], np.cumsum(step_speed * seconds * np.sin(step_heading))])
+    north = np.concatenate([[0.0], np.cumsum(step_speed * seconds * np.cos(step_heading))])
+    yaw = np.pi / 2 - heading
+    world_from_ego = np.tile(np.eye(4), (len(span), 1, 1))
+    world_from_ego[:, 0, 0], world_from_ego[:, 0, 1] = np.cos(yaw), -np.sin(yaw)
+    world_from_ego[:, 1, 0], world_from_ego[:, 1, 1] = np.sin(yaw), np.cos(yaw)
+    world_from_ego[:, 0, 3], world_from_ego[:, 1, 3] = east, north
+    return np.linalg.inv(world_from_ego[-1]) @ world_from_ego

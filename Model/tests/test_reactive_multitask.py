@@ -269,6 +269,19 @@ def _stage_batch(
     return batch
 
 
+@pytest.fixture
+def without_camera_context(monkeypatch):
+    """Evaluator tests on a mock without BEVFormer T8 skip camera context.
+
+    Every Reactive stage requires T8 history and the native front view now;
+    these tests are about metrics, not camera inputs.
+    """
+    import training.reactive_stage_runner as runner
+
+    monkeypatch.setattr(runner, "resolve_reactive_front_projection", lambda *_a, **_k: None)
+    monkeypatch.setattr(runner, "resolve_reactive_camera_history", lambda *_a, **_k: (None, None))
+
+
 def _attach_stage_a_camera_context(
     batch: dict[str, object],
     *,
@@ -1947,6 +1960,10 @@ def test_stage_a_to_stage_b_to_semantic_artifact_smoke(
         views=6,
         image_size=test_camera_size,
     )
+    _attach_stage_a_camera_context(
+        stage_b_batch,
+        front_image_size=test_front_size,
+    )
     stage_b_metrics = run_reactive_epoch(
         stage_b_model,
         [stage_b_batch],
@@ -2553,6 +2570,7 @@ def test_stage_b_loads_only_trained_modules_from_bev_only_parent(
 def test_multitask_evaluator_reports_partial_horizons_and_route_use(
     build_mock_model,
     device,
+    without_camera_context,
 ):
     model = _model(build_mock_model, device).eval()
     with torch.no_grad():
@@ -2598,6 +2616,7 @@ def test_multitask_evaluator_reports_partial_horizons_and_route_use(
 def test_multitask_evaluator_keeps_route_counterfactuals_without_gradient(
     build_mock_model,
     device,
+    without_camera_context,
 ):
     model = _model(build_mock_model, device).eval()
     batch = _stage_batch(
@@ -2708,6 +2727,7 @@ def test_multitask_evaluator_converts_bfloat16_outputs_for_metrics(
     build_mock_model,
     device,
     monkeypatch,
+    without_camera_context,
 ):
     model = _model(build_mock_model, device).eval()
     original_forward = model.forward
@@ -2751,6 +2771,7 @@ def test_multitask_evaluator_converts_bfloat16_outputs_for_metrics(
 def test_multitask_stateful_evaluation_rejects_more_than_five_lanes(
     build_mock_model,
     device,
+    without_camera_context,
 ):
     model = _model(build_mock_model, device).eval()
     batch = _stage_batch(
@@ -2948,6 +2969,10 @@ def test_stage_a_b_cross_dataset_retention_matrix_smoke(
         views=6,
         image_size=camera_size,
     )
+    _attach_stage_a_camera_context(
+        l2d_batch,
+        front_image_size=front_size,
+    )
     l2d_batch["sample_uid"] = ["l2d-a", "l2d-b"]
 
     matrix = evaluate_reactive_transfer_matrix_models(
@@ -2977,6 +3002,7 @@ def test_stage_a_b_cross_dataset_retention_matrix_smoke(
 def test_checkpoint_selection_evaluation_skips_auxiliary_heads(
     build_mock_model,
     device,
+    without_camera_context,
 ):
     model = _model(build_mock_model, device).eval()
     batch = _stage_batch(device, include_bev=True)

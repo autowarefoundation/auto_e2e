@@ -1,8 +1,10 @@
 """wf_acquire_raw_snapshot: copy upstream data into an S3 raw snapshot once.
 
-This is the only code that may reach Hugging Face. Two byte sources exist:
+This is the only code that may reach Hugging Face or OpenStreetMap. Two
+byte sources exist:
 
 - ``hf``: download a unit at a pinned revision (holds the ``hf-token`` secret);
+  an L2D snapshot also downloads one OSM extract as its ``osm`` unit;
 - ``recovery``: re-tar unit prefixes that an earlier Flyte run already
   downloaded, listed in a frozen recovery manifest. No Hub access.
 
@@ -15,7 +17,9 @@ import json
 import os
 import shutil
 import tempfile
+import urllib.request
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -172,8 +176,9 @@ def _download_prefix(s3, uri: str, root: Path, workers: int = 64) -> None:
 
 @task(
     container_image=DATA_PREP_IMAGE,
-    requests=Resources(cpu="2", mem="4Gi"),
-    limits=Resources(cpu="2", mem="4Gi"),
+    # L2D planning loads the 98 MB episodes table of all 100,000 episodes.
+    requests=Resources(cpu="2", mem="8Gi"),
+    limits=Resources(cpu="2", mem="8Gi"),
     retries=2,
 )
 def plan_acquisition(
@@ -183,8 +188,14 @@ def plan_acquisition(
     split: str,
     units: List[str],
     recovery_manifest: Optional[ManifestRef] = None,
+    osm_extract_url: str = "",
+    osm_extract_sha256: str = "",
 ) -> AcquisitionPlan:
-    """Fix the unit list: explicit units, the SDK split, or a recovery manifest."""
+    """Fix the unit list: explicit units, the SDK split, or a recovery manifest.
+
+    For L2D, ``units`` are episode ids and the plan lists the upstream files
+    they need plus the OSM extract at ``osm_extract_url``.
+    """
     prefix = snapshot_prefix(dataset, revision, snapshot_id)
     provenance = {"method": "hf", "split": split, "upstream": UPSTREAM.get(dataset, "")}
     if recovery_manifest is not None:
@@ -214,13 +225,125 @@ def plan_acquisition(
             "missing_scene_ids": recovery["missing_scene_ids"],
         })
         return AcquisitionPlan(prefix, sources, json.dumps(provenance, sort_keys=True))
+    if dataset is AutoE2EDataset.L2D:
+        return _plan_l2d(prefix, revision, split, units, osm_extract_url, osm_extract_sha256, provenance)
     if dataset is not AutoE2EDataset.KITSCENES:
-        raise NotImplementedError(f"Hub acquisition is implemented for KITScenes only, not {dataset.value}")
+        raise NotImplementedError(f"Hub acquisition is not implemented for {dataset.value}")
     if not units:
         from data_parsing.kit_scenes.source import sdk_split_scene_ids
 
         units = list(sdk_split_scene_ids(split))
     return AcquisitionPlan(prefix, [UnitSource(u) for u in sorted(units)], json.dumps(provenance, sort_keys=True))
+
+
+def _plan_l2d(
+    prefix: str, revision: str, split: str, units: List[str],
+    osm_extract_url: str, osm_extract_sha256: str, provenance: dict,
+) -> AcquisitionPlan:
+    from huggingface_hub import HfApi
+    from ledataset.datasets.lerobot_dataset import LeRobotDatasetMetadata
+
+    from Platform.pipelines.l2d_snapshot import L2D_META_UNIT, L2D_OSM_UNIT, plan_units
+
+    if split != "train":
+        raise ValueError("L2D has only a train split")
+    if not units:
+        raise ValueError("L2D acquisition needs explicit episode ids")
+    from Platform.pipelines.l2d_snapshot import validate_osm_extract
+
+    osm_name = validate_osm_extract(osm_extract_url, osm_extract_sha256)
+    upstream = UPSTREAM[AutoE2EDataset.L2D]
+    meta = LeRobotDatasetMetadata(repo_id=upstream, revision=revision)
+    meta_files = [
+        path for path in HfApi().list_repo_files(upstream, repo_type="dataset", revision=revision)
+        if path.startswith(f"{L2D_META_UNIT}/")
+    ]
+    unit_files, episode_units = plan_units(
+        [int(unit) for unit in units],
+        meta_files=meta_files,
+        data_file_of=lambda episode: str(meta.get_data_file_path(episode)),
+        video_files_of=lambda episode: [str(meta.get_video_file_path(episode, key)) for key in meta.video_keys],
+    )
+    unit_files[L2D_OSM_UNIT] = [f"osm/{osm_name}"]
+    provenance.update({
+        "episodes": sorted(int(unit) for unit in units),
+        "episode_units": episode_units,
+        "unit_files": unit_files,
+        "osm_extract_url": osm_extract_url,
+        "osm_extract_sha256": osm_extract_sha256,
+    })
+    return AcquisitionPlan(prefix, [UnitSource(unit) for unit in sorted(unit_files)], json.dumps(provenance, sort_keys=True))
+
+
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to https on an allowed extract host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        from urllib.parse import urlsplit
+
+        from Platform.pipelines.l2d_snapshot import OSM_EXTRACT_HOSTS
+
+        target = urlsplit(newurl)
+        if target.scheme != "https" or target.hostname not in OSM_EXTRACT_HOSTS:
+            raise IOError("OSM extract redirected outside the allowed hosts")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _download_https(url: str, target: Path, *, sha256: str) -> None:
+    """Download ``url`` and accept it only if its SHA-256 is the pinned one.
+
+    The server's ``.md5`` would come from the same host and so cannot show
+    tampering; the caller-pinned SHA-256 can. Size and wall time are bounded
+    so a slow or endless response cannot hold the pod.
+    """
+    import hashlib
+    import time
+    import urllib.request
+
+    from Platform.pipelines.l2d_snapshot import OSM_EXTRACT_MAX_BYTES, validate_osm_extract
+
+    validate_osm_extract(url, sha256)
+    opener = urllib.request.build_opener(_HttpsOnlyRedirects())
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f".{target.name}.partial")
+    digest = hashlib.sha256()
+    size = 0
+    deadline = time.monotonic() + 2 * 3600
+    with opener.open(url, timeout=60) as response, partial.open("wb") as out:
+        while chunk := response.read(16 * 1024**2):
+            size += len(chunk)
+            if size > OSM_EXTRACT_MAX_BYTES or time.monotonic() > deadline:
+                raise IOError("OSM extract exceeds its size or time bound")
+            digest.update(chunk)
+            out.write(chunk)
+    if digest.hexdigest() != sha256:
+        raise IOError("OSM extract SHA-256 differs from the pinned digest")
+    partial.replace(target)
+
+
+def _acquire_l2d_unit(root: Path, revision: str, plan: AcquisitionPlan, unit_id: str, token: Optional[str]) -> None:
+    from huggingface_hub import hf_hub_download
+
+    from Platform.pipelines.l2d_snapshot import L2D_OSM_UNIT
+
+    provenance = json.loads(plan.provenance_json)
+    files = provenance["unit_files"][unit_id]
+    if unit_id == L2D_OSM_UNIT:
+        _download_https(
+            provenance["osm_extract_url"], root.joinpath(*files[0].split("/")),
+            sha256=provenance["osm_extract_sha256"],
+        )
+        return
+    for path in files:
+        # hf_hub_download does not refuse ".." on Linux; plan_units already
+        # did, and this keeps the write inside root even if it had not.
+        if not (root / path).resolve().is_relative_to(root.resolve()):
+            raise ValueError(f"L2D file {path!r} escapes the unit root")
+        hf_hub_download(
+            repo_id=UPSTREAM[AutoE2EDataset.L2D], repo_type="dataset", revision=revision,
+            filename=path, local_dir=str(root), token=token, etag_timeout=30.0,
+        )
+    shutil.rmtree(root / ".cache", ignore_errors=True)
 
 
 @task(
@@ -260,6 +383,8 @@ def acquire_unit_from_recovery(
     limits=Resources(cpu="4", mem="16Gi", ephemeral_storage="80Gi"),
     secret_requests=[Secret(group="hf-token", key="HF_TOKEN", mount_requirement=Secret.MountType.ENV_VAR)],
     retries=2,
+    # A stalled transfer must fail and retry rather than hold the pod forever.
+    timeout=timedelta(hours=6),
 )
 def acquire_unit_from_hub(
     dataset: AutoE2EDataset,
@@ -269,9 +394,11 @@ def acquire_unit_from_hub(
     source: UnitSource,
     datasets_bucket: str,
 ) -> UnitEntry:
-    """Download one KITScenes scene at the pinned revision, then tar it."""
-    from data_parsing.kit_scenes.source import PinnedKITScenesDownloader
+    """Download one unit at the pinned revision, then tar it.
 
+    A KITScenes unit is a scene; an L2D unit is one upstream file, all of
+    ``meta/``, or the OSM extract.
+    """
     work = Path(tempfile.mkdtemp(prefix="autoe2e-acquire-"))
     root = work / "tree"
     from flytekit import current_context
@@ -281,10 +408,15 @@ def acquire_unit_from_hub(
         token = current_context().secrets.get("hf-token", "HF_TOKEN")
     except Exception:
         token = os.environ.get("HF_TOKEN", "")
-    downloader = PinnedKITScenesDownloader(root, revision=revision, token=token or None)
-    downloader.download([source.unit_id], expected_split=split)
-    for leftover in (".kitscenes_staging", ".cache"):
-        shutil.rmtree(root / leftover, ignore_errors=True)
+    if dataset is AutoE2EDataset.L2D:
+        _acquire_l2d_unit(root, revision, plan, source.unit_id, token or None)
+    else:
+        from data_parsing.kit_scenes.source import PinnedKITScenesDownloader
+
+        downloader = PinnedKITScenesDownloader(root, revision=revision, token=token or None)
+        downloader.download([source.unit_id], expected_split=split)
+        for leftover in (".kitscenes_staging", ".cache"):
+            shutil.rmtree(root / leftover, ignore_errors=True)
     tar_path = work / "unit.tar"
     members = tar_tree(root, source.unit_id, tar_path)
     shutil.rmtree(root)
@@ -423,6 +555,8 @@ def _acquire(
     adopt_labels: Optional[ReasoningSpec],
     nuplan_source_manifest: Optional[FlyteFile],
     concurrency: int,
+    osm_extract_url: str,
+    osm_extract_sha256: str,
 ) -> ManifestRef:
     import functools
 
@@ -438,7 +572,8 @@ def _acquire(
         return nuplan_snapshot_ref(manifest=snapshot.manifest, manifest_sha256=snapshot.manifest_sha256)
     plan = plan_acquisition(
         dataset=dataset, revision=revision, snapshot_id=snapshot_id, split=split,
-        units=units, recovery_manifest=recovery_manifest,
+        units=units, recovery_manifest=recovery_manifest, osm_extract_url=osm_extract_url,
+        osm_extract_sha256=osm_extract_sha256,
     )
     if recovery_manifest is not None:
         entries = map_task(
@@ -479,11 +614,19 @@ def wf_acquire_raw_snapshot(
     adopt_labels: Optional[ReasoningSpec] = None,
     nuplan_source_manifest: Optional[FlyteFile] = None,
     concurrency: int = 32,
+    osm_extract_url: str = "",
+    osm_extract_sha256: str = "",
 ) -> ManifestRef:
-    """Copy upstream data into an immutable S3 raw snapshot exactly once."""
+    """Copy upstream data into an immutable S3 raw snapshot exactly once.
+
+    For L2D, ``units`` are episode ids and ``osm_extract_url`` names the
+    dated OpenStreetMap extract that its navigation is built from, pinned by
+    ``osm_extract_sha256``.
+    """
     return _acquire(
         dataset=dataset, revision=revision, snapshot_id=snapshot_id, split=split, units=units,
         datasets_bucket=datasets_bucket, recovery_manifest=recovery_manifest,
         adopt_labels=adopt_labels, nuplan_source_manifest=nuplan_source_manifest,
-        concurrency=concurrency,
+        concurrency=concurrency, osm_extract_url=osm_extract_url,
+        osm_extract_sha256=osm_extract_sha256,
     )

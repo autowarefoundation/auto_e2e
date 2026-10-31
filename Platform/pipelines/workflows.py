@@ -396,11 +396,12 @@ class MapFusion(enum.Enum):
 def _row_decode_worker_count(dataset: Dataset, row_count: int) -> int:
     """Bound row decoders by each parser's per-process memory footprint."""
     # Each KITScenes child reparses the scene's Lanelet2 map and calibration.
-    # Two children can exceed the 64 GiB pod limit on large scenes. L2D workers
-    # also retain six camera decoders, so cap them below the generic limit.
+    # Two children can exceed the 64 GiB pod limit on large scenes. An L2D
+    # child decodes one episode video at a time, so the pod's 15 CPUs, not
+    # memory, bound it.
     max_workers = {
         Dataset.KITSCENES: 1,
-        Dataset.L2D: 4,
+        Dataset.L2D: 12,
     }.get(dataset, 16)
     return max(1, min(max_workers, row_count))
 
@@ -418,10 +419,86 @@ def _use_parent_assembly_pack(
         and has_samples
         and (
             world_model
-            or dataset == Dataset.KITSCENES
+            or dataset in (Dataset.KITSCENES, Dataset.L2D)
             or reactive_targets
         )
     )
+
+
+def _l2d_episode_navigation(
+    ds,
+    episodes,
+    *,
+    osm_region_path: str,
+    osm_region_sha256: str,
+) -> tuple[dict, dict]:
+    """Per-episode L2D navigation and its manifest summary.
+
+    Every episode gets its own lane graph from the pinned OSM region, so a
+    region that does not cover an episode fails the pack instead of
+    publishing samples without map channels.
+    """
+    import hashlib
+
+    from data_parsing.l2d.episode_navigation import (
+        L2D_NAVIGATION_VERSION,
+        L2DEpisodeNavigation,
+        episode_lane_graph_from_region,
+    )
+    from data_parsing.l2d.osm_pbf_region import RegionIndex, parse_region
+    from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
+    from navigation.rasterizer import NativeNavigationRasterizer
+
+    payload = Path(osm_region_path).read_bytes()
+    if hashlib.sha256(payload).hexdigest() != osm_region_sha256:
+        raise ValueError("OSM region differs from its pinned SHA-256")
+    nodes, ways, _ = parse_region(payload)
+    region = RegionIndex(nodes, ways)
+    rasterizer = NativeNavigationRasterizer(AUTOE2E_NAVIGATION_GEOMETRY)
+    navigation = {}
+    records = []
+    for episode in sorted(episodes):
+        longitudes, latitudes, headings, timestamps = ds.episode_track(episode)
+        graph, graph_sha256 = episode_lane_graph_from_region(
+            region,
+            longitudes_deg=longitudes,
+            latitudes_deg=latitudes,
+            region_sha256=osm_region_sha256,
+            episode_id=str(episode),
+        )
+        episode_navigation = L2DEpisodeNavigation(
+            episode_id=str(episode),
+            longitudes_deg=longitudes,
+            latitudes_deg=latitudes,
+            headings_deg_cw_from_north=headings,
+            timestamps_ns=timestamps,
+            lane_graph=graph,
+            lane_graph_sha256=graph_sha256,
+            rasterizer=rasterizer,
+        )
+        navigation[episode] = episode_navigation
+        quality = episode_navigation.route.quality
+        records.append({
+            "episode_index": int(episode),
+            "lane_graph_sha256": graph_sha256,
+            "lane_count": len(graph["lanes"]),
+            "episode_navigation_sha256": (
+                episode_navigation.episode_navigation_sha256
+            ),
+            "route_valid": bool(episode_navigation.route.valid),
+            "route_matched_pose_ratio": float(quality.matched_pose_ratio),
+            "route_p95_lateral_distance_m": float(
+                quality.p95_lateral_distance_m
+            ),
+            "route_failure_reasons": list(quality.failure_reasons),
+        })
+    summary = {
+        "schema_version": L2D_NAVIGATION_VERSION,
+        "osm_region_sha256": osm_region_sha256,
+        "episodes": records,
+        "route_valid_episodes": sum(r["route_valid"] for r in records),
+    }
+    return navigation, summary
 
 
 # View fusion is fixed to BEV inside ReactiveE2E; this is only a metadata label
@@ -2232,6 +2309,8 @@ def data_processing(
     sample_limit: int = 0,
     source_split: str = "train",
     data_role: str = "training",
+    osm_region_path: str = "",
+    osm_region_sha256: str = "",
 ) -> Annotated[FlyteDirectory, BatchSize(4)]:
     """Pre-extract aligned frames + egomotion → WebDataset shards.
 
@@ -2243,6 +2322,10 @@ def data_processing(
     When ``world_model`` is set, each sample also gets the 1 Hz past/future
     multi-view windows for the JEPA loss. The window config (num_frames/stride)
     matches the online dataset so shards and on-the-fly windows are identical.
+
+    L2D needs ``osm_region_path`` (an ``l2d_osm_region_v1`` file pinned by
+    ``osm_region_sha256``): its 14-channel navigation is rendered from OSM and
+    the dataset map image, since L2D ships no HD map.
     """
     import os
     import io
@@ -2252,6 +2335,11 @@ def data_processing(
 
     if sample_limit < 0:
         raise ValueError("sample_limit must be non-negative")
+    if dataset == Dataset.L2D and not (osm_region_path and osm_region_sha256):
+        raise ValueError(
+            "L2D packs need osm_region_path and osm_region_sha256 for "
+            "14-channel navigation"
+        )
     if (
         dataset == Dataset.KITSCENES
         and image_size != REACTIVE_CAMERA_IMAGE_SIZE
@@ -2566,7 +2654,7 @@ def data_processing(
                 current_row = (ep_idx_s, row_s - ep_start_s)
             sample_cur_rows[si] = current_row
             all_rows.add(current_row)
-            if dataset == Dataset.KITSCENES:
+            if dataset in (Dataset.KITSCENES, Dataset.L2D):
                 for row_t in ds.bevformer_history_rows(si):
                     all_rows.add(row_t)
             if world_model:
@@ -2586,11 +2674,26 @@ def data_processing(
         ]
         import inspect
         inspect.signature(parallel_pack.init_row_worker).bind(*row_init)
+        if dataset == Dataset.L2D:
+            # One task per episode video; more processes would only start idle.
+            row_workers = max(1, min(row_workers, len(parallel_pack.l2d_video_tasks(decode_tasks))))
+
+        def _decoded_rows(pool):
+            if dataset == Dataset.L2D:
+                # One forward pass per episode video instead of a seek per
+                # row; rows are assembled once every video is decoded.
+                decoded = list(pool.map(
+                    parallel_pack.decode_l2d_video,
+                    parallel_pack.l2d_video_tasks(decode_tasks),
+                ))
+                yield from parallel_pack.assemble_l2d_rows(decoded, decode_tasks)
+            else:
+                yield from pool.map(parallel_pack.decode_row, decode_tasks)
+
         with ProcessPoolExecutor(max_workers=row_workers, mp_context=ctx,
                                  initializer=parallel_pack.init_row_worker,
                                  initargs=row_init) as rpool:
-            for row_key, cam_jpegs, row_extras in rpool.map(
-                    parallel_pack.decode_row, decode_tasks):
+            for row_key, cam_jpegs, row_extras in _decoded_rows(rpool):
                 row_map[row_key] = (cam_jpegs, row_extras)
                 for fid, blob in cam_jpegs.items():
                     _write_pool(fid, blob)
@@ -2624,6 +2727,18 @@ def data_processing(
                 episodes=ep_list,
                 include_world_model_windows=False,
                 root=raw_path,
+            )
+
+        l2d_navigation: dict = {}
+        l2d_map_image_registered = 0
+        if dataset == Dataset.L2D:
+            l2d_navigation, navigation_artifact_summary = (
+                _l2d_episode_navigation(
+                    ds_asm,
+                    {row[0] for row in sample_cur_rows.values()},
+                    osm_region_path=osm_region_path,
+                    osm_region_sha256=osm_region_sha256,
+                )
             )
 
         if dataset == Dataset.KITSCENES and not mapless_kitscenes_test:
@@ -2671,7 +2786,7 @@ def data_processing(
                 members["window_index.json"] = json.dumps(ids).encode()
                 has_wm = True
 
-            if dataset == Dataset.KITSCENES:
+            if dataset in (Dataset.KITSCENES, Dataset.L2D):
                 history_ids = ds_asm.bevformer_history_frame_ids(si)
                 missing_history_ids = sorted(
                     frame_id
@@ -2681,7 +2796,7 @@ def data_processing(
                 )
                 if missing_history_ids:
                     raise ValueError(
-                        "KITScenes T8 history is missing frame-pool members: "
+                        f"{dataset.value} T8 history is missing frame-pool members: "
                         f"{missing_history_ids[:8]}"
                     )
                 members["bev_history_index.json"] = json.dumps(
@@ -2716,6 +2831,37 @@ def data_processing(
                             ds_asm.navigation_members_for_row(*cur_key)
                         )
                         has_map = True
+                elif dataset == Dataset.L2D:
+                    if not isinstance(row_extras, dict):
+                        raise ValueError("L2D current row lacks its front view")
+                    members[
+                        f"cam_{REACTIVE_FRONT_CAMERA_INDEX}.jpg"
+                    ] = row_extras["front_camera_native_jpeg"]
+                    members["front_camera_fpn.jpg"] = row_extras[
+                        "front_camera_fpn_jpeg"
+                    ]
+                    map_rgb = None
+                    if row_extras["map_png"] is not None:
+                        members["map.jpg"] = row_extras["map_jpeg"]
+                        from PIL import Image
+
+                        map_rgb = np.asarray(
+                            Image.open(
+                                io.BytesIO(row_extras["map_png"])
+                            ).convert("RGB")
+                        )
+                    navigation_members = l2d_navigation[
+                        cur_key[0]
+                    ].sample_members(
+                        cur_key[1],
+                        map_image=map_rgb,
+                        waypoints_lon_lat=ds_asm.route_waypoints_for(si),
+                    )
+                    l2d_map_image_registered += int(json.loads(
+                        navigation_members["navigation_meta.json"]
+                    )["map_image_registered"])
+                    members.update(navigation_members)
+                    has_map = True
                 elif row_extras is not None:
                     members["map.jpg"] = row_extras
 
@@ -2738,6 +2884,25 @@ def data_processing(
                     "gps_future": gps_future,
                 }))
                 geospatial_count += 1
+                if dataset == Dataset.L2D:
+                    from data_processing.reactive_training_artifacts import (
+                        TRAJECTORY_XY_MEMBER,
+                        encode_trajectory_xy,
+                        wgs84_future_to_ego_xy,
+                    )
+
+                    members[TRAJECTORY_XY_MEMBER] = encode_trajectory_xy(
+                        *wgs84_future_to_ego_xy(
+                            gps_future,
+                            current_latitude_deg=pose_current["latitude_deg"],
+                            current_longitude_deg=pose_current[
+                                "longitude_deg"
+                            ],
+                            heading_deg_cw_from_north=pose_current[
+                                "heading_deg_cw_from_north"
+                            ],
+                        )
+                    )
             if dataset == Dataset.KITSCENES:
                 from data_processing.reactive_training_artifacts import (
                     TRAJECTORY_XY_MEMBER,
@@ -2767,7 +2932,7 @@ def data_processing(
                     separators=(",", ":"),
                     sort_keys=True,
                 ).encode("ascii")
-                if dataset == Dataset.KITSCENES
+                if dataset in (Dataset.KITSCENES, Dataset.L2D)
                 else calib_bytes
             )
 
@@ -2790,9 +2955,13 @@ def data_processing(
                 raise AssertionError("sample was packed without an open shard")
             shard_sample_counts[current_shard_name] += 1
             sample_count += 1
+        if dataset == Dataset.L2D:
+            navigation_artifact_summary[
+                "map_image_registered_samples"
+            ] = l2d_map_image_registered
 
     else:
-        # Per-sample decode path (imitation-only L2D, NVIDIA, or empty
+        # Per-sample decode path (NVIDIA, or an empty
         # partition).
         pack_workers = _row_decode_worker_count(dataset, len(idx_list))
         print(f"Packing {len(idx_list)} samples, legacy mode "
@@ -2896,7 +3065,7 @@ def data_processing(
         for name in shard_names
     }
     if (
-        dataset == Dataset.KITSCENES
+        dataset in (Dataset.KITSCENES, Dataset.L2D)
         and sample_count
         and (
             trajectory_xy_count != sample_count
@@ -2907,7 +3076,7 @@ def data_processing(
         )
     ):
         raise ValueError(
-            "KITScenes Reactive target packing was incomplete: "
+            f"{dataset.value} Reactive target packing was incomplete: "
             f"trajectory={trajectory_xy_count}/{sample_count} "
             f"navigation={reactive_navigation_count}/{sample_count}"
         )
@@ -2967,17 +3136,17 @@ def data_processing(
                 "camera_slots": camera_slots if sample_count else None,
                 "front_camera_index": (
                     REACTIVE_FRONT_CAMERA_INDEX
-                    if sample_count and dataset == Dataset.KITSCENES
+                    if sample_count and dataset in (Dataset.KITSCENES, Dataset.L2D)
                     else None
                 ),
                 "front_camera_image_size": (
                     REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-                    if sample_count and dataset == Dataset.KITSCENES
+                    if sample_count and dataset in (Dataset.KITSCENES, Dataset.L2D)
                     else None
                 ),
                 "front_camera_fpn_image_size": (
                     REACTIVE_CAMERA_IMAGE_SIZE
-                    if sample_count and dataset == Dataset.KITSCENES
+                    if sample_count and dataset in (Dataset.KITSCENES, Dataset.L2D)
                     else None
                 ),
                 "has_map": bool(sample_count) and has_map,
@@ -3015,7 +3184,7 @@ def data_processing(
                 "navigation_geometry": (
                     (
                         AUTOE2E_NAVIGATION_GEOMETRY.contract()
-                        if dataset == Dataset.KITSCENES
+                        if dataset in (Dataset.KITSCENES, Dataset.L2D)
                         else DEFAULT_NAVIGATION_GEOMETRY.contract()
                     )
                     if navigation_artifact_summary is not None
@@ -8776,6 +8945,10 @@ def _map_dataset_partitions(
                 world_model=True,
                 source_split=source_split,
                 data_role=data_role,
+                # map_task needs every input bound; the fan-out has no OSM
+                # region, so an L2D pack here fails with a clear error.
+                osm_region_path="",
+                osm_region_sha256="",
             ),
             concurrency=pack_concurrency,
         )
@@ -8799,6 +8972,8 @@ def _map_dataset_partitions(
             reasoning_labels=None,
             source_split=source_split,
             data_role=data_role,
+            osm_region_path="",
+            osm_region_sha256="",
         ),
         concurrency=pack_concurrency,
     )

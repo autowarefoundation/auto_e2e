@@ -260,6 +260,7 @@ def _validate_reactive_manifest(
     if stage in {
         ReactiveTrainingStage.NUPLAN_FULL,
         ReactiveTrainingStage.KITSCENES_FINETUNE,
+        ReactiveTrainingStage.L2D_CONTINUATION,
     }:
         if (
             manifest.get("front_camera_index")
@@ -279,7 +280,12 @@ def _validate_reactive_manifest(
             raise ValueError(
                 "Reactive temporal camera history differs from T8 contract"
             )
-    if stage is ReactiveTrainingStage.KITSCENES_FINETUNE:
+    # Both read T8 history from the frame pool; a missing archive would fail
+    # only in the loader, after GPUs are reserved.
+    if stage in {
+        ReactiveTrainingStage.KITSCENES_FINETUNE,
+        ReactiveTrainingStage.L2D_CONTINUATION,
+    }:
         archive_name = manifest.get("frame_pool_archive")
         archive_count = int(manifest.get("frame_pool_frame_count", 0))
         if (
@@ -289,7 +295,7 @@ def _validate_reactive_manifest(
             or archive_count <= 0
         ):
             raise ValueError(
-                "KITScenes T8 training requires an immutable frame-pool archive"
+                "T8 training requires an immutable frame-pool archive"
             )
         _validate_sha256(
             manifest.get("frame_pool_archive_sha256"),

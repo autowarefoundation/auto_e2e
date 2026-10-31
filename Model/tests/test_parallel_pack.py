@@ -596,8 +596,8 @@ def _simulate_decode_dedup_shard(ds, dataset_value, calib_bytes):
                                 key=lambda kv: int(kv[0].rsplit("-c", 1)[-1])):
             cam_i = int(fid.rsplit("-c", 1)[-1])
             members[f"cam_{cam_i}.jpg"] = blob
-        if cur_map is not None:
-            members["map.jpg"] = cur_map
+        if cur_map is not None and cur_map["map_jpeg"] is not None:
+            members["map.jpg"] = cur_map["map_jpeg"]
         ego_h, traj = ds.egomotion_for(si)
         ego_data = np.concatenate([ego_h.numpy(), traj.numpy()]).astype(np.float32)
         members["ego.npy"] = ego_data.tobytes()

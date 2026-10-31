@@ -114,13 +114,68 @@ def test_kitscenes_rejects_pack_params():
         read_source(_spec(payload, pack_params={"partition_size": "2"}), payload)
 
 
-def test_l2d_is_rejected_until_osm_navigation_is_wired():
-    payload = _snapshot()
-    spec = _spec(payload, dataset=AutoE2EDataset.L2D)
+def _l2d_snapshot(episodes=(0, 1, 2), with_osm=True) -> bytes:
+    from Platform.pipelines.autoe2e_adapters import L2D_UPSTREAM
+    from Platform.pipelines.l2d_snapshot import plan_units
+
+    unit_files, episode_units = plan_units(
+        episodes,
+        meta_files=["meta/info.json"],
+        # Episodes 0 and 1 share their files; episode 2 is in the next file.
+        data_file_of=lambda e: f"data/chunk-000/file-{e // 2:03d}.parquet",
+        video_files_of=lambda e: [f"videos/observation.images.rear/chunk-000/file-{e // 2:03d}.mp4"],
+    )
+    if with_osm:
+        unit_files["osm"] = ["osm/germany-251020.osm.pbf"]
+    prefix = snapshot_prefix(AutoE2EDataset.L2D, "1e7578b1", "snap")
+    entries = []
+    for unit, files in sorted(unit_files.items()):
+        payload = _unit_tar(unit, {path: b"x" for path in files})
+        members = index_tar(io.BytesIO(payload))
+        entries.append(unit_entry(
+            unit, tar_key=unit_tar_key(prefix, unit), tar_size=len(payload),
+            tar_sha256=sha256_bytes(payload), index_key=unit_index_key(prefix, unit),
+            index_sha256=sha256_bytes(index_bytes(members)), members=members,
+        ))
+    return manifest_bytes(build_manifest(
+        dataset=AutoE2EDataset.L2D, upstream=L2D_UPSTREAM, revision="1e7578b1", snapshot_id="snap",
+        provenance={"method": "hf", "split": "train", "episode_units": episode_units, "unit_files": unit_files},
+        units=entries,
+    ))
+
+
+def _l2d_spec(payload: bytes, **overrides) -> DatasetSpec:
+    values = dict(dataset=AutoE2EDataset.L2D, reasoning=None, image_size=512, pack_params={"partition_size": "2"})
+    values.update(overrides)
+    return _spec(payload, **values)
+
+
+def test_l2d_partitions_are_episode_groups_over_shared_file_units():
+    payload = _l2d_snapshot()
+    plan = read_source(_l2d_spec(payload), payload)
+    assert plan.published_name == "l2d" and plan.split == "train" and plan.labels is False
+    assert plan.partition_groups == [["0", "1"], ["2"]]
+    assert plan.partitions == [
+        ["data.chunk-000.file-000.parquet", "meta", "videos.observation.images.rear.chunk-000.file-000.mp4"],
+        ["data.chunk-000.file-001.parquet", "meta", "videos.observation.images.rear.chunk-000.file-001.mp4"],
+    ]
+    # The OSM unit is no partition's input but stays in the lineage.
+    assert "osm" in {unit.unit_id for unit in plan.units}
+
+
+def test_l2d_rejects_what_its_snapshot_fixes():
+    payload = _l2d_snapshot()
+    with pytest.raises(ValueError, match="partition_size"):
+        read_source(_l2d_spec(payload, pack_params={}), payload)
+    with pytest.raises(ValueError, match="unsupported pack_params"):
+        read_source(_l2d_spec(payload, pack_params={"partition_size": "2", "osm": "x"}), payload)
+    with pytest.raises(ValueError, match="reasoning"):
+        read_source(_l2d_spec(payload, reasoning=REASONING), payload)
+    with pytest.raises(ValueError, match="unit_limit"):
+        read_source(_l2d_spec(payload, unit_limit=1), payload)
+    without_osm = _l2d_snapshot(with_osm=False)
     with pytest.raises(ValueError, match="OSM"):
-        read_source(spec, payload)
-    with pytest.raises(NotImplementedError):
-        read_source(_spec(payload, dataset=AutoE2EDataset.L2D, pack_params={"osm_graph_snapshot": "s3://x"}), payload)
+        read_source(_l2d_spec(without_osm), without_osm)
 
 
 def _nuplan_manifest() -> bytes:

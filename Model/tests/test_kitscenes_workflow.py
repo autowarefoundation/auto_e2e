@@ -720,7 +720,7 @@ def test_old_geometry_pack_cache_is_not_aliased():
         (workflows.Dataset.KITSCENES, 1, 1),
         (workflows.Dataset.KITSCENES, 2, 1),
         (workflows.Dataset.KITSCENES, 10_000, 1),
-        (workflows.Dataset.L2D, 10_000, 4),
+        (workflows.Dataset.L2D, 10_000, 12),
     ),
 )
 def test_row_decode_workers_bound_dataset_memory(
@@ -763,7 +763,8 @@ def test_row_decode_initializer_matches_worker_abi():
     (
         (workflows.Dataset.L2D, True, False, True, True),
         (workflows.Dataset.L2D, True, True, False, True),
-        (workflows.Dataset.L2D, True, False, False, False),
+        # L2D always needs parent assembly for its OSM navigation.
+        (workflows.Dataset.L2D, True, False, False, True),
         (workflows.Dataset.KITSCENES, True, False, False, True),
         (
             workflows.Dataset.NVIDIA_PHYSICAL_AI,
