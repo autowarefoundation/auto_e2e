@@ -1,0 +1,48 @@
+# AutoE2E driver configuration for AlpaSim.
+# Select it with `driver=autoe2e` and set `driver.model.checkpoint_path`.
+# Type validation happens at driver runtime via OmegaConf.structured merge, so
+# `model` may only hold keys of alpasim_driver.schema.ModelConfig.
+
+defaults:
+  - autoe2e_configs  # Camera rendering and runtime settings
+  - _self_
+
+log_level: ${wizard.log_level}
+
+model:
+  model_type: autoe2e  # Entry-point name in the alpasim.models registry
+  # AutoE2E training checkpoint (config + model_state_dict), e.g.
+  # /mnt/drivers/autoe2e/checkpoint.pt. "MOCK" drives straight without a model;
+  # "UNTRAINED" builds the release architecture with random weights.
+  checkpoint_path: ???
+  device: "cuda"
+
+host: "0.0.0.0"
+port: ???
+
+inference:
+  # One camera per AutoE2E slot. The cameras select the rig calibration
+  # profile (alpasim_autoe2e/configs/calibration) and are reordered to the
+  # checkpoint's camera_slots.
+  use_cameras:
+    - camera_base_front_center
+    - camera_ring_front_left
+    - camera_ring_front_right
+    - camera_ring_rear_left
+    - camera_ring_rear
+    - camera_ring_rear_right
+  max_batch_size: 1
+  # Every 5th of the 10 Hz frames, 8 deep: the T8 camera history at 500 ms.
+  context_length: 8
+  subsample_factor: 5
+
+route:
+  default_command: 2
+  use_waypoint_commands: true
+
+output_dir: "/mnt/output/driver"
+
+trajectory_optimizer:
+  enabled: false
+
+plot_debug_images: false

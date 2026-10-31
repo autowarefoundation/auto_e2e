@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+*.egg-info/
 Model/navigation/native/libnavigation_rasterizer.so
 Model/navigation/native/libnavigation_rasterizer.dylib
 ._*

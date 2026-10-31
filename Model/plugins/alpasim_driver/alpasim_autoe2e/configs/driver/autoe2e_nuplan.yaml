@@ -1,0 +1,18 @@
+# AutoE2E driver on the nuPlan v1.1 rig (e.g. the nuPlan Epoch 5 checkpoint),
+# rendered in a NuRec scene of the NVIDIA camera rig.
+# Select it with `driver=autoe2e_nuplan` and set `driver.model.checkpoint_path`.
+
+defaults:
+  - autoe2e
+  - autoe2e_nuplan_configs  # nuPlan cameras on NVIDIA camera IDs, via extra_cameras
+  - _self_
+
+inference:
+  # Selects configs/calibration/nuplan_nurec.json; reordered to the checkpoint slots.
+  use_cameras:
+    - camera_front_wide_120fov   # CAM_F0
+    - camera_cross_left_120fov   # CAM_L0
+    - camera_cross_right_120fov  # CAM_R0
+    - camera_rear_left_70fov     # CAM_L2
+    - camera_front_tele_30fov     # CAM_B0
+    - camera_rear_right_70fov    # CAM_R2

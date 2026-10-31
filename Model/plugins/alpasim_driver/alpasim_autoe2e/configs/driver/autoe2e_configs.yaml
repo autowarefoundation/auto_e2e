@@ -1,0 +1,52 @@
+# @package _global_
+
+# Runtime configuration for the AutoE2E driver (KITScenes six-camera rig).
+
+runtime:
+  simulation_config:
+    # The ego follows the recording for 7 s before AutoE2E takes over, so the
+    # 64-step (6.4 s) egomotion history and the 3.5 s camera history hold real
+    # motion. The frames and poses still reach the driver during the warm-up.
+    force_gt_duration_us: 7_000_000
+    skip_driver_during_force_gt: true
+    control_timestep_us: 100_000
+
+    # Rendered at the native aspect ratio; the plugin squashes each frame to
+    # the model's square tiles (front 1024 px, others 512 px) as in training.
+    cameras:
+      - logical_id: camera_base_front_center
+        height: 1552
+        width: 2928
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+      - logical_id: camera_ring_front_left
+        height: 568
+        width: 876
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+      - logical_id: camera_ring_front_right
+        height: 568
+        width: 876
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+      - logical_id: camera_ring_rear_left
+        height: 568
+        width: 876
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+      - logical_id: camera_ring_rear
+        height: 568
+        width: 876
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+      - logical_id: camera_ring_rear_right
+        height: 568
+        width: 876
+        frame_interval_us: 100_000
+        shutter_duration_us: 30_000
+
+services:
+  driver:
+    environments:
+      # Copy of the auto_e2e Model/ directory, placed next to the checkpoint.
+      - AUTOE2E_MODEL_ROOT=/mnt/drivers/autoe2e/Model
