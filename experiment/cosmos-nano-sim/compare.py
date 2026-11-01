@@ -23,7 +23,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-TIMES_S = (0, 2, 4)
 FPS = 30
 TILE = (416, 240)
 
@@ -57,8 +56,10 @@ def main() -> None:
     p.add_argument("--scene", type=Path, required=True)
     p.add_argument("--generated", type=Path, required=True, help="inference output directory")
     p.add_argument("--other-seed", type=Path, help="the same clips generated with another seed")
+    p.add_argument("--times", default="0,2,4", help="comma-separated seconds for the grids and PSNR")
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args()
+    times = [int(t) for t in args.times.split(",")]
     args.out.mkdir(parents=True, exist_ok=True)
 
     meta = json.loads((args.scene / "meta.json").read_text())
@@ -90,7 +91,7 @@ def main() -> None:
         metrics["last_frame_psnr"][v["name"]] = entry
     for key in keys:
         metrics["psnr_vs_recording"][key] = {}
-        for t in TIMES_S:
+        for t in times:
             if (found := recorded(key, min(t * FPS, meta["frames"] - 1))) is not None:
                 f, image = found
                 metrics["psnr_vs_recording"][key][f"{t}s"] = round(float(cv2.PSNR(image, gen[base, key][f])), 2)
@@ -100,7 +101,7 @@ def main() -> None:
             "control": {k: shift_px(ctrl[base, k][-1], ctrl[v["name"], k][-1]) for k in keys},
             "generated": {k: shift_px(gen[base, k][-1], gen[v["name"], k][-1]) for k in keys}}
 
-    for t in TIMES_S:
+    for t in times:
         frame = min(t * FPS, meta["frames"] - 1)
         tile = lambda image: cv2.resize(image, TILE, interpolation=cv2.INTER_AREA)  # noqa: E731
         blank = np.zeros((TILE[1], TILE[0], 3), np.uint8)
