@@ -64,7 +64,7 @@ function ODDPageInner() {
   }, [datasets.data, searchParams]);
   const version =
     searchParams.get("version") ||
-    datasets.data?.find((item) => item.name === dataset)?.version ??
+    datasets.data?.find((item) => item.name === dataset)?.version ||
     "";
   // A joined string keeps the parsed terms stable across renders.
   const whereKey = searchParams.getAll("where").join("\n");
