@@ -557,3 +557,46 @@ export interface DashboardStats {
   // (not genuinely zero/null).
   mlflow_available: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// ODD scene search (GET /api/v1/odd/scenes)
+// ---------------------------------------------------------------------------
+
+// One search term: a valid ODD observation of key whose values include value.
+export interface ODDCondition {
+  key: string; // e.g. "odd.road.context"
+  value: string; // e.g. "urban"
+}
+
+export interface ODDFacet {
+  key: string;
+  values: { value: string; scenes: number }[];
+}
+
+export interface ODDScene {
+  scene_uid: string;
+  shard: string; // shard name in the requested version
+  duration_ns: number;
+  distance_m: number;
+  matches: (ODDCondition & { first_offset_ns: number })[];
+}
+
+export interface ODDSearchResponse {
+  dataset: string;
+  version: string;
+  // The version the LabelSet was made for; differs from version when the
+  // labels are carried forward to a later pack of the same scenes.
+  label_version: string;
+  labelset_id: string;
+  manifest_sha256: string;
+  quality: {
+    structural_status: string;
+    audit_status: string;
+    certification_status: string;
+  };
+  labeled_scenes: number;
+  where: ODDCondition[];
+  facets: ODDFacet[];
+  scenes: ODDScene[];
+  page: Page;
+}
