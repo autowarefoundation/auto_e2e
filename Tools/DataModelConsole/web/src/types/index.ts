@@ -575,6 +575,8 @@ export interface ODDQueryCondition {
   min_duration_s?: number;
   min_confidence?: number;
   sources?: string[];
+  // Client-only identity for the form; cleanQuery drops it before sending.
+  id?: number;
 }
 
 export interface ODDQueryGroup {
@@ -633,7 +635,6 @@ export interface ODDLabelSetInfo {
 }
 
 export interface ODDSearchResponse extends ODDLabelSetInfo {
-  query: ODDQuery;
   vocabulary: ODDFacet[]; // over every labelled scene
   facets: ODDFacet[]; // over the matched scenes
   scenes: ODDScene[]; // lanes hold the intervals that satisfied the query
