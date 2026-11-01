@@ -271,13 +271,14 @@ func (s *S3Service) oddLabelSetFor(
 	pointer, source, err := s.resolveODDPointer(ctx, dataset, version)
 	if errors.Is(err, ErrNotFound) {
 		s.oddCache[cacheKey] = cachedODDLabelSet{at: nowFunc()}
+		s.pruneODDLabelSets()
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
 	// A manifest digest names an immutable LabelSet, so a parsed one is kept
-	// for the process lifetime; only the pointer resolution expires.
+	// while any version resolves to it; only the pointer resolution expires.
 	labels := s.oddLabelSets[pointer.ManifestSHA256]
 	if labels == nil {
 		labels, err = s.loadODDLabelSet(ctx, pointer, source)
@@ -289,7 +290,22 @@ func (s *S3Service) oddLabelSetFor(
 	s.oddCache[cacheKey] = cachedODDLabelSet{
 		manifestSHA256: pointer.ManifestSHA256, at: nowFunc(),
 	}
+	s.pruneODDLabelSets()
 	return labels, nil
+}
+
+// pruneODDLabelSets drops parsed LabelSets that no version resolves to any
+// more, e.g. after a pointer moved to a new LabelSet. Callers hold oddMu.
+func (s *S3Service) pruneODDLabelSets() {
+	referenced := make(map[string]bool, len(s.oddCache))
+	for _, cached := range s.oddCache {
+		referenced[cached.manifestSHA256] = true
+	}
+	for digest := range s.oddLabelSets {
+		if !referenced[digest] {
+			delete(s.oddLabelSets, digest)
+		}
+	}
 }
 
 // resolveODDPointer returns the ODD pointer of the newest version, at or
