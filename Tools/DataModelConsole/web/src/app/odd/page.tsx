@@ -465,7 +465,7 @@ function ODDPageInner() {
                   />
                 ))
               )}
-              {response.page.total > PAGE_SIZE && (
+              {(response.page.total > PAGE_SIZE || response.page.offset > 0) && (
                 <nav aria-label="Pages" className="flex items-center justify-between pt-1 text-xs text-slate-400">
                   <span className="tabular-nums">
                     {response.page.offset + 1}–{response.page.offset + response.scenes.length} of {response.page.total}
@@ -474,7 +474,7 @@ function ODDPageInner() {
                     <Button
                       variant="secondary"
                       size="sm"
-                      disabled={response.page.offset === 0}
+                      disabled={search.loading || response.page.offset === 0}
                       onClick={() => navigate({ offset: Math.max(0, response.page.offset - PAGE_SIZE) })}
                     >
                       <ChevronLeft className="size-3.5" /> Previous
@@ -482,7 +482,7 @@ function ODDPageInner() {
                     <Button
                       variant="secondary"
                       size="sm"
-                      disabled={!response.page.more}
+                      disabled={search.loading || !response.page.more}
                       onClick={() => navigate({ offset: response.page.offset + PAGE_SIZE })}
                     >
                       Next <ChevronRight className="size-3.5" />
