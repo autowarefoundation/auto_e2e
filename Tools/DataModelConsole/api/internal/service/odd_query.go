@@ -225,10 +225,10 @@ func compileODDQuery(query model.ODDQuery) oddCompiledQuery {
 		g := oddGroup{and: group.Op == "and"}
 		for _, c := range group.Conditions {
 			g.conditions = append(g.conditions, oddCondition{
-				key:           c.Key,
-				values:        setOf(c.Values),
-				sources:       setOf(c.Sources),
-				not:           c.Not,
+				key:     c.Key,
+				values:  setOf(c.Values),
+				sources: setOf(c.Sources),
+				not:     c.Not,
 				// Ceil: a positive minimum must exclude zero-length intervals.
 				minDurationNS: int64(math.Ceil(c.MinDurationS * 1e9)),
 				minConfidence: float32(c.MinConfidence),
