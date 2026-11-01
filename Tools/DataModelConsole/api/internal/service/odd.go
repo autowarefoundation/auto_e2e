@@ -128,12 +128,14 @@ func (s *S3Service) SearchODDScenes(
 	where []model.ODDCondition,
 	limit, offset int,
 ) (*model.ODDSearchResponse, error) {
+	// ODD LabelSets bind to v2.1+ publication manifests; older versions have
+	// none, so skip their S3 shard probe.
+	if !requiresPublicationManifest(requestedVersion) {
+		return nil, ErrNotFound
+	}
 	version, err := s.publishedVersion(ctx, dataset, requestedVersion)
 	if err != nil {
 		return nil, err
-	}
-	if !requiresPublicationManifest(version) {
-		return nil, ErrNotFound
 	}
 	labels, err := s.oddLabelSetFor(ctx, dataset, version)
 	if err != nil {
