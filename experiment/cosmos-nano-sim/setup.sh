@@ -17,8 +17,9 @@ export PATH="${ROOT}/bin:${PATH}" HF_HOME="${ROOT}/hf" UV_CACHE_DIR="${ROOT}/uv-
 sudo apt-get update -q
 sudo apt-get install -y -q ffmpeg libgl1 libegl1 libx11-dev libgl-dev libegl-dev build-essential python3-dev
 
-if [ ! -x "${ROOT}/bin/uv" ]; then
-  curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="${ROOT}/bin" UV_NO_MODIFY_PATH=1 sh
+UV_VERSION=0.11.29   # cosmos-framework pyproject requires exactly this uv
+if [ "$("${ROOT}/bin/uv" --version 2>/dev/null | cut -d' ' -f2)" != "${UV_VERSION}" ]; then
+  curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR="${ROOT}/bin" UV_NO_MODIFY_PATH=1 sh
 fi
 
 if [ ! -d cosmos-framework ]; then
