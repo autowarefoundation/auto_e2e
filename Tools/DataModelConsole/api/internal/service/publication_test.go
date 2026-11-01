@@ -411,7 +411,7 @@ func (f *fakePublicationS3) ListObjectsV2(
 		Contents:       objects,
 		CommonPrefixes: commonPrefixes,
 		IsTruncated:    aws.Bool(false),
-		KeyCount:    aws.Int32(int32(len(objects))),
+		KeyCount:       aws.Int32(int32(len(objects))),
 	}, nil
 }
 
