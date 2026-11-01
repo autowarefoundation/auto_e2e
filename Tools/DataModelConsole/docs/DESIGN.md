@@ -147,8 +147,9 @@ FlyteExecution
 ### ODD
 - `GET /api/v1/odd/scenes?dataset=&version=&where=<key>=<value>&limit=&offset=` —
   scenes whose valid ODD labels satisfy every `where` term, with value counts
-  over the matched scenes. The pointer, manifest and scene index are checked by
-  SHA-256, and the manifest must name the dataset publication it labels. A
+  over the matched scenes. The pointer names the manifest by SHA-256, the
+  manifest names the scene index by SHA-256, and the manifest must name the
+  dataset publication it labels. A
   version without a LabelSet uses the newest earlier one whose publication has
   the same shard names and samples per partition (KITScenes v3.7 reads the
   v3.0 labels). 404 means no applicable LabelSet.
