@@ -60,6 +60,12 @@ def _segment_quads(polyline_xy: np.ndarray, half_width_m: float) -> list[np.ndar
     return quads
 
 
+def _direction(lane: Any) -> np.ndarray:
+    """Unit vector from a lane's first to its last centreline point."""
+    delta = lane.center.xy[-1] - lane.center.xy[0]
+    return delta / max(float(np.linalg.norm(delta)), 1e-6)
+
+
 @dataclasses.dataclass(frozen=True)
 class SceneMap:
     """One scene's map primitives, in the scene's local frame."""
@@ -116,16 +122,37 @@ class SceneMap:
         return rasterize_navigation_map(self.layers, reference_pose, AUTOE2E_NAVIGATION_GEOMETRY)
 
     def roadblock_lanes(self, route_xyz: np.ndarray) -> set[str]:
-        """Lanes under the route waypoints plus their side-by-side neighbours."""
+        """Lanes under the route that point along it, plus their same-direction neighbours.
+
+        nuPlan roadblocks group the lanes of one carriageway, so a neighbour that
+        points the other way, or a lane crossing the route, is left out. A route
+        point with no such lane within 4 m adds nothing.
+        """
+        if len(route_xyz) == 0:
+            return set()
+        delta = np.diff(route_xyz[:, :2], axis=0)
+        headings = np.arctan2(delta[:, 1], delta[:, 0]) if len(delta) else np.zeros(1)
+        headings = np.r_[headings, headings[-1]]
+        pending = [
+            lane.id
+            for point, heading in zip(route_xyz, headings)
+            for lane in self.vector_map.get_current_lane(
+                np.r_[point, heading], max_dist=4.0, max_heading_error=np.pi / 4
+            )
+        ]
         selected: set[str] = set()
-        pending = [self.vector_map.get_closest_lane(point).id for point in route_xyz]
         while pending:
             lane_id = pending.pop()
             if lane_id in selected or lane_id not in self.lanes:
                 continue
             selected.add(lane_id)
             lane = self.lanes[lane_id]
-            pending.extend(lane.adj_lanes_left | lane.adj_lanes_right)
+            pending.extend(
+                neighbour
+                for neighbour in lane.adj_lanes_left | lane.adj_lanes_right
+                if neighbour in self.lanes
+                and _direction(self.lanes[neighbour]) @ _direction(lane) > 0.0
+            )
         return selected
 
     def route_mask(
