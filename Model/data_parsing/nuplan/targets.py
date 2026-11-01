@@ -46,7 +46,7 @@ def _pose_xy_heading(state: Any) -> tuple[float, float, float]:
     return float(pose.x), float(pose.y), float(pose.heading)
 
 
-def _global_to_ego(
+def global_to_ego(
     points_xy: np.ndarray,
     reference_pose: tuple[float, float, float],
 ) -> np.ndarray:
@@ -93,7 +93,7 @@ def future_trajectory_xy(
             ],
             dtype=np.float64,
         )
-        ego_xy = _global_to_ego(global_xy, reference_pose)
+        ego_xy = global_to_ego(global_xy, reference_pose)
         finite = np.isfinite(ego_xy).all(axis=1)
         trajectory[:usable] = np.where(
             finite[:, None],
@@ -179,7 +179,7 @@ def rasterize_polygons(
     )
     draw = ImageDraw.Draw(high)
     for polygon in polygons_global:
-        ego_polygon = _global_to_ego(polygon, reference_pose)
+        ego_polygon = global_to_ego(polygon, reference_pose)
         pixels = geometry.ego_to_pixel(ego_polygon)
         high_pixels = np.rint(
             (pixels + 0.5) * supersample - 0.5
@@ -223,7 +223,7 @@ def _rasterize_polylines(
         if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] != 2:
             continue
         pixels = geometry.ego_to_pixel(
-            _global_to_ego(values, reference_pose)
+            global_to_ego(values, reference_pose)
         )
         high_pixels = np.rint(
             (pixels + 0.5) * supersample - 0.5
@@ -468,7 +468,7 @@ def rasterize_navigation_map(
     direction_cos = np.zeros_like(direction_sin)
     direction_count = np.zeros_like(direction_sin)
     for centerline in centerlines:
-        ego_line = _global_to_ego(centerline, reference_pose)
+        ego_line = global_to_ego(centerline, reference_pose)
         delta = ego_line[-1] - ego_line[0]
         norm = float(np.linalg.norm(delta))
         if norm <= 1e-6:
@@ -681,7 +681,7 @@ def build_nuplan_reactive_targets(
     )
     mission_goal = scenario.get_mission_goal()
     if mission_goal is not None:
-        goal_ego = _global_to_ego(
+        goal_ego = global_to_ego(
             np.asarray(
                 [[float(mission_goal.x), float(mission_goal.y)]],
                 dtype=np.float64,
