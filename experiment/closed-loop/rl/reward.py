@@ -30,8 +30,8 @@ scored at the plan's 0.1 s steps over its first 4 s, in the scene's local frame:
   to [0, 1]; 1 when the recording moves less than 5 m (NAVSIM). Multiplying by
   EP gives a plan that stops 0, where PDMS's weighted average would still give
   it 9/14 (#123).
-* TTC: 0.5 when, at any step, the ego box projected at constant velocity 0.3,
-  0.6 or 0.9 s ahead would touch an object that is ahead, or one not behind
+* TTC: 0.5 when, at a step whose projection stays within the horizon, the ego
+  box projected at constant velocity 0, 0.3, 0.6 or 0.9 s ahead would touch an object that is ahead, or one not behind
   while the ego is across lanes or off the road; else 1 (NAVSIM's rule,
   CaRL's factor).
 * LK (lane keeping): mean over the steps of 1 within 0.5 m of the nearest
@@ -68,7 +68,7 @@ from shapely.ops import unary_union
 DT_S = 0.1
 HORIZON_STEPS = 40
 STOPPED_MPS = 0.05
-TTC_LOOKAHEAD_S = (0.3, 0.6, 0.9)
+TTC_LOOKAHEAD_S = (0.0, 0.3, 0.6, 0.9)  # NAVSIM: np.arange(0, 1 s, 0.3 s)
 LANE_KEEP_FULL_M, LANE_KEEP_ZERO_M = 0.5, 1.75
 VALID_FULL_M, VALID_ZERO_M = 2.5, 3.0
 ONCOMING_HEADING_RAD = 2.0 * math.pi / 3.0
@@ -296,7 +296,8 @@ class SceneScorer:
                 if value == 0.0 and nc > 0.0:
                     first_violation.append(k)
                 nc = min(nc, value)
-            if speeds[k] < STOPPED_MPS:
+            # NAVSIM checks TTC only where the 0.9 s projection stays within the horizon.
+            if speeds[k] < STOPPED_MPS or k + round(TTC_LOOKAHEAD_S[-1] / DT_S) >= steps:
                 continue
             heading = float(plan[k, 2])
             ego_box = self.ego.at(*plan[k])
@@ -385,9 +386,9 @@ def _comfort_signals(speed: np.ndarray, heading: np.ndarray, curvature: np.ndarr
         window = min(window, len(values))
         return savgol_filter(values, window, min(order, window - 1), deriv=deriv, delta=DT_S)
 
-    lon = filtered(np.gradient(speed, DT_S), 8, 2)
-    lat = filtered(speed**2 * curvature, 8, 2)
-    jerk = filtered(np.hypot(lon, lat), 15, 2, deriv=1)
+    raw_lon, raw_lat = np.gradient(speed, DT_S), speed**2 * curvature
+    lon, lat = filtered(raw_lon, 8, 2), filtered(raw_lat, 8, 2)
+    jerk = filtered(filtered(np.hypot(raw_lon, raw_lat), 8, 2), 15, 2, deriv=1)
     lon_jerk = filtered(lon, 15, 2, deriv=1)
     yaw_rate = filtered(heading, 5, 2, deriv=1)
     yaw_accel = filtered(heading, 5, 3, deriv=2)
