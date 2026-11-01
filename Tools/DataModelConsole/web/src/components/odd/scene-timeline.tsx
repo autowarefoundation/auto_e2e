@@ -36,7 +36,9 @@ function layout(intervals: ODDInterval[], span: number): Bar[] {
   return intervals.map((interval) => {
     const width = Math.max(((interval.end_ns - interval.start_ns) / span) * 100, MIN_WIDTH);
     const left = Math.min((interval.start_ns / span) * 100, 100 - width);
-    let row = rowEnds.findIndex((end) => end <= left);
+    // The tolerance keeps touching intervals (a value switching at t) in one
+    // row despite floating-point rounding of left + width.
+    let row = rowEnds.findIndex((end) => end <= left + 1e-9);
     if (row < 0) row = rowEnds.length;
     rowEnds[row] = left + width;
     return { left, width, row };
