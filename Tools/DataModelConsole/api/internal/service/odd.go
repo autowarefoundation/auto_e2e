@@ -290,8 +290,9 @@ func (s *S3Service) resolveODDLabelSet(
 		if candidate != version {
 			source, err = s.loadPublicationManifest(ctx, dataset, candidate)
 			if err != nil {
+				// %v: a broken source publication is an error, not "no labels".
 				return nil, fmt.Errorf(
-					"ODD labels at %s/%s: %w", dataset, candidate, err,
+					"ODD labels at %s/%s: %v", dataset, candidate, err,
 				)
 			}
 			if !sameSceneInventory(target, source) {
@@ -458,7 +459,9 @@ func (s *S3Service) verifiedODDObject(
 ) ([]byte, error) {
 	body, err := s.getObjectBytesFromBucket(ctx, s.bucket, key, maxBytes)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", key, err)
+		// %v: a LabelSet object missing behind a ready pointer is an error,
+		// not "no labels".
+		return nil, fmt.Errorf("read %s: %v", key, err)
 	}
 	digest := sha256.Sum256(body)
 	if hex.EncodeToString(digest[:]) != expectedSHA256 ||
