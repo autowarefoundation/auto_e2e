@@ -125,7 +125,7 @@ class SceneMap:
                 continue
             selected.add(lane_id)
             lane = self.lanes[lane_id]
-            pending.extend({*lane.adj_lanes_left, *lane.adj_lanes_right})
+            pending.extend(lane.adj_lanes_left | lane.adj_lanes_right)
         return selected
 
     def route_mask(
