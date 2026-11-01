@@ -148,7 +148,7 @@ R = w_track * R_track + R_bound
 *(Note on Stationary-Ego Progress Incentive):* In Phase 1, the stationary-ego failure mode cannot occur. If the ego stops or under-progresses, the recorded drive keeps moving. ADE and FDE grow, and the ego soon falls more than 3 m behind the recorded position, which triggers the terminal penalty and truncation. The progress incentive is therefore carried by construction in Phase 1, rather than requiring the dedicated progress term of Phase 2 (§6.2.2).
 
 **Future work within Phase 1:**
-- **Wiring:** the reward returns `truncated`, but ending the episode is the RL environment's job. That environment, and the loop that collects rewards, do not exist yet (§7).
+- **Wiring:** a first loop exists as an experiment outside the pipeline, `experiment/closed-loop/rl` (GRPO on one scene, decisions after the bound are dropped). It goes into the pipeline only after it shows value, with this section redesigned first.
 - **Threshold provenance:** the 3 m bound comes from [#140](https://github.com/autowarefoundation/auto_e2e/issues/140) and [#177](https://github.com/autowarefoundation/auto_e2e/pull/177) and has not been measured. Rendering quality (PSNR/LPIPS) against lateral offset from the recorded path would ground it and show whether it must be per scene.
 - **Off-road term:** an off-road term against Lanelet2 drivable polygons was prototyped earlier in [#177](https://github.com/autowarefoundation/auto_e2e/pull/177). AlpaSim already reports an `offroad` metric. It moves to Phase 2's safety term.
 
