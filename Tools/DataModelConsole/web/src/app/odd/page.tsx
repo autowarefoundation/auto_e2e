@@ -30,7 +30,10 @@ import { useApi } from "@/hooks/use-api";
 import { ApiError, getODDScene, listDatasets, searchODDScenes } from "@/lib/api";
 import { friendlyDataset } from "@/lib/format";
 import {
+  MAX_CONDITIONS,
+  MAX_GROUPS,
   cleanQuery,
+  conditionCount,
   describeQuery,
   keyLabel,
   namespaceLabel,
@@ -39,6 +42,7 @@ import {
   seconds,
   valueColor,
   valueLabel,
+  withIDs,
 } from "@/lib/odd";
 import { cn } from "@/lib/utils";
 import type { ODDFacet, ODDQuery, ODDScene, ODDSearchResponse } from "@/types";
@@ -172,11 +176,13 @@ function LabelExplorer({
   matched,
   vocabulary,
   onPick,
+  canAdd,
 }: {
   facets: ODDFacet[];
   matched: number;
   vocabulary: Map<string, ODDFacet>;
   onPick: (key: string, value: string) => void;
+  canAdd: boolean;
 }) {
   const [filter, setFilter] = useState("");
   const shown = facets.filter(
@@ -189,7 +195,10 @@ function LabelExplorer({
           <ChartNoAxesColumn className="size-4 text-sky-400" /> Label explorer
         </CardTitle>
         <p className="text-xs text-slate-500">
-          Share of the {matched} matched scenes carrying each value. Click a value to add it as a new group.
+          Share of the {matched} matched scenes carrying each value.{" "}
+          {canAdd
+            ? "Click a value to add it as a new group."
+            : `The query is at its limit of ${MAX_GROUPS} groups or ${MAX_CONDITIONS} conditions.`}
         </p>
         <input
           value={filter}
@@ -217,8 +226,9 @@ function LabelExplorer({
                         key={value}
                         type="button"
                         onClick={() => onPick(facet.key, value)}
+                        disabled={!canAdd}
                         aria-label={`Add ${keyLabel(facet.key)} is ${valueLabel(value)}, ${scenes} scenes`}
-                        className="group grid w-full grid-cols-[6.5rem_1fr_2.5rem] items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-slate-900"
+                        className="group grid w-full grid-cols-[6.5rem_1fr_2.5rem] items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-slate-900 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                       >
                         <span className="truncate text-[11px] text-slate-400 group-hover:text-slate-200">
                           {valueLabel(value)}
@@ -271,11 +281,15 @@ function ODDPageInner() {
   const appliedKey = JSON.stringify(applied);
   const offset = Math.max(0, parseInt(searchParams.get("offset") ?? "", 10) || 0);
 
-  const [draft, setDraft] = useState<ODDQuery>(applied);
-  // Follow back/forward navigation: a new applied query replaces the draft
-  // unless the draft already cleans to it (the user is mid-edit).
+  const [draft, setDraft] = useState<ODDQuery>(() => withIDs(applied));
+  // The query this page last wrote to the URL. While that write is in
+  // flight the user may keep editing, so its arrival must not reset the
+  // draft; any other new URL query (back/forward, a shared link) does.
+  const selfApplied = useRef(appliedKey);
   useEffect(() => {
-    setDraft((current) => (JSON.stringify(cleanQuery(current)) === appliedKey ? current : applied));
+    if (appliedKey === selfApplied.current) return;
+    selfApplied.current = appliedKey;
+    setDraft((current) => (JSON.stringify(cleanQuery(current)) === appliedKey ? current : withIDs(applied)));
   }, [applied, appliedKey]);
 
   function navigate(next: { dataset?: string; query?: ODDQuery; offset?: number }, push = true) {
@@ -296,7 +310,10 @@ function ODDPageInner() {
   useEffect(() => {
     const cleaned = cleanQuery(draft);
     if (JSON.stringify(cleaned) === appliedKey) return;
-    const timer = setTimeout(() => navigateRef.current({ query: cleaned }, false), APPLY_DELAY_MS);
+    const timer = setTimeout(() => {
+      selfApplied.current = JSON.stringify(cleaned);
+      navigateRef.current({ query: cleaned }, false);
+    }, APPLY_DELAY_MS);
     return () => clearTimeout(timer);
   }, [draft, appliedKey]);
 
@@ -312,7 +329,9 @@ function ODDPageInner() {
     [response?.vocabulary],
   );
 
+  const canAdd = draft.groups.length < MAX_GROUPS && conditionCount(draft) < MAX_CONDITIONS;
   function addCondition(key: string, value: string) {
+    if (!canAdd) return;
     setDraft((current) => ({
       ...current,
       groups: [...current.groups, { op: "and", conditions: [{ ...emptyCondition(key), values: [value] }] }],
@@ -363,7 +382,7 @@ function ODDPageInner() {
         </Card>
       ) : search.error && !response ? (
         <ErrorState error={search.error} onRetry={search.reload} service="S3" />
-      ) : !response ? (
+      ) : !response || response.dataset !== dataset ? (
         <div className="space-y-4">
           <Skeleton className="h-24 w-full" />
           <Skeleton className="h-64 w-full" />
@@ -411,6 +430,10 @@ function ODDPageInner() {
             </CardContent>
           </Card>
 
+          {search.error && (
+            // The results below are from the previous query.
+            <ErrorState error={search.error} onRetry={search.reload} service="S3" />
+          )}
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
             <section aria-label="Matched scenes" className={cn("space-y-3", search.loading && "opacity-70")}>
               {response.scenes.length === 0 ? (
@@ -462,6 +485,7 @@ function ODDPageInner() {
                 matched={response.page.total}
                 vocabulary={vocabulary}
                 onPick={addCondition}
+                canAdd={canAdd}
               />
             </aside>
           </div>
