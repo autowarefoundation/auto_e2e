@@ -37,10 +37,15 @@ const (
 	maxODDManifestBytes     = 4 << 20
 	maxODDSceneIndexBytes   = 64 << 20
 	maxODDObservationsBytes = 64 << 20
+	// Decoded-size bounds for one LabelSet, about 10x the KITScenes one, so a
+	// malformed table fails instead of exhausting the 512 MiB pod.
+	maxODDObservationRows = 2_000_000
+	maxODDRowValues       = 64
 )
 
 var (
 	oddLabelSetIDPattern = regexp.MustCompile(`^oddls-[0-9a-f]{32}$`)
+	oddSceneUIDPattern   = regexp.MustCompile(`^[0-9a-f][0-9a-f-]{0,63}$`)
 	oddKeyPattern        = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
 	oddValuePattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9_]*$`)
 )
@@ -53,6 +58,10 @@ func ValidODDKey(key string) bool {
 }
 
 func invalidODDValue(value string) bool { return !ValidODDValue(value) }
+
+// ValidODDSceneUID reports whether uid has the form of a KITScenes scene UID
+// (lowercase hex and dashes). Loaded scenes and scene requests share it.
+func ValidODDSceneUID(uid string) bool { return oddSceneUIDPattern.MatchString(uid) }
 
 // ValidODDValue reports whether value has the form of an ODD value such as
 // "urban".
@@ -93,8 +102,9 @@ type oddManifest struct {
 type oddInterval struct {
 	values     []string
 	source     string
-	cameraID   string
-	confidence float64
+	cameraID string
+	// confidence stays float32 as stored, so a threshold compares exactly.
+	confidence float32
 	start, end int64
 }
 
@@ -422,9 +432,9 @@ func decodeODDSceneIndex(
 		scene := &labels.scenes[i]
 		_, published := source.ShardByName[scene.ShardName]
 		_, seen := labels.sceneByUID[scene.SceneUID]
-		if !published || scene.SceneUID == "" || seen ||
+		if !published || !ValidODDSceneUID(scene.SceneUID) || seen ||
 			shards[scene.ShardName] ||
-			scene.EndTimestampNS < scene.StartTimestampNS {
+			scene.EndTimestampNS <= scene.StartTimestampNS {
 			return nil, fmt.Errorf("invalid scene %q", scene.SceneUID)
 		}
 		labels.sceneByUID[scene.SceneUID] = i
@@ -444,6 +454,9 @@ func (labels *oddLabelSet) decodeObservations(body []byte, rowCount int64) error
 	}
 	if file.NumRows() != rowCount {
 		return fmt.Errorf("has %d rows, manifest says %d", file.NumRows(), rowCount)
+	}
+	if rowCount > maxODDObservationRows {
+		return fmt.Errorf("has %d rows, more than %d", rowCount, maxODDObservationRows)
 	}
 	reader := parquet.NewGenericReader[oddObservationRow](file)
 	defer reader.Close()
@@ -467,20 +480,23 @@ func (labels *oddLabelSet) decodeObservations(body []byte, rowCount int64) error
 			if !ok {
 				return fmt.Errorf("row for unknown scene %q", row.SceneUID)
 			}
-			if row.Status != "valid" || len(row.Values) == 0 {
+			if row.Status != "valid" {
 				continue
 			}
 			scene := &labels.scenes[index]
-			confidence := float64(row.Confidence)
+			confidence := row.Confidence
 			cameraID := ""
 			if row.CameraID != nil {
 				cameraID = *row.CameraID
 			}
+			// A valid label without a value would make NOT conditions hold
+			// for a scene that does carry the key.
 			if !ValidODDKey(row.Key) ||
+				len(row.Values) == 0 || len(row.Values) > maxODDRowValues ||
 				slices.ContainsFunc(row.Values, invalidODDValue) ||
 				!ValidODDValue(row.Source) ||
 				(cameraID != "" && !ValidODDValue(cameraID)) ||
-				math.IsNaN(confidence) || confidence < 0 || confidence > 1 ||
+				math.IsNaN(float64(confidence)) || confidence < 0 || confidence > 1 ||
 				row.Start < scene.StartTimestampNS ||
 				row.End > scene.EndTimestampNS ||
 				row.End < row.Start {
@@ -514,8 +530,12 @@ func (labels *oddLabelSet) decodeObservations(body []byte, rowCount int64) error
 	}
 	for i := range labels.scenes {
 		for _, intervals := range labels.scenes[i].labels {
+			// Camera breaks start ties so per-camera rows keep one order.
 			sort.Slice(intervals, func(a, b int) bool {
-				return intervals[a].start < intervals[b].start
+				if intervals[a].start != intervals[b].start {
+					return intervals[a].start < intervals[b].start
+				}
+				return intervals[a].cameraID < intervals[b].cameraID
 			})
 		}
 	}
