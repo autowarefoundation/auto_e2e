@@ -209,6 +209,11 @@ type S3Service struct {
 	// Guarded by indexMu; keyed by "<dataset>/<version>/<shard>".
 	indexMu sync.Mutex
 	indexSF map[string]*shardIndexBuild // single-flight in-progress builds
+
+	// oddCache memoizes the ODD LabelSet resolved for "<dataset>/<version>",
+	// including "no labels", for versionTTL. Guarded by oddMu.
+	oddMu    sync.Mutex
+	oddCache map[string]cachedODDLabelSet
 }
 
 type shardIndexBuild struct {
@@ -633,26 +638,12 @@ var nowFunc = time.Now
 // discoverNewestVersion lists "<dataset>/" version prefixes and returns the
 // newest that has passed the shard publication gate. Uncached.
 func (s *S3Service) discoverNewestVersion(ctx context.Context, dataset string) string {
-	prefix := dataset + "/"
-	out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket:    aws.String(s.bucket),
-		Prefix:    aws.String(prefix),
-		Delimiter: aws.String("/"),
-	})
+	versions, err := s.versionDirs(ctx, dataset)
 	if err != nil {
 		slog.Warn("resolve version: list versions failed, using fallback",
 			"dataset", dataset, "error", err)
 		return fallbackVersion
 	}
-	versions := make([]string, 0, len(out.CommonPrefixes))
-	for _, cp := range out.CommonPrefixes {
-		v := strings.TrimSuffix(strings.TrimPrefix(aws.ToString(cp.Prefix), prefix), "/")
-		if isVersionDir(v) {
-			versions = append(versions, v)
-		}
-	}
-	// Newest first (version-aware, not raw lexical, so v10 > v9).
-	sortVersionsNewestFirst(versions)
 	for _, v := range versions {
 		if s.versionHasShards(ctx, dataset, v) {
 			return v
@@ -694,6 +685,30 @@ func requiresPublicationManifest(version string) bool {
 // Exported so handlers can 400 on a garbage ?version= before it reaches S3.
 func ValidVersion(v string) bool { return isVersionDir(v) }
 
+// versionDirs lists the "vX.Y/" prefixes under "<dataset>/", newest first
+// (version-aware, not raw lexical, so v10 > v9). It does not check whether a
+// version is published.
+func (s *S3Service) versionDirs(ctx context.Context, dataset string) ([]string, error) {
+	prefix := dataset + "/"
+	out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:    aws.String(s.bucket),
+		Prefix:    aws.String(prefix),
+		Delimiter: aws.String("/"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list versions for %s: %w", dataset, err)
+	}
+	versions := make([]string, 0, len(out.CommonPrefixes))
+	for _, cp := range out.CommonPrefixes {
+		v := strings.TrimSuffix(strings.TrimPrefix(aws.ToString(cp.Prefix), prefix), "/")
+		if isVersionDir(v) {
+			versions = append(versions, v)
+		}
+	}
+	sortVersionsNewestFirst(versions)
+	return versions, nil
+}
+
 // sortVersionsNewestFirst sorts version dirs in place newest-first
 // (version-aware, not raw lexical, so v10 > v9 and v2.0 > v1.10).
 func sortVersionsNewestFirst(versions []string) {
@@ -719,23 +734,16 @@ type shardManifest struct {
 // A historical version without a manifest still reports Shards/SizeBytes (the
 // manifest-derived counts are then zero, HasManifest=false).
 func (s *S3Service) ListDatasetVersions(ctx context.Context, dataset string) ([]model.DatasetVersion, error) {
-	prefix := dataset + "/"
-	out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket:    aws.String(s.bucket),
-		Prefix:    aws.String(prefix),
-		Delimiter: aws.String("/"),
-	})
+	dirs, err := s.versionDirs(ctx, dataset)
 	if err != nil {
-		return nil, fmt.Errorf("list versions for %s: %w", dataset, err)
+		return nil, err
 	}
-	versions := make([]string, 0, len(out.CommonPrefixes))
-	for _, cp := range out.CommonPrefixes {
-		v := strings.TrimSuffix(strings.TrimPrefix(aws.ToString(cp.Prefix), prefix), "/")
-		if isVersionDir(v) && s.versionHasShards(ctx, dataset, v) {
+	versions := make([]string, 0, len(dirs))
+	for _, v := range dirs {
+		if s.versionHasShards(ctx, dataset, v) {
 			versions = append(versions, v)
 		}
 	}
-	sortVersionsNewestFirst(versions)
 
 	entries := make([]model.DatasetVersion, 0, len(versions))
 	for _, v := range versions {
