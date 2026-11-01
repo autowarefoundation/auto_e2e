@@ -79,6 +79,7 @@ func main() {
 	)
 	reasoningH := handler.NewReasoningHandler(s3svc)
 	scenesH := handler.NewScenesHandler(s3svc)
+	oddH := handler.NewODDHandler(s3svc)
 	overlayH := handler.NewOverlayHandler(
 		s3svc, cfg.ExactGeoEnabled, cfg.ExactGeoRequiredRole,
 	)
@@ -137,6 +138,10 @@ func main() {
 			r.Get("/reasoning-labels/prompt-versions", reasoningH.PromptVersions)
 			r.Get("/reasoning-labels/stats-detail", reasoningH.StatsDetail)
 			r.Get("/reasoning-labels/{dataset}/{sample_id}", reasoningH.GetLabel)
+
+			// ODD search filters one cached, digest-verified scene index in
+			// memory; only a cold LabelSet load reads S3 (a few MB).
+			r.Get("/odd/scenes", oddH.Search)
 
 			r.Get("/mlflow/experiments", mlflowH.Experiments)
 			r.Get("/mlflow/experiments/{id}/runs", mlflowH.Runs)
