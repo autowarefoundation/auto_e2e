@@ -229,7 +229,8 @@ func compileODDQuery(query model.ODDQuery) oddCompiledQuery {
 				values:        setOf(c.Values),
 				sources:       setOf(c.Sources),
 				not:           c.Not,
-				minDurationNS: int64(c.MinDurationS * 1e9),
+				// Ceil: a positive minimum must exclude zero-length intervals.
+				minDurationNS: int64(math.Ceil(c.MinDurationS * 1e9)),
 				minConfidence: float32(c.MinConfidence),
 			})
 		}
