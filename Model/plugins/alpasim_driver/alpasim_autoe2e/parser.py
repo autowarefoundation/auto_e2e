@@ -129,7 +129,7 @@ def route_in_local(route: Any, trajectory: Trajectory) -> np.ndarray:
 
     AlpaSim sends them in the rig frame at ``route.timestamp_us``.
     """
-    waypoints = np.array([[p.x, p.y, p.z] for p in route.waypoints], dtype=np.float64)
+    waypoints = np.array([[p.x, p.y, p.z] for p in route.waypoints], dtype=np.float64).reshape(-1, 3)
     waypoints = waypoints[np.isfinite(waypoints).all(axis=1)]
     time_range_us = trajectory.time_range_us
     timestamp_us = min(max(int(route.timestamp_us), time_range_us.start), time_range_us.stop - 1)
@@ -318,10 +318,13 @@ class AlpasimStreamParser:
             vec = np.asarray(pose_t0.vec3, dtype=np.float64)
             reference_pose = (float(vec[0]), float(vec[1]), float(pose_t0.yaw()))
             map_context, map_valid = scene_map.map_context(reference_pose)
-            if prediction_input.route is not None:
-                route_xyz = route_in_local(prediction_input.route, trajectory)
-                if len(route_xyz):
-                    route_mask, route_valid = scene_map.route_mask(route_xyz, reference_pose)
+            # The destination channel does not depend on the route, as in training.
+            route_xyz = (
+                route_in_local(prediction_input.route, trajectory)
+                if prediction_input.route is not None
+                else np.empty((0, 3))
+            )
+            route_mask, route_valid = scene_map.route_mask(route_xyz, reference_pose)
         model_inputs: dict[str, Any] = {
             "camera_tiles": visual_tiles.unsqueeze(0),
             "camera_projection_matrix": self.projection.unsqueeze(0),
