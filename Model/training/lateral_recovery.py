@@ -413,34 +413,52 @@ def _warp_views(
     return warped
 
 
+def _past_poses(signals: torch.Tensor) -> torch.Tensor:
+    """Past ego poses ``T_E<-past`` at every history row, shape ``[B,64,4,4]``.
+
+    Integrated backwards from the current row with the logged speed and yaw
+    rate.
+    """
+    speed, yaw_rate = signals[..., 0], signals[..., 2]
+    later = torch.flip(torch.cumsum(torch.flip(yaw_rate, [1]), dim=1), [1])
+    heading = -(later - yaw_rate) * _DT_S
+    step_x = speed * torch.cos(heading) * _DT_S
+    step_y = speed * torch.sin(heading) * _DT_S
+    x = -(torch.flip(torch.cumsum(torch.flip(step_x, [1]), dim=1), [1]) - step_x)
+    y = -(torch.flip(torch.cumsum(torch.flip(step_y, [1]), dim=1), [1]) - step_y)
+    pose = ego_shift_transform(y, heading)
+    pose[..., 0, 3] = x
+    return pose
+
+
 def _history_camera_targets(
-    current: torch.Tensor,
     history: torch.Tensor,
+    signals: torch.Tensor,
     lateral: torch.Tensor,
     heading: torch.Tensor,
 ) -> torch.Tensor:
-    """Past projections of cameras moved by the blended past shift.
+    """Past projections of cameras moved by the blended past shift ``D_k``.
 
-    ``history[:, k] = A_v S_k`` with the rig ``A_v`` and the current-to-past
-    ego motion ``S_k``. ``S_k`` is solved from all views jointly, then the
-    displaced camera is ``A_v D_k^-1 S_k`` with the past shift ``D_k``. It is
-    written as ``history + A (D_k^-1 - I) S_k`` so a zero shift is exact.
+    ``history[:, k]`` maps current-ego points into past image ``k``. The moved
+    camera sees them through ``history @ pose D_k^-1 pose^-1`` with the past
+    pose ``pose = T_E<-past``. It is written as
+    ``history + history @ pose (D_k^-1 - I) pose^-1`` so a zero shift is exact,
+    and the integrated pose only enters the small correction.
     """
-    batch_size, frames, views = history.shape[:3]
-    rig = current.float().reshape(batch_size, 1, views * 3, 4)
-    past = history.float().reshape(batch_size, frames, views * 3, 4)
-    motion = torch.linalg.lstsq(
-        rig.expand(-1, frames, -1, -1),
-        past,
-    ).solution
     rows = torch.as_tensor(_HISTORY_IMAGE_ROWS, device=history.device)
+    pose = _past_poses(signals)[:, rows]
     displacement = ego_shift_transform(
         lateral[:, rows].float(),
         heading[:, rows].float(),
     )
     identity = torch.eye(4, device=history.device, dtype=torch.float32)
-    correction = rig @ (torch.linalg.inv(displacement) - identity) @ motion
-    return (past + correction).reshape(history.shape).to(history.dtype)
+    correction = (
+        pose
+        @ (torch.linalg.inv(displacement) - identity)
+        @ torch.linalg.inv(pose)
+    )
+    past = history.float()
+    return (past + past @ correction[:, :, None]).to(history.dtype)
 
 
 def apply_lateral_recovery(
@@ -509,7 +527,12 @@ def apply_lateral_recovery(
             front.float() @ to_shifted[:, None],
             active,
         )[:, 0]
-    displaced = _history_camera_targets(current, history, lateral, heading)
+    displaced = _history_camera_targets(
+        history,
+        _history_signals(batch["egomotion_history"]),
+        lateral,
+        heading,
+    )
     history_tiles = batch["camera_history_tiles"].clone()
     for frame in range(history.shape[1]):
         row = _HISTORY_IMAGE_ROWS[frame]
