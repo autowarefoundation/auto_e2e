@@ -143,3 +143,16 @@ def test_parse_feeds_map_and_route_for_a_known_scene(scene_map: SceneMap) -> Non
     prediction_input.scene_id = "clipgt-unknown"
     inputs = driver.parser.parse(prediction_input).model_inputs
     assert not inputs["map_valid"].any() and not inputs["route_mask"].any()
+
+
+def test_destination_is_drawn_without_a_route(scene_map: SceneMap) -> None:
+    driver = AutoE2EDriver(MOCK_CHECKPOINT, KIT_CAMERAS)
+    driver.parser.scene_maps = _OneSceneMap(scene_map)
+    for route in (None, egodriver_pb2.Route(timestamp_us=T0_US)):  # none, and no waypoints
+        prediction_input = _prediction_input()
+        prediction_input.scene_id = "clipgt-test"
+        prediction_input.route = route
+        inputs = driver.parser.parse(prediction_input).model_inputs
+        assert inputs["route_valid"].tolist() == [True]
+        assert not inputs["route_mask"][0, 0].any()
+        assert inputs["route_mask"][0, 1].max() == pytest.approx(1.0)
