@@ -133,7 +133,9 @@ Choices and why:
   non-redundancy). Collisions follow NAVSIM's contact types and at-fault
   rules, off-road follows AlpaSim's own offroad metric (not covered by lanes
   and touching a road edge), and EPDMS's human filter forgives a rule where
-  the recorded drive breaks it at the same place. V keeps plans within 2.5-3 m of the recorded path, where
+  the recorded drive breaks it at the same place. Objects are the ones the
+  rollout simulated: AlpaSim drops tracks shorter than 3 s and hides them
+  from the renders, so the reward ignores them too. V keeps plans within 2.5-3 m of the recorded path, where
   the reconstruction is reliable; as RAD (arXiv:2502.13144) does, it measures
   distance to the path, not to the recorded position at the same time, so
   braking is not penalised. The phase-1 reward of
@@ -145,7 +147,10 @@ Choices and why:
   (arXiv:2506.08052) and AutoVLA (arXiv:2506.13757) score whole trajectories
   as one action. The reward of a plan depends only on the plan and the
   state, so the plans of one state can be compared without rolling each out,
-  and no value network is needed. Rollout-level groups would cost one
+  and no value network is needed. Advantages are the rewards minus the group
+  mean, without GRPO's division by the group std (Dr. GRPO, arXiv:2503.20783),
+  so a group of near-equal plans does not push as hard as a collision. Each
+  step draws new exploration noise (`--seed` is the iteration). Rollout-level groups would cost one
   5-minute rollout per sample at the current 6.6 s per decision.
 - Exploration (#211): the GRU planner is deterministic, so the policy adds
   Gaussian noise to 4 low-frequency DCT coefficients of each control signal,
@@ -175,7 +180,9 @@ Choices and why:
 
 Limits: the reward of a decision ignores what the executed plan does to later
 decisions, so this is a contextual bandit on visited states, not credit
-assignment over the episode. Noise and gradient reach all 64 steps, while the
+assignment over the episode. The reward has no traffic-light term, and EP
+counts the log's moving time only, so waiting for a light is not rewarded and
+running it is not penalised. Noise and gradient reach all 64 steps, while the
 reward scores the first 40. Logged objects do not react to the ego. The
 renderer bound keeps the policy near the recorded path. Collisions are
 checked at the 0.1 s steps, not swept between them. The route corridor covers
