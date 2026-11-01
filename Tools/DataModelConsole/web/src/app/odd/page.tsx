@@ -48,6 +48,13 @@ import { cn } from "@/lib/utils";
 import type { ODDFacet, ODDQuery, ODDScene, ODDSearchResponse } from "@/types";
 
 const PAGE_SIZE = 20;
+
+// Two queries select the same scenes when both have no executable groups
+// (the top-level op then does not matter, and the URL omits q) or when they
+// serialise alike.
+function sameScenes(query: ODDQuery, key: string, other: ODDQuery): boolean {
+  return (query.groups.length === 0 && other.groups.length === 0) || JSON.stringify(query) === key;
+}
 const APPLY_DELAY_MS = 350;
 
 function groupByNamespace<T extends { key: string }>(items: T[]): [string, T[]][] {
@@ -295,7 +302,7 @@ function ODDPageInner() {
   useEffect(() => {
     if (appliedKey === selfApplied.current) return;
     selfApplied.current = appliedKey;
-    setDraft((current) => (JSON.stringify(cleanQuery(current)) === appliedKey ? current : withIDs(applied)));
+    setDraft((current) => (sameScenes(cleanQuery(current), appliedKey, applied) ? current : withIDs(applied)));
   }, [applied, appliedKey]);
 
   function navigate(next: { dataset?: string; query?: ODDQuery; offset?: number }, push = true) {
@@ -322,14 +329,14 @@ function ODDPageInner() {
   // Apply the draft shortly after the last edit.
   useEffect(() => {
     const cleaned = cleanQuery(draft);
-    if (JSON.stringify(cleaned) === appliedKey) return;
+    if (sameScenes(cleaned, appliedKey, applied)) return;
     const timer = setTimeout(() => {
       if (switchingTo.current !== null) return;
       selfApplied.current = JSON.stringify(cleaned);
       navigateRef.current({ query: cleaned }, false);
     }, APPLY_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [draft, appliedKey]);
+  }, [draft, appliedKey, applied]);
 
   const search = useApi(
     () => searchODDScenes(dataset, version, applied, offset, PAGE_SIZE),
