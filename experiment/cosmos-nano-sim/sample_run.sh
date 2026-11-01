@@ -4,7 +4,7 @@
 # Usage: sample_run.sh <num_views> <resolution 480|720> <num_frames (4k+1)>
 set -euo pipefail
 
-ROOT=${ROOT:-/opt/dlami/nvme/cosmos-nano-sim}
+ROOT=${ROOT:-/home/ubuntu/cosmos-nano-sim}
 # The framework shells out to uv to fetch the Wan2.2 VAE from Hugging Face on first use.
 export PATH="${ROOT}/bin:${PATH}" HF_HOME="${ROOT}/hf" UV_CACHE_DIR="${ROOT}/uv-cache"
 VIEWS=${1:-1}
