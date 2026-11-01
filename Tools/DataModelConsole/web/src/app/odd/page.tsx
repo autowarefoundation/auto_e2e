@@ -306,11 +306,19 @@ function ODDPageInner() {
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
 
+  // The dataset a switch is navigating to, until the URL shows it. A draft
+  // write still pending from the old dataset must not land on the new one.
+  const switchingTo = useRef<string | null>(null);
+  useEffect(() => {
+    if (switchingTo.current === dataset) switchingTo.current = null;
+  }, [dataset]);
+
   // Apply the draft shortly after the last edit.
   useEffect(() => {
     const cleaned = cleanQuery(draft);
     if (JSON.stringify(cleaned) === appliedKey) return;
     const timer = setTimeout(() => {
+      if (switchingTo.current !== null) return;
       selfApplied.current = JSON.stringify(cleaned);
       navigateRef.current({ query: cleaned }, false);
     }, APPLY_DELAY_MS);
@@ -352,7 +360,11 @@ function ODDPageInner() {
           <div className="flex items-center gap-2">
             <select
               value={dataset}
-              onChange={(event) => navigate({ dataset: event.target.value, query: { op: "and", groups: [] } })}
+              onChange={(event) => {
+                switchingTo.current = event.target.value;
+                setDraft({ op: "and", groups: [] });
+                navigate({ dataset: event.target.value, query: { op: "and", groups: [] } });
+              }}
               disabled={datasets.loading || !datasets.data?.length}
               className="h-9 rounded-md border border-slate-700 bg-slate-900 px-3 text-sm"
               aria-label="Dataset"
