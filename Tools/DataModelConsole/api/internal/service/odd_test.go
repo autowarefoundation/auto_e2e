@@ -142,7 +142,7 @@ func row(key, status string, start, end int64, confidence float32, source string
 func testODDScenes() []any {
 	return []any{
 		map[string]any{
-			"scene_uid":          "uid-a",
+			"scene_uid":          "aa01",
 			"shard_name":         "scene-a-train-000000.tar",
 			"start_timestamp_ns": 1 * sec,
 			"end_timestamp_ns":   21 * sec,
@@ -154,7 +154,7 @@ func testODDScenes() []any {
 			},
 		},
 		map[string]any{
-			"scene_uid":          "uid-b",
+			"scene_uid":          "bb02",
 			"shard_name":         "scene-b-train-000000.tar",
 			"start_timestamp_ns": 0,
 			"end_timestamp_ns":   11 * sec,
@@ -362,7 +362,7 @@ func TestSearchODDScenesCarriesLabelsToSameScenePack(t *testing.T) {
 		t.Fatalf("scenes = %+v, ambiguous observation must not match", response.Scenes)
 	}
 	scene := response.Scenes[0]
-	if scene.SceneUID != "uid-a" || scene.Shard != "scene-a-train-000000.tar" ||
+	if scene.SceneUID != "aa01" || scene.Shard != "scene-a-train-000000.tar" ||
 		scene.DurationNS != 20*sec || scene.DistanceM != 120.5 {
 		t.Fatalf("scene = %+v", scene)
 	}
@@ -388,7 +388,7 @@ func TestSearchODDScenesWithoutConditionsCountsAllScenes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response.Page.Total != 2 || len(response.Scenes) != 1 ||
-		response.Scenes[0].SceneUID != "uid-b" || response.Page.More ||
+		response.Scenes[0].SceneUID != "bb02" || response.Page.More ||
 		len(response.Scenes[0].Lanes) != 0 {
 		t.Fatalf("page = %+v scenes = %+v", response.Page, response.Scenes)
 	}
@@ -411,6 +411,8 @@ func TestMatchODDQueryOperators(t *testing.T) {
 	withDuration.MinDurationS = 2
 	withConfidence := cond("odd.road.context", "urban")
 	withConfidence.MinConfidence = 0.95
+	atBoundary := cond("odd.road.context", "urban")
+	atBoundary.MinConfidence = 0.9
 	fromVLM := cond("odd.road.context", "rural")
 	fromVLM.Sources = []string{"vlm"}
 	notDusk := cond("odd.environment.day_phase", "dusk")
@@ -419,15 +421,17 @@ func TestMatchODDQueryOperators(t *testing.T) {
 		q    model.ODDQuery
 		want string
 	}{
-		"AND within a group":        {query("and", group("and", cond("odd.environment.sky", "clear"), cond("odd.road.context", "rural"))), "[uid-b]"},
-		"OR within a group":         {query("and", group("or", cond("odd.road.context", "urban"), cond("odd.environment.day_phase", "dusk"))), "[uid-a uid-b]"},
-		"IN over values":            {query("and", group("and", cond("odd.road.context", "rural", "motorway"))), "[uid-b]"},
-		"NOT":                       {query("and", group("and", notDusk)), "[uid-a]"},
-		"min duration":              {query("and", group("and", withDuration)), "[uid-a]"},
+		"AND within a group":        {query("and", group("and", cond("odd.environment.sky", "clear"), cond("odd.road.context", "rural"))), "[bb02]"},
+		"OR within a group":         {query("and", group("or", cond("odd.road.context", "urban"), cond("odd.environment.day_phase", "dusk"))), "[aa01 bb02]"},
+		"IN over values":            {query("and", group("and", cond("odd.road.context", "rural", "motorway"))), "[bb02]"},
+		"NOT":                       {query("and", group("and", notDusk)), "[aa01]"},
+		"min duration":              {query("and", group("and", withDuration)), "[aa01]"},
 		"min confidence":            {query("and", group("and", withConfidence)), "[]"},
+		// 0.9 is stored as float32; a 0.9 threshold must still include it.
+		"confidence at the boundary": {query("and", group("and", atBoundary)), "[aa01]"},
 		"source":                    {query("and", group("and", fromVLM)), "[]"},
-		"OR across groups":          {query("or", group("and", cond("odd.road.context", "urban")), group("and", cond("odd.road.context", "rural"))), "[uid-a uid-b]"},
-		"AND across groups":         {query("and", group("and", cond("odd.environment.sky", "clear")), group("or", notDusk)), "[uid-a]"},
+		"OR across groups":          {query("or", group("and", cond("odd.road.context", "urban")), group("and", cond("odd.road.context", "rural"))), "[aa01 bb02]"},
+		"AND across groups":         {query("and", group("and", cond("odd.environment.sky", "clear")), group("or", notDusk)), "[aa01]"},
 		"value never labelled":      {query("and", group("and", cond("odd.road.context", "motorway"))), "[]"},
 		"key absent from the scene": {query("and", group("and", cond("odd.weather.fog", "dense"))), "[]"},
 	}
@@ -466,7 +470,7 @@ func TestMatchODDQueryLanesKeepOnlySatisfyingIntervals(t *testing.T) {
 
 func TestODDSceneReturnsEveryLabel(t *testing.T) {
 	service := newODDFixture(t)
-	response, err := service.ODDScene(context.Background(), "kitscenes", "v3.0", "uid-b")
+	response, err := service.ODDScene(context.Background(), "kitscenes", "v3.0", "bb02")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +482,7 @@ func TestODDSceneReturnsEveryLabel(t *testing.T) {
 		len(response.Scene.Lanes[2].Intervals) != 1 {
 		t.Fatalf("lanes = %+v, want sorted keys and no ambiguous interval", response.Scene.Lanes)
 	}
-	if _, err := service.ODDScene(context.Background(), "kitscenes", "v3.0", "uid-z"); !errors.Is(err, ErrNotFound) {
+	if _, err := service.ODDScene(context.Background(), "kitscenes", "v3.0", "ff09"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown scene err = %v, want ErrNotFound", err)
 	}
 }
@@ -601,7 +605,20 @@ func TestSearchODDScenesRejectsUnverifiedLabelSet(t *testing.T) {
 		"label before its scene starts": {scenes: withRow(func(r map[string]any) { r["start"] = int64(0) })},
 		"label after its scene ends":    {scenes: withRow(func(r map[string]any) { r["end"] = 30 * sec })},
 		"confidence above one":          {scenes: withRow(func(r map[string]any) { r["confidence"] = float32(1.5) })},
-		"row for an unknown scene":      {scenes: withRow(func(r map[string]any) { r["scene_uid"] = "uid-z" })},
+		"row for an unknown scene":      {scenes: withRow(func(r map[string]any) { r["scene_uid"] = "ff09" })},
+		"valid label without a value":   {scenes: withRow(func(r map[string]any) { r["values"] = []string{} })},
+		"scene without duration": {scenes: func() []any {
+			scenes := testODDScenes()
+			scenes[1].(map[string]any)["end_timestamp_ns"] = int64(0)
+			scenes[1].(map[string]any)["observations"] = []any{}
+			return scenes
+		}()},
+		"scene uid outside the contract": {scenes: func() []any {
+			scenes := testODDScenes()
+			scenes[1].(map[string]any)["scene_uid"] = "Scene/B"
+			scenes[1].(map[string]any)["observations"] = []any{}
+			return scenes
+		}()},
 	}
 	for name, spec := range cases {
 		t.Run(name, func(t *testing.T) {
