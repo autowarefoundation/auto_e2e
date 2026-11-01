@@ -218,8 +218,11 @@ function ConditionEditor({
                 defaultValue={condition.min_duration_s ?? ""}
                 placeholder="0"
                 onChange={(e) => {
-                  const v = e.target.valueAsNumber;
+                  const v = Math.min(e.target.valueAsNumber, 3600);
                   onChange({ ...condition, min_duration_s: v > 0 ? v : undefined });
+                }}
+                onBlur={(e) => {
+                  if (e.target.valueAsNumber > 3600) e.target.value = "3600";
                 }}
                 className="h-7 w-20 rounded border border-slate-700 bg-slate-950 px-2 text-xs text-slate-100"
               />
