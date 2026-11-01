@@ -30,12 +30,15 @@ import type { ODDCondition } from "@/types";
 
 const PAGE_SIZE = 50;
 
+// Same contract as the API (ValidODDKey / ValidODDValue), so a hand-edited
+// URL drops a malformed term instead of failing the whole search.
+const ODD_TERM = /^([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)=([a-z0-9][a-z0-9_]*)$/;
+
 function parseWhere(terms: string[]): ODDCondition[] {
-  return terms.flatMap((term) => {
-    const index = term.indexOf("=");
-    return index > 0
-      ? [{ key: term.slice(0, index), value: term.slice(index + 1) }]
-      : [];
+  const unique = [...new Set(terms)];
+  return unique.flatMap((term) => {
+    const match = ODD_TERM.exec(term);
+    return match ? [{ key: match[1], value: match[2] }] : [];
   });
 }
 
@@ -60,7 +63,7 @@ function ODDPageInner() {
     );
   }, [datasets.data, searchParams]);
   const version =
-    searchParams.get("version") ??
+    searchParams.get("version") ||
     datasets.data?.find((item) => item.name === dataset)?.version ??
     "";
   // A joined string keeps the parsed terms stable across renders.
@@ -134,7 +137,11 @@ function ODDPageInner() {
       )}
 
       {where.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2" aria-label="Active filters">
+        <div
+          role="group"
+          className="flex flex-wrap items-center gap-2"
+          aria-label="Active filters"
+        >
           {where.map((condition) => (
             <Button
               key={`${condition.key}=${condition.value}`}
