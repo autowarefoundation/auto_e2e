@@ -196,15 +196,17 @@ function ConditionEditor({
           <label className="space-y-1 text-[11px] text-slate-400">
             <span>Interval lasts at least</span>
             <span className="flex items-center gap-1.5">
+              {/* Uncontrolled: a controlled number input would erase the
+                  partial "0" of "0.5" and turn it into 5. */}
               <input
                 type="number"
                 min={0}
                 max={3600}
                 step={0.5}
-                value={condition.min_duration_s ?? ""}
+                defaultValue={condition.min_duration_s ?? ""}
                 placeholder="0"
                 onChange={(e) => {
-                  const v = Number(e.target.value);
+                  const v = e.target.valueAsNumber;
                   onChange({ ...condition, min_duration_s: v > 0 ? v : undefined });
                 }}
                 className="h-7 w-20 rounded border border-slate-700 bg-slate-950 px-2 text-xs text-slate-100"
