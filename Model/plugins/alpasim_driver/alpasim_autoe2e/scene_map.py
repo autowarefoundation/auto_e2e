@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -36,8 +35,8 @@ from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY, ROUTE_CHANNEL_COUNT
 
 logger = logging.getLogger(__name__)
 
-SCENE_ROOT = Path(os.environ.get("AUTOE2E_SCENE_ROOT", "/mnt/nre-data"))
-"""Where the driver container mounts AlpaSim's scene cache (driver config)."""
+SCENE_ROOT = Path("/mnt/nre-data")
+"""Where the driver config mounts AlpaSim's scene cache in the driver container."""
 
 _STOP_LINE_HALF_WIDTH_M = 0.25
 """nuPlan stop lines are polygons; NuRec wait lines are polylines."""
