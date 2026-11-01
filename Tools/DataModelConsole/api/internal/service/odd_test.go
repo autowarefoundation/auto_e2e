@@ -613,6 +613,11 @@ func TestSearchODDScenesRejectsUnverifiedLabelSet(t *testing.T) {
 			scenes[1].(map[string]any)["observations"] = []any{}
 			return scenes
 		}()},
+		"scene without a distance": {scenes: func() []any {
+			scenes := testODDScenes()
+			delete(scenes[1].(map[string]any), "distance_m")
+			return scenes
+		}()},
 		"scene uid outside the contract": {scenes: func() []any {
 			scenes := testODDScenes()
 			scenes[1].(map[string]any)["scene_uid"] = "Scene/B"
