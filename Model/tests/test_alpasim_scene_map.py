@@ -108,14 +108,15 @@ def test_destination_outside_the_raster_is_not_drawn() -> None:
     assert valid and mask[0].any() and not mask[1].any()
 
 
-def test_route_in_local_undoes_the_rig_frame() -> None:
-    poses = [_pose(t, 10.0, 5.0, np.pi / 2) for t in (0, 1_000_000)]
+def test_route_in_local_undoes_the_rig_frame_at_the_route_time() -> None:
+    # Heading +90 deg, moving from y = 5 to y = 15 m; at the route's 0.5 s the rig is at y = 10.
+    poses = [_pose(0, 10.0, 5.0, np.pi / 2), _pose(1_000_000, 10.0, 15.0, np.pi / 2)]
     route = egodriver_pb2.Route(timestamp_us=500_000)
     for x in (4.0, float("nan")):
         route.waypoints.append(common_pb2.Vec3(x=x, y=0.0, z=0.0))
     local = route_in_local(route, pose_trajectory(poses))
     assert local.shape == (1, 3)
-    assert np.allclose(local[0, :2], [10.0, 9.0], atol=1e-4)
+    assert np.allclose(local[0, :2], [10.0, 14.0], atol=1e-4)
 
 
 class _OneSceneMap:
@@ -156,3 +157,23 @@ def test_destination_is_drawn_without_a_route(scene_map: SceneMap) -> None:
         assert inputs["route_valid"].tolist() == [True]
         assert not inputs["route_mask"][0, 0].any()
         assert inputs["route_mask"][0, 1].max() == pytest.approx(1.0)
+
+
+def test_route_corridor_keeps_one_carriageway() -> None:
+    vector_map = VectorMap(map_id="test:two_way")
+    vector_map.add_map_element(
+        RoadLane("east", _line(0.0), left_edge=_line(1.75), right_edge=_line(-1.75), adj_lanes_left={"west"})
+    )
+    west = _line(3.5)
+    west = Polyline(west.points[::-1].copy())
+    vector_map.add_map_element(
+        RoadLane("west", west, left_edge=Polyline(_line(1.75).points[::-1].copy()),
+                 right_edge=Polyline(_line(5.25).points[::-1].copy()), adj_lanes_right={"east"})
+    )
+    vector_map.__post_init__()
+    vector_map.compute_search_indices()
+    two_way = SceneMap.from_vector_map(vector_map, destination_xy=np.array([150.0, 0.0, 0.0]))
+    route = np.stack([np.arange(80.0, 160.0, 4.0), np.zeros(20), np.zeros(20)], axis=1)
+    assert two_way.roadblock_lanes(route) == {"east"}
+    # Route points far off the map add no lane.
+    assert two_way.roadblock_lanes(route + [0.0, 50.0, 0.0]) == set()
