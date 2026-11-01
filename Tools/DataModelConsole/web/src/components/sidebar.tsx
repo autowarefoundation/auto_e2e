@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   Brain,
   Boxes,
+  ChartNoAxesColumn,
   Clapperboard,
   Database,
   FlaskConical,
@@ -22,6 +23,7 @@ export const NAV_ITEMS = [
   { href: "/experiments", label: "Experiments", icon: FlaskConical },
   { href: "/runs", label: "Runs", icon: Workflow },
   { href: "/scenes", label: "Scenes", icon: Clapperboard },
+  { href: "/odd", label: "ODD Search", icon: ChartNoAxesColumn },
   { href: "/occupancy", label: "Occupancy", icon: Boxes },
   { href: "/geo", label: "Geo Coverage", icon: MapPinned },
 ] as const;
