@@ -584,3 +584,39 @@ func TestSearchODDScenesDoesNotCacheErrors(t *testing.T) {
 	}
 }
 
+
+func TestSearchODDScenesDropsReplacedLabelSet(t *testing.T) {
+	service, client := newODDTestService()
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	restore := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = restore })
+	labelSHA := addTestPublication(t, client, "v3.0", [2]int{10, 5})
+	search := func() *model.ODDSearchResponse {
+		t.Helper()
+		response, err := service.SearchODDScenes(
+			context.Background(), "kitscenes", "v3.0", nil, 50, 0,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	addTestLabelSet(t, client, testLabelSet{
+		version: "v3.0", publicationSHA: labelSHA, scenes: testODDScenes(),
+	})
+	first := search().ManifestSHA256
+	scenes := testODDScenes()
+	scenes[0].(map[string]any)["distance_m"] = 99.0
+	addTestLabelSet(t, client, testLabelSet{
+		version: "v3.0", publicationSHA: labelSHA, scenes: scenes,
+	})
+	now = now.Add(versionTTL)
+	second := search().ManifestSHA256
+	if first == second {
+		t.Fatal("replacement LabelSet has the same manifest digest")
+	}
+	if len(service.oddLabelSets) != 1 || service.oddLabelSets[second] == nil {
+		t.Fatalf("parsed LabelSets = %d, want only the replacement", len(service.oddLabelSets))
+	}
+}
