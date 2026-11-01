@@ -95,9 +95,8 @@ def test_time_to_collision_halves_the_reward() -> None:
     # A car crossing 1 m beyond where the ego's box reaches 0.6 s later.
     times = np.array([0, 11_000_000])
     ahead = Track(Box(4.5, 2.0), times, np.array([[22.5, 0.0, 0.0], [22.5, 0.0, 0.0]]), road_user=True)
-    plan, speeds, controls, start, speed = _plan()
-    plan, speeds, controls = plan[:5], speeds[:5], controls[:5]  # stops planning before contact
-    terms = _scorer(tracks=[ahead]).score(plan, speeds, controls, start, speed, T0_US)
+    # Brakes at 8 m/s^2 and stops with its front 0.1 m short of the car.
+    terms = _scorer(tracks=[ahead]).score(*_plan(accel=-8.0), T0_US)
     assert terms["nc"] == 1.0 and terms["ttc"] == 0.5
 
 
@@ -153,7 +152,7 @@ def test_progress_is_measured_from_the_ego() -> None:
 def test_the_end_of_the_recording_is_rejected() -> None:
     plan, speeds, controls, start, speed = _plan()
     with pytest.raises(ValueError):
-        _scorer().score(plan, speeds, controls, start, speed, 10_950_000)  # one step left
+        _scorer().score(plan, speeds, controls, start, speed, 7_500_000)  # 3.5 s left
 
 
 def test_gated_plans_keep_the_order_of_their_first_violation() -> None:
