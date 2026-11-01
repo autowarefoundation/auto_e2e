@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -39,7 +40,8 @@ func parseODDQuery(raw string) (model.ODDQuery, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader([]byte(raw)))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&query); err != nil || decoder.More() {
+	var extra json.RawMessage
+	if err := decoder.Decode(&query); err != nil || decoder.Decode(&extra) != io.EOF {
 		return query, service.ErrInvalidODDQuery{Reason: "q must be one JSON query object"}
 	}
 	if query.Groups == nil {
