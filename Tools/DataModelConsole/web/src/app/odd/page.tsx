@@ -296,15 +296,17 @@ function ODDPageInner() {
   const offset = Math.max(0, parseInt(searchParams.get("offset") ?? "", 10) || 0);
 
   const [draft, setDraft] = useState<ODDQuery>(() => withIDs(applied));
-  // The query this page last wrote to the URL. While that write is in
-  // flight the user may keep editing, so its arrival must not reset the
-  // draft; any other new URL query (back/forward, a shared link) does.
-  const selfApplied = useRef(appliedKey);
+  // The URL state (dataset, version, query) this page last wrote. While that
+  // write is in flight the user may keep editing, so its arrival must not
+  // reset the draft; any other URL change (back/forward, a shared link, a
+  // dataset switch) replaces the draft with the URL's query.
+  const urlState = `${dataset}|${version}|${appliedKey}`;
+  const selfApplied = useRef(urlState);
   useEffect(() => {
-    if (appliedKey === selfApplied.current) return;
-    selfApplied.current = appliedKey;
-    setDraft((current) => (sameScenes(cleanQuery(current), appliedKey, applied) ? current : withIDs(applied)));
-  }, [applied, appliedKey]);
+    if (urlState === selfApplied.current) return;
+    selfApplied.current = urlState;
+    setDraft(withIDs(applied));
+  }, [applied, urlState]);
 
   function navigate(next: { dataset?: string; query?: ODDQuery; offset?: number }, push = true) {
     const query = new URLSearchParams();
@@ -334,11 +336,12 @@ function ODDPageInner() {
     const timer = setTimeout(() => {
       if (switchingTo.current !== null) return;
       // Record the query as the URL will read back: no q means the default.
-      selfApplied.current = JSON.stringify(cleaned.groups.length ? cleaned : EMPTY_QUERY);
+      selfApplied.current = `${dataset}|${version}|${JSON.stringify(cleaned.groups.length ? cleaned : EMPTY_QUERY)}`;
       navigateRef.current({ query: cleaned }, false);
     }, APPLY_DELAY_MS);
+    // A dataset or version change (from any source) cancels a pending write.
     return () => clearTimeout(timer);
-  }, [draft, appliedKey, applied]);
+  }, [draft, appliedKey, applied, dataset, version]);
 
   const search = useApi(
     () => searchODDScenes(dataset, version, applied, offset, PAGE_SIZE),
