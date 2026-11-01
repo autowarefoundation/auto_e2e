@@ -584,7 +584,6 @@ func TestSearchODDScenesDoesNotCacheErrors(t *testing.T) {
 	}
 }
 
-
 func TestSearchODDScenesDropsReplacedLabelSet(t *testing.T) {
 	service, client := newODDTestService()
 	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
