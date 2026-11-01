@@ -109,19 +109,27 @@ type oddInterval struct {
 }
 
 type oddScene struct {
-	SceneUID         string  `json:"scene_uid"`
-	ShardName        string  `json:"shard_name"`
-	StartTimestampNS int64   `json:"start_timestamp_ns"`
-	EndTimestampNS   int64   `json:"end_timestamp_ns"`
-	DistanceM        float64 `json:"distance_m"`
+	SceneUID         string
+	ShardName        string
+	StartTimestampNS int64
+	EndTimestampNS   int64
+	DistanceM        float64
 	// labels holds the valid intervals per key, in start order.
 	labels map[string][]oddInterval
 }
 
+// oddSceneIndex decodes required numbers through pointers so a missing or
+// null field is rejected instead of read as zero.
 type oddSceneIndex struct {
-	SchemaVersion string     `json:"schema_version"`
-	LabelSetID    string     `json:"labelset_id"`
-	Scenes        []oddScene `json:"scenes"`
+	SchemaVersion string `json:"schema_version"`
+	LabelSetID    string `json:"labelset_id"`
+	Scenes        []struct {
+		SceneUID         string   `json:"scene_uid"`
+		ShardName        string   `json:"shard_name"`
+		StartTimestampNS *int64   `json:"start_timestamp_ns"`
+		EndTimestampNS   *int64   `json:"end_timestamp_ns"`
+		DistanceM        *float64 `json:"distance_m"`
+	} `json:"scenes"`
 }
 
 // oddObservationRow is the subset of the labeler's observations table the
@@ -424,11 +432,21 @@ func decodeODDSceneIndex(
 		return nil, fmt.Errorf("schema, LabelSet or scene count differs")
 	}
 	labels := &oddLabelSet{
-		scenes:     index.Scenes,
+		scenes:     make([]oddScene, len(index.Scenes)),
 		sceneByUID: make(map[string]int, len(index.Scenes)),
 	}
 	shards := make(map[string]bool, len(index.Scenes))
-	for i := range labels.scenes {
+	for i, raw := range index.Scenes {
+		if raw.StartTimestampNS == nil || raw.EndTimestampNS == nil || raw.DistanceM == nil {
+			return nil, fmt.Errorf("scene %q lacks a timestamp or distance", raw.SceneUID)
+		}
+		labels.scenes[i] = oddScene{
+			SceneUID:         raw.SceneUID,
+			ShardName:        raw.ShardName,
+			StartTimestampNS: *raw.StartTimestampNS,
+			EndTimestampNS:   *raw.EndTimestampNS,
+			DistanceM:        *raw.DistanceM,
+		}
 		scene := &labels.scenes[i]
 		_, published := source.ShardByName[scene.ShardName]
 		_, seen := labels.sceneByUID[scene.SceneUID]
