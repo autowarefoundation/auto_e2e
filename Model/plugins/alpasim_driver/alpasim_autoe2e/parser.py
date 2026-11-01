@@ -137,6 +137,30 @@ def route_in_local(route: Any, trajectory: Trajectory) -> np.ndarray:
     return waypoints @ local_from_rig[:3, :3].T + local_from_rig[:3, 3]
 
 
+TRAVELLED_PATH_M = 60.0
+"""How far behind the ego the route corridor reaches: the raster's rear extent."""
+
+
+def travelled_path(trajectory: Trajectory, t0_us: int) -> np.ndarray:
+    """``[N, 3]`` ego positions behind ``t0``, oldest first, about 4 m apart, up to 60 m back.
+
+    nuPlan training draws every roadblock of the route, including those behind
+    the ego, while AlpaSim's route starts at the ego; the ego's own past fills in
+    the part behind.
+    """
+    start_us = trajectory.time_range_us.start
+    points, travelled, time_us = [], 0.0, t0_us
+    previous = np.asarray(trajectory.interpolate_pose(t0_us).vec3, dtype=np.float64)
+    while time_us > start_us and travelled < TRAVELLED_PATH_M:
+        time_us = max(time_us - 200_000, start_us)
+        point = np.asarray(trajectory.interpolate_pose(time_us).vec3, dtype=np.float64)
+        travelled += float(np.linalg.norm(point[:2] - previous[:2]))
+        if not points or np.linalg.norm(point[:2] - points[-1][:2]) >= 4.0:
+            points.append(point)
+        previous = point
+    return np.array(points[::-1]).reshape(-1, 3)
+
+
 def history_projections(
     cameras: tuple[CameraCalibration, ...],
     local_to_rig_t0: np.ndarray,
@@ -319,12 +343,13 @@ class AlpasimStreamParser:
             reference_pose = (float(vec[0]), float(vec[1]), float(pose_t0.yaw()))
             map_context, map_valid = scene_map.map_context(reference_pose)
             # The destination channel does not depend on the route, as in training.
-            route_xyz = (
+            ahead = (
                 route_in_local(prediction_input.route, trajectory)
                 if prediction_input.route is not None
                 else np.empty((0, 3))
             )
-            route_mask, route_valid = scene_map.route_mask(route_xyz, reference_pose)
+            behind = travelled_path(trajectory, t0_us) if len(ahead) else np.empty((0, 3))
+            route_mask, route_valid = scene_map.route_mask(np.vstack([behind, ahead]), reference_pose)
         model_inputs: dict[str, Any] = {
             "camera_tiles": visual_tiles.unsqueeze(0),
             "camera_projection_matrix": self.projection.unsqueeze(0),
