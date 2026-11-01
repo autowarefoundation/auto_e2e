@@ -103,6 +103,10 @@ function ConditionEditor({
           className="h-8 w-full min-w-0 rounded-md border border-slate-700 bg-slate-900 px-2 text-sm text-slate-100 sm:w-auto sm:max-w-xs sm:flex-1"
         >
           <option value="">Choose a label…</option>
+          {condition.key && !facet && (
+            // A shared link can name a key this LabelSet does not have.
+            <option value={condition.key}>{keyLabel(condition.key)} (not in this LabelSet)</option>
+          )}
           {namespaces.map((namespace) => (
             <optgroup key={namespace} label={namespaceLabel(namespace)}>
               {vocabulary
@@ -155,9 +159,16 @@ function ConditionEditor({
         </div>
       </div>
 
-      {facet ? (
+      {facet || condition.values.length > 0 ? (
         <div className="mt-2.5 flex flex-wrap gap-1.5" aria-label={`Condition ${index} values`}>
-          {facet.values.map(({ value, scenes }) => {
+          {[
+            ...(facet?.values ?? []),
+            // Selected values this LabelSet never labels stay visible so they
+            // can be removed.
+            ...condition.values
+              .filter((v) => !facet?.values.some((f) => f.value === v))
+              .map((value) => ({ value, scenes: 0 })),
+          ].map(({ value, scenes }) => {
             const selected = condition.values.includes(value);
             return (
               <button
