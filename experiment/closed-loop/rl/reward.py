@@ -251,10 +251,9 @@ class SceneScorer:
         ``start [3]`` and ``start_speed``: the ego's local pose and speed at ``t0``.
         """
         times = t0_us + np.arange(1, min(HORIZON_STEPS, len(plan)) + 1, dtype=np.int64) * int(DT_S * 1e6)
-        times = times[times <= self.recorded_times_us[-1]]
         steps = len(times)
-        if steps < 2:
-            raise ValueError("fewer than two plan steps lie within the recording")
+        if steps < HORIZON_STEPS or times[-1] > self.recorded_times_us[-1]:
+            raise ValueError("the plan's 4 s horizon must lie within the recording, so plans compare alike")
         plan, speeds, controls = plan[:steps], speeds[:steps], controls[:steps]
         recorded = np.column_stack([np.interp(times, self.recorded_times_us, column) for column in
                                     (*self.recorded_xy.T, self.recorded_yaw)])
@@ -364,9 +363,11 @@ def scene_scorer(artifact: Any, recorded: Any, end_us: int) -> SceneScorer:
     """
     from trajdata.maps.vec_map_elements import MapElementType
 
+    if artifact.map is None:
+        raise ValueError(f"scene {artifact.scene_id} has no HD map to score against")
     elements = artifact.map.elements
     lanes = []
-    for lane in elements[MapElementType.ROAD_LANE].values():
+    for lane in elements.get(MapElementType.ROAD_LANE, {}).values():
         if lane.left_edge is not None and lane.right_edge is not None:
             polygon = Polygon(np.concatenate([lane.left_edge.xy, lane.right_edge.xy[::-1]]))
         else:
