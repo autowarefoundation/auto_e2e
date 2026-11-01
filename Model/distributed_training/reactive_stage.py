@@ -1990,6 +1990,7 @@ def _train_fixed_steps(
     from training.lateral_recovery import (
         aligned_clean_planner_bev,
         apply_lateral_recovery,
+        preserved_batch_norm_statistics,
         sample_lateral_shift,
     )
     from training.reactive_stage_runner import (
@@ -2353,7 +2354,9 @@ def _train_fixed_steps(
                 ):
                     clean_planner_bev = None
                     if clean_batch is not None:
-                        with torch.no_grad():
+                        with torch.no_grad(), preserved_batch_norm_statistics(
+                            model
+                        ):
                             _, clean_auxiliary = forward(
                                 _base_model(model),
                                 clean_batch,
