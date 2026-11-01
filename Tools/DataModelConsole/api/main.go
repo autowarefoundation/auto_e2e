@@ -142,6 +142,7 @@ func main() {
 			// ODD search filters one cached, digest-verified scene index in
 			// memory; only a cold LabelSet load reads S3 (14 MB for KITScenes).
 			r.Get("/odd/scenes", oddH.Search)
+			r.Get("/odd/scenes/{scene_uid}", oddH.Scene)
 
 			r.Get("/mlflow/experiments", mlflowH.Experiments)
 			r.Get("/mlflow/experiments/{id}/runs", mlflowH.Runs)
