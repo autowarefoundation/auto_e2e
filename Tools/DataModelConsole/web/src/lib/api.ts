@@ -15,6 +15,8 @@ import type {
   MLflowRun,
   OverlayModel,
   OverlayModelsResponse,
+  ODDCondition,
+  ODDSearchResponse,
   ReasoningLabelRecord,
   ReasoningLabelStats,
   ReasoningPromptVersionsResponse,
@@ -623,4 +625,26 @@ export function getExecution(executionId: string): Promise<FlyteExecution> {
   return apiFetch<FlyteExecution>(
     `/api/v1/flyte/executions/${encodeURIComponent(executionId)}`,
   );
+}
+
+// searchODDScenes lists the scenes of dataset/version whose valid ODD labels
+// satisfy every condition, with value counts over the matched scenes. An
+// ApiError with status 404 means the version has no ODD labels.
+export function searchODDScenes(
+  dataset: string,
+  version: string,
+  where: ODDCondition[],
+  offset = 0,
+  limit = 50,
+): Promise<ODDSearchResponse> {
+  const q = new URLSearchParams({
+    dataset,
+    version,
+    limit: String(limit),
+    offset: String(offset),
+  });
+  for (const condition of where) {
+    q.append("where", `${condition.key}=${condition.value}`);
+  }
+  return apiFetch<ODDSearchResponse>(`/api/v1/odd/scenes?${q.toString()}`);
 }
