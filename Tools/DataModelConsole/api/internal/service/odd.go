@@ -2,33 +2,41 @@ package service
 
 // ODD scene search. An ODD LabelSet is scene-level catalog metadata written by
 // the ODD labeler under <dataset>/<version>/odd/; it is neither a training
-// input nor a target. The Console reads only the LabelSet's scene index, after
-// checking the chain ready pointer -> manifest -> scene index by SHA-256 and
-// binding the manifest to the dataset publication it was made for.
+// input nor a target. Each label is an interval inside a scene. The Console
+// reads the LabelSet's scene index (scene to shard) and its observations
+// table (the labelled intervals), after checking the chain ready pointer ->
+// manifest -> artifacts by SHA-256 and binding the manifest to the dataset
+// publication it was made for.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/parquet-go/parquet-go"
+
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 )
 
 const (
-	oddPointerSchema      = "odd_labelset_pointer_v1"
-	oddManifestSchema     = "odd_labelset_manifest_v1"
-	oddSceneIndexSchema   = "odd_scene_index_v2"
-	maxODDPointerBytes    = 64 << 10
-	maxODDManifestBytes   = 4 << 20
-	maxODDSceneIndexBytes = 64 << 20
+	oddPointerSchema        = "odd_labelset_pointer_v1"
+	oddManifestSchema       = "odd_labelset_manifest_v1"
+	oddSceneIndexSchema     = "odd_scene_index_v2"
+	maxODDPointerBytes      = 64 << 10
+	maxODDManifestBytes     = 4 << 20
+	maxODDSceneIndexBytes   = 64 << 20
+	maxODDObservationsBytes = 64 << 20
 )
 
 var (
@@ -66,6 +74,7 @@ type oddArtifact struct {
 	Key      string `json:"key"`
 	SHA256   string `json:"sha256"`
 	ByteSize int64  `json:"byte_size"`
+	RowCount int64  `json:"row_count"`
 }
 
 type oddManifest struct {
@@ -80,20 +89,23 @@ type oddManifest struct {
 	Artifacts             map[string]oddArtifact `json:"artifacts"`
 }
 
-type oddObservation struct {
-	Key              string   `json:"key"`
-	Status           string   `json:"status"`
-	Values           []string `json:"values"`
-	FirstTimestampNS int64    `json:"first_timestamp_ns"`
+// oddInterval is one valid labelled interval, in absolute timestamps.
+type oddInterval struct {
+	values     []string
+	source     string
+	cameraID   string
+	confidence float64
+	start, end int64
 }
 
 type oddScene struct {
-	SceneUID         string           `json:"scene_uid"`
-	ShardName        string           `json:"shard_name"`
-	StartTimestampNS int64            `json:"start_timestamp_ns"`
-	EndTimestampNS   int64            `json:"end_timestamp_ns"`
-	DistanceM        float64          `json:"distance_m"`
-	Observations     []oddObservation `json:"observations"`
+	SceneUID         string  `json:"scene_uid"`
+	ShardName        string  `json:"shard_name"`
+	StartTimestampNS int64   `json:"start_timestamp_ns"`
+	EndTimestampNS   int64   `json:"end_timestamp_ns"`
+	DistanceM        float64 `json:"distance_m"`
+	// labels holds the valid intervals per key, in start order.
+	labels map[string][]oddInterval
 }
 
 type oddSceneIndex struct {
@@ -102,14 +114,31 @@ type oddSceneIndex struct {
 	Scenes        []oddScene `json:"scenes"`
 }
 
-// oddLabelSet is a verified scene index. Scenes keep only valid observations,
-// the only ones search and facets read.
+// oddObservationRow is the subset of the labeler's observations table the
+// Console reads (Model/data_processing/odd_labeling/parquet.py).
+type oddObservationRow struct {
+	SceneUID   string   `parquet:"scene_uid"`
+	Key        string   `parquet:"label_key"`
+	Status     string   `parquet:"status"`
+	Values     []string `parquet:"values,list"`
+	Confidence float32  `parquet:"confidence"`
+	Source     string   `parquet:"source"`
+	Start      int64    `parquet:"start_timestamp_ns"`
+	End        int64    `parquet:"end_timestamp_ns"`
+	CameraID   *string  `parquet:"camera_id,optional"`
+}
+
+// oddLabelSet is a verified LabelSet. Scenes keep only valid intervals, the
+// only ones search reads.
 type oddLabelSet struct {
 	labelVersion   string
 	labelSetID     string
 	manifestSHA256 string
 	quality        model.ODDQuality
 	scenes         []oddScene
+	sceneByUID     map[string]int
+	// vocabulary is the facets over every scene, computed once.
+	vocabulary []model.ODDFacet
 }
 
 // cachedODDLabelSet records which LabelSet, by manifest SHA-256, applies to a
@@ -117,139 +146,6 @@ type oddLabelSet struct {
 type cachedODDLabelSet struct {
 	manifestSHA256 string
 	at             time.Time
-}
-
-// SearchODDScenes returns the scenes of dataset/version whose ODD labels
-// satisfy every condition, the value counts over those scenes, and one page
-// of them. ErrNotFound means the version has no applicable ODD LabelSet.
-func (s *S3Service) SearchODDScenes(
-	ctx context.Context,
-	dataset, requestedVersion string,
-	where []model.ODDCondition,
-	limit, offset int,
-) (*model.ODDSearchResponse, error) {
-	// ODD LabelSets bind to v2.1+ publication manifests; older versions have
-	// none, so skip their S3 shard probe.
-	if !requiresPublicationManifest(requestedVersion) {
-		return nil, ErrNotFound
-	}
-	version, err := s.publishedVersion(ctx, dataset, requestedVersion)
-	if err != nil {
-		return nil, err
-	}
-	labels, err := s.oddLabelSetFor(ctx, dataset, version)
-	if err != nil {
-		return nil, err
-	}
-
-	matched := make([]model.ODDScene, 0)
-	matchedScenes := make([]oddScene, 0)
-	for _, scene := range labels.scenes {
-		matches, ok := matchODDScene(scene, where)
-		if !ok {
-			continue
-		}
-		matchedScenes = append(matchedScenes, scene)
-		matched = append(matched, model.ODDScene{
-			SceneUID:   scene.SceneUID,
-			Shard:      scene.ShardName,
-			DurationNS: scene.EndTimestampNS - scene.StartTimestampNS,
-			DistanceM:  scene.DistanceM,
-			Matches:    matches,
-		})
-	}
-	page, pageInfo := paginate(matched, limit, offset, len(matched))
-	return &model.ODDSearchResponse{
-		Dataset:        dataset,
-		Version:        version,
-		LabelVersion:   labels.labelVersion,
-		LabelSetID:     labels.labelSetID,
-		ManifestSHA256: labels.manifestSHA256,
-		Quality:        labels.quality,
-		LabeledScenes:  len(labels.scenes),
-		Where:          where,
-		Facets:         oddFacets(matchedScenes),
-		Scenes:         page,
-		Page:           pageInfo,
-	}, nil
-}
-
-// matchODDScene reports whether the scene satisfies every condition and, for
-// each, the earliest offset from the scene start where it holds.
-func matchODDScene(
-	scene oddScene,
-	where []model.ODDCondition,
-) ([]model.ODDSceneMatch, bool) {
-	matches := make([]model.ODDSceneMatch, 0, len(where))
-	for _, condition := range where {
-		found := false
-		var first int64
-		for _, observation := range scene.Observations {
-			if observation.Key != condition.Key ||
-				!slices.Contains(observation.Values, condition.Value) {
-				continue
-			}
-			if !found || observation.FirstTimestampNS < first {
-				first = observation.FirstTimestampNS
-			}
-			found = true
-		}
-		if !found {
-			return nil, false
-		}
-		matches = append(matches, model.ODDSceneMatch{
-			Key:           condition.Key,
-			Value:         condition.Value,
-			FirstOffsetNS: first - scene.StartTimestampNS,
-		})
-	}
-	return matches, true
-}
-
-// oddFacets counts, per key and value, the scenes carrying that value. Keys
-// are sorted by name; values by scene count, then name.
-func oddFacets(scenes []oddScene) []model.ODDFacet {
-	counts := make(map[string]map[string]int)
-	for _, scene := range scenes {
-		seen := make(map[[2]string]bool)
-		for _, observation := range scene.Observations {
-			for _, value := range observation.Values {
-				pair := [2]string{observation.Key, value}
-				if seen[pair] {
-					continue
-				}
-				seen[pair] = true
-				if counts[observation.Key] == nil {
-					counts[observation.Key] = make(map[string]int)
-				}
-				counts[observation.Key][value]++
-			}
-		}
-	}
-	facets := make([]model.ODDFacet, 0, len(counts))
-	for key, values := range counts {
-		facet := model.ODDFacet{
-			Key:    key,
-			Values: make([]model.ODDFacetValue, 0, len(values)),
-		}
-		for value, count := range values {
-			facet.Values = append(facet.Values, model.ODDFacetValue{
-				Value: value, Scenes: count,
-			})
-		}
-		sort.Slice(facet.Values, func(i, j int) bool {
-			left, right := facet.Values[i], facet.Values[j]
-			if left.Scenes != right.Scenes {
-				return left.Scenes > right.Scenes
-			}
-			return left.Value < right.Value
-		})
-		facets = append(facets, facet)
-	}
-	sort.Slice(facets, func(i, j int) bool {
-		return facets[i].Key < facets[j].Key
-	})
-	return facets
 }
 
 func (s *S3Service) oddLabelSetFor(
@@ -445,7 +341,8 @@ func (s *S3Service) loadODDLabelSet(
 		return nil, fmt.Errorf("decode ODD manifest: %w", err)
 	}
 	root := strings.TrimSuffix(pointer.ManifestKey, "manifest.json")
-	artifact := manifest.Artifacts["scene_index"]
+	index := manifest.Artifacts["scene_index"]
+	observations := manifest.Artifacts["observations_parquet"]
 	if manifest.SchemaVersion != oddManifestSchema ||
 		manifest.Status != "ready" ||
 		manifest.LabelSetID != pointer.LabelSetID ||
@@ -453,72 +350,176 @@ func (s *S3Service) loadODDLabelSet(
 		manifest.DatasetVersion != pointer.DatasetVersion ||
 		manifest.DatasetManifestSHA256 != source.SHA256 ||
 		manifest.SceneCount != len(source.ShardEntries) ||
-		artifact.Key != root+"scene_index.json" ||
-		!isLowerHexDigest(artifact.SHA256) ||
-		artifact.ByteSize <= 0 ||
-		artifact.ByteSize > maxODDSceneIndexBytes {
+		!validODDArtifact(index, root+"scene_index.json", maxODDSceneIndexBytes) ||
+		!validODDArtifact(
+			observations, root+"observations/part-00000.parquet",
+			maxODDObservationsBytes,
+		) ||
+		observations.RowCount <= 0 {
 		return nil, fmt.Errorf(
 			"ODD manifest %s does not match its pointer or publication",
 			pointer.ManifestKey,
 		)
 	}
 	body, err = s.verifiedODDObject(
-		ctx, artifact.Key, artifact.SHA256, artifact.ByteSize,
-		maxODDSceneIndexBytes,
+		ctx, index.Key, index.SHA256, index.ByteSize, maxODDSceneIndexBytes,
 	)
 	if err != nil {
 		return nil, err
 	}
+	labels, err := decodeODDSceneIndex(body, pointer.LabelSetID, manifest.SceneCount, source)
+	if err != nil {
+		return nil, fmt.Errorf("ODD scene index %s: %w", index.Key, err)
+	}
+	body, err = s.verifiedODDObject(
+		ctx, observations.Key, observations.SHA256, observations.ByteSize,
+		maxODDObservationsBytes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := labels.decodeObservations(body, observations.RowCount); err != nil {
+		return nil, fmt.Errorf("ODD observations %s: %w", observations.Key, err)
+	}
+	labels.labelVersion = pointer.DatasetVersion
+	labels.labelSetID = pointer.LabelSetID
+	labels.manifestSHA256 = pointer.ManifestSHA256
+	labels.quality = manifest.Quality
+	labels.vocabulary = oddFacets(labels.scenes)
+	return labels, nil
+}
+
+func validODDArtifact(artifact oddArtifact, key string, maxBytes int64) bool {
+	return artifact.Key == key &&
+		isLowerHexDigest(artifact.SHA256) &&
+		artifact.ByteSize > 0 &&
+		artifact.ByteSize <= maxBytes
+}
+
+// decodeODDSceneIndex reads the scenes of a LabelSet and checks that they map
+// one to one onto the shards of the publication it labels.
+func decodeODDSceneIndex(
+	body []byte,
+	labelSetID string,
+	sceneCount int,
+	source *publicationManifest,
+) (*oddLabelSet, error) {
 	var index oddSceneIndex
 	if err := json.Unmarshal(body, &index); err != nil {
-		return nil, fmt.Errorf("decode ODD scene index: %w", err)
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	if index.SchemaVersion != oddSceneIndexSchema ||
-		index.LabelSetID != pointer.LabelSetID ||
-		len(index.Scenes) != manifest.SceneCount {
-		return nil, fmt.Errorf("ODD scene index %s is invalid", artifact.Key)
+		index.LabelSetID != labelSetID ||
+		len(index.Scenes) != sceneCount {
+		return nil, fmt.Errorf("schema, LabelSet or scene count differs")
 	}
-	sceneUIDs := make(map[string]bool, len(index.Scenes))
+	labels := &oddLabelSet{
+		scenes:     index.Scenes,
+		sceneByUID: make(map[string]int, len(index.Scenes)),
+	}
 	shards := make(map[string]bool, len(index.Scenes))
-	for i := range index.Scenes {
-		scene := &index.Scenes[i]
-		if _, ok := source.ShardByName[scene.ShardName]; !ok ||
-			scene.SceneUID == "" ||
-			sceneUIDs[scene.SceneUID] ||
+	for i := range labels.scenes {
+		scene := &labels.scenes[i]
+		_, published := source.ShardByName[scene.ShardName]
+		_, seen := labels.sceneByUID[scene.SceneUID]
+		if !published || scene.SceneUID == "" || seen ||
 			shards[scene.ShardName] ||
 			scene.EndTimestampNS < scene.StartTimestampNS {
-			return nil, fmt.Errorf(
-				"ODD scene index %s has an invalid scene %q",
-				artifact.Key, scene.SceneUID,
-			)
+			return nil, fmt.Errorf("invalid scene %q", scene.SceneUID)
 		}
-		sceneUIDs[scene.SceneUID] = true
+		labels.sceneByUID[scene.SceneUID] = i
 		shards[scene.ShardName] = true
-		valid := scene.Observations[:0]
-		for _, observation := range scene.Observations {
-			if observation.Status != "valid" || len(observation.Values) == 0 {
+		scene.labels = make(map[string][]oddInterval)
+	}
+	return labels, nil
+}
+
+// decodeObservations reads the observations table and keeps the valid
+// intervals. Every row must belong to a scene and every valid one must be
+// searchable and lie inside its scene; otherwise the LabelSet is rejected.
+func (labels *oddLabelSet) decodeObservations(body []byte, rowCount int64) error {
+	file, err := parquet.OpenFile(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	if file.NumRows() != rowCount {
+		return fmt.Errorf("has %d rows, manifest says %d", file.NumRows(), rowCount)
+	}
+	reader := parquet.NewGenericReader[oddObservationRow](file)
+	defer reader.Close()
+	// Keys, values and sources repeat across 10^5 rows; share one copy.
+	interned := make(map[string]string)
+	intern := func(value string) string {
+		if shared, ok := interned[value]; ok {
+			return shared
+		}
+		value = strings.Clone(value)
+		interned[value] = value
+		return value
+	}
+	rows := make([]oddObservationRow, 1024)
+	read := int64(0)
+	for {
+		n, err := reader.Read(rows)
+		for _, row := range rows[:n] {
+			read++
+			index, ok := labels.sceneByUID[row.SceneUID]
+			if !ok {
+				return fmt.Errorf("row for unknown scene %q", row.SceneUID)
+			}
+			if row.Status != "valid" || len(row.Values) == 0 {
 				continue
 			}
-			if !ValidODDKey(observation.Key) ||
-				slices.ContainsFunc(observation.Values, invalidODDValue) ||
-				observation.FirstTimestampNS < scene.StartTimestampNS ||
-				observation.FirstTimestampNS > scene.EndTimestampNS {
-				return nil, fmt.Errorf(
-					"ODD scene index %s has an invalid %s label in scene %q",
-					artifact.Key, observation.Key, scene.SceneUID,
+			scene := &labels.scenes[index]
+			confidence := float64(row.Confidence)
+			cameraID := ""
+			if row.CameraID != nil {
+				cameraID = *row.CameraID
+			}
+			if !ValidODDKey(row.Key) ||
+				slices.ContainsFunc(row.Values, invalidODDValue) ||
+				!ValidODDValue(row.Source) ||
+				(cameraID != "" && !ValidODDValue(cameraID)) ||
+				math.IsNaN(confidence) || confidence < 0 || confidence > 1 ||
+				row.Start < scene.StartTimestampNS ||
+				row.End > scene.EndTimestampNS ||
+				row.End < row.Start {
+				return fmt.Errorf(
+					"invalid %s label in scene %q", row.Key, scene.SceneUID,
 				)
 			}
-			valid = append(valid, observation)
+			values := make([]string, len(row.Values))
+			for i, value := range row.Values {
+				values[i] = intern(value)
+			}
+			key := intern(row.Key)
+			scene.labels[key] = append(scene.labels[key], oddInterval{
+				values:     values,
+				source:     intern(row.Source),
+				cameraID:   intern(cameraID),
+				confidence: confidence,
+				start:      row.Start,
+				end:        row.End,
+			})
 		}
-		scene.Observations = valid
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read: %w", err)
+		}
 	}
-	return &oddLabelSet{
-		labelVersion:   pointer.DatasetVersion,
-		labelSetID:     pointer.LabelSetID,
-		manifestSHA256: pointer.ManifestSHA256,
-		quality:        manifest.Quality,
-		scenes:         index.Scenes,
-	}, nil
+	if read != rowCount {
+		return fmt.Errorf("read %d rows, manifest says %d", read, rowCount)
+	}
+	for i := range labels.scenes {
+		for _, intervals := range labels.scenes[i].labels {
+			sort.Slice(intervals, func(a, b int) bool {
+				return intervals[a].start < intervals[b].start
+			})
+		}
+	}
+	return nil
 }
 
 // verifiedODDObject reads a datasets-bucket object and checks its SHA-256 and,
