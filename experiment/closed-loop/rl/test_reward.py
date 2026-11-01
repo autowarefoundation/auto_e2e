@@ -226,3 +226,16 @@ def test_waiting_where_the_log_waited_earns_no_progress_after_it_left() -> None:
     stay = scorer.score(*_plan(speed=0.0, x0=39.5), 9_000_000)
     drive = scorer.score(*_plan(speed=10.0, x0=39.5), 9_000_000)
     assert stay["ep"] == 0.0 and drive["ep"] == pytest.approx(1.0)
+
+
+def test_coming_to_a_gentle_stop_is_comfortable() -> None:
+    # -2 m/s^2 from 5 m/s stops after 2.5 s; a raw finite difference reads a jerk spike there.
+    assert _scorer().score(*_plan(speed=5.0, accel=-2.0), T0_US)["comfort"] == 1.0
+
+
+def test_a_car_beside_the_ego_in_its_lane_is_no_time_to_collision() -> None:
+    times = np.array([T0_US, T0_US + 10_000_000])
+    # Level with the ego, its box 8 cm into the ego's: a side contact while the ego keeps its lane.
+    beside = Track(Box(4.5, 2.0), times, np.array([[11.4, 2.0, 0.0], [111.4, 2.0, 0.0]]), road_user=True)
+    terms = _scorer(tracks=[beside]).score(*_plan(), T0_US)
+    assert terms["nc"] == 1.0 and terms["ttc"] == 1.0
