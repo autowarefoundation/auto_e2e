@@ -155,3 +155,37 @@ was stopped in its third step once that was shown:
   9 plans per decision on the CPU dominates) and peaks at 4.3 GB of GPU memory.
 - The replay check also refused a rollout recorded before a driver-input
   change (0.095 m at decision 5), which is the case it exists for.
+
+## 2026-11-01: GRPO with the final reward and update (r3)
+
+Same setup as r1 (scene `clipgt-01d503d4`, 110 steps, one rollout per
+iteration), with the code after the seventh review round.
+
+| Iteration | Collision | Off-road (first) | Max dist to GT traj. [m] | Driven [m] |
+| :--- | :--- | :--- | ---: | ---: |
+| 0 (imitation) | no | yes (3.8 s) | 5.92 | 30.2 |
+| 1 | no | yes (3.8 s) | 5.82 | 30.0 |
+| 2 | no | yes (3.8 s) | 5.90 | 30.1 |
+| 3 | no | yes (3.8 s) | 5.86 | 30.1 |
+
+| GRPO step | Decisions | Mean-plan reward | Gated decisions | Group reward std | Anchor | Step scale | Plan change | Surrogate before / after | Replay error [m] |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 37 | 0.325 | 59% | 0.032 | 0 | 1/128 | 0.091 | 0 / -4.0e-5 | 1.3e-4 |
+| 2 | 38 | 0.316 | 61% | 0.027 | 0.023 | 1/256 | 0.060 | 1.2e-4 / 7.7e-5 | 1.1e-4 |
+| 3 | 37 | 0.326 | 59% | 0.024 | 0.003 | 1/256 | 0.021 | 3.0e-5 / 1.6e-5 | 1.2e-4 |
+
+- The loop works end to end: every step replayed the executed plans to
+  0.13 mm, lowered the surrogate, and stayed inside the trust region.
+- It does not yet change the driving. The accepted steps move the mean plan
+  by 0.02-0.09 in the trust-region distance, a tenth of the bound or less:
+  the line search halves the step until the surrogate falls, so what limits
+  the step is the direction, not the bound. Two reasons are visible in the
+  numbers. The planner's gradient is approximate (its recurrent state is
+  detached from the BEV lookup), and the within-group reward spread is small
+  (std 0.02-0.03), so a group of 8 plans carries little signal.
+- At most states the imitation plan leaves the lanes within 4 s (about 60% of
+  the decisions are gated), the drift of #221, and the policy leaves the road
+  3.8 s after takeover in every iteration.
+- Next: larger exploration (`--sigma`) to widen the reward spread, more
+  scenes and rollouts per step, and checking how much the detach in the GRU
+  planner costs the update direction.
