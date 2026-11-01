@@ -210,10 +210,12 @@ type S3Service struct {
 	indexMu sync.Mutex
 	indexSF map[string]*shardIndexBuild // single-flight in-progress builds
 
-	// oddCache memoizes the ODD LabelSet resolved for "<dataset>/<version>",
-	// including "no labels", for versionTTL. Guarded by oddMu.
-	oddMu    sync.Mutex
-	oddCache map[string]cachedODDLabelSet
+	// oddCache memoizes, for versionTTL, which ODD LabelSet applies to
+	// "<dataset>/<version>", including "none". oddLabelSets holds the parsed
+	// LabelSets by manifest SHA-256. Both guarded by oddMu.
+	oddMu        sync.Mutex
+	oddCache     map[string]cachedODDLabelSet
+	oddLabelSets map[string]*oddLabelSet
 }
 
 type shardIndexBuild struct {
