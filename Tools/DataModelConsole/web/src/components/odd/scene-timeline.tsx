@@ -79,8 +79,8 @@ export function SceneTimeline({
 
   return (
     <div className="space-y-1.5">
-      <div className="grid grid-cols-[minmax(7rem,11rem)_1fr] gap-3">
-        <span />
+      <div className="grid gap-3 sm:grid-cols-[minmax(7rem,11rem)_1fr]">
+        <span className="hidden sm:block" />
         <TimeAxis durationNs={durationNs} />
       </div>
       {lanes.map((lane, laneIndex) => {
@@ -90,9 +90,9 @@ export function SceneTimeline({
         return (
           <div
             key={lane.key}
-            className="grid grid-cols-[minmax(7rem,11rem)_1fr] items-start gap-3"
+            className="grid items-start gap-1 sm:grid-cols-[minmax(7rem,11rem)_1fr] sm:gap-3"
           >
-            <div className="min-w-0 pt-0.5">
+            <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 pt-0.5 sm:block">
               <div className="truncate text-xs text-slate-300" title={lane.key}>
                 {keyLabel(lane.key)}
               </div>
