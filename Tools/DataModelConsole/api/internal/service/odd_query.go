@@ -219,6 +219,17 @@ func setOf(items []string) map[string]bool {
 	return out
 }
 
+// durationNS rounds seconds to the nearest nanosecond, so 8.3 s is exactly
+// 8_300_000_000 ns; a positive value stays at least 1 ns so it never admits
+// zero-length intervals.
+func durationNS(seconds float64) int64 {
+	ns := int64(math.Round(seconds * 1e9))
+	if seconds > 0 && ns == 0 {
+		return 1
+	}
+	return ns
+}
+
 func compileODDQuery(query model.ODDQuery) oddCompiledQuery {
 	compiled := oddCompiledQuery{and: query.Op == "and"}
 	for _, group := range query.Groups {
@@ -229,8 +240,7 @@ func compileODDQuery(query model.ODDQuery) oddCompiledQuery {
 				values:  setOf(c.Values),
 				sources: setOf(c.Sources),
 				not:     c.Not,
-				// Ceil: a positive minimum must exclude zero-length intervals.
-				minDurationNS: int64(math.Ceil(c.MinDurationS * 1e9)),
+				minDurationNS: durationNS(c.MinDurationS),
 				minConfidence: float32(c.MinConfidence),
 			})
 		}
