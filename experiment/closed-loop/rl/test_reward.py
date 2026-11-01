@@ -29,10 +29,12 @@ def _lane(y: float, heading: int) -> Lane:
     return Lane(polygon, np.column_stack([x, np.full_like(x, y)]))
 
 
-def _scorer(left_heading: int = 1, tracks: list[Track] = ()) -> SceneScorer:
+def _scorer(left_heading: int = 1, tracks: list[Track] = (), recorded_y: float = 0.0,
+            lanes: list[Lane] | None = None) -> SceneScorer:
     times = np.arange(0, 11_000_001, 100_000, dtype=np.int64)
-    xy = np.column_stack([10.0 * times / 1e6, np.zeros(len(times))])
-    return SceneScorer([_lane(0.0, 1), _lane(3.5, left_heading)], list(tracks), EGO, times, xy, np.zeros(len(times)))
+    xy = np.column_stack([10.0 * times / 1e6, np.full(len(times), recorded_y)])
+    lanes = lanes if lanes is not None else [_lane(0.0, 1), _lane(3.5, left_heading)]
+    return SceneScorer(lanes, [], list(tracks), EGO, times, xy, np.zeros(len(times)))
 
 
 def _plan(
@@ -46,7 +48,7 @@ def _plan(
     y = y_end * np.clip(t / 3.0, 0, 1) ** 2 * (3 - 2 * np.clip(t / 3.0, 0, 1))
     heading = np.arctan2(np.gradient(y), np.gradient(x))
     controls = np.column_stack([np.full(64, accel), np.zeros(64)])
-    return np.column_stack([x, y, heading]), speeds, controls, np.array([x0, 0.0, 0.0])
+    return np.column_stack([x, y, heading]), speeds, controls, np.array([x0, 0.0, 0.0]), speed
 
 
 def test_following_the_recording_scores_one() -> None:
@@ -74,6 +76,13 @@ def test_hitting_a_stopped_car_ahead_is_gated() -> None:
     assert _scorer(tracks=[obstacle]).score(*_plan(), T0_US)["nc"] == 0.5
 
 
+def test_a_car_sideswiping_the_ego_in_its_lane_is_not_at_fault() -> None:
+    times = np.array([T0_US, T0_US + 10_000_000])
+    # Drifts from the left lane into the ego's while level with it.
+    swiper = Track(Box(4.5, 2.0), times, np.array([[11.4, 3.5, 0.0], [111.4, -6.5, 0.0]]), road_user=True)
+    assert _scorer(tracks=[swiper]).score(*_plan(), T0_US)["nc"] == 1.0
+
+
 def test_being_rear_ended_is_not_at_fault() -> None:
     times = np.array([T0_US, T0_US + 4_000_000])
     # Starts 8 m behind the ego's rear axle and closes in at 14 m/s.
@@ -86,19 +95,17 @@ def test_time_to_collision_halves_the_reward() -> None:
     # A car crossing 1 m beyond where the ego's box reaches 0.6 s later.
     times = np.array([0, 11_000_000])
     ahead = Track(Box(4.5, 2.0), times, np.array([[22.5, 0.0, 0.0], [22.5, 0.0, 0.0]]), road_user=True)
-    plan, speeds, controls, start = _plan()
+    plan, speeds, controls, start, speed = _plan()
     plan, speeds, controls = plan[:5], speeds[:5], controls[:5]  # stops planning before contact
-    terms = _scorer(tracks=[ahead]).score(plan, speeds, controls, start, T0_US)
+    terms = _scorer(tracks=[ahead]).score(plan, speeds, controls, start, speed, T0_US)
     assert terms["nc"] == 1.0 and terms["ttc"] == 0.5
 
 
 def test_leaving_the_road_is_gated_unless_the_recording_does_too() -> None:
     terms = _scorer().score(*_plan(y_end=-2.5), T0_US)
     assert terms["dac"] == 0.0 and terms["gated"] == 1.0
-    # The recorded drive itself leaves the mapped lanes: the map is incomplete there.
-    off_map = _scorer()
-    off_map.recorded_xy = off_map.recorded_xy + [0.0, -3.0]
-    assert off_map.score(*_plan(y_end=-2.5), T0_US)["dac"] == 1.0
+    # The recorded drive itself runs there, off the mapped lanes: the map is incomplete.
+    assert _scorer(recorded_y=-2.5).score(*_plan(y_end=-2.5), T0_US)["dac"] == 1.0
 
 
 def test_lane_change_keeps_the_road_but_loses_some_lane_keeping() -> None:
@@ -144,9 +151,9 @@ def test_progress_is_measured_from_the_ego() -> None:
 
 
 def test_the_end_of_the_recording_is_rejected() -> None:
-    plan, speeds, controls, start = _plan()
+    plan, speeds, controls, start, speed = _plan()
     with pytest.raises(ValueError):
-        _scorer().score(plan, speeds, controls, start, 10_950_000)  # one step left
+        _scorer().score(plan, speeds, controls, start, speed, 10_950_000)  # one step left
 
 
 def test_gated_plans_keep_the_order_of_their_first_violation() -> None:
@@ -156,3 +163,23 @@ def test_gated_plans_keep_the_order_of_their_first_violation() -> None:
     later = scorer.score(*_plan(y_end=-2.5), T0_US)
     assert sooner["gated"] == later["gated"] == 1.0
     assert 0.0 < sooner["safe_fraction"] < later["safe_fraction"] < 1.0
+
+
+def test_human_filter_matches_by_place_not_by_time() -> None:
+    """A gap in the lane polygons that the recording drives through is forgiven at any speed."""
+    gap = Polygon([(40, -1.75), (46, -1.75), (46, -0.5), (40, -0.5)])
+    narrowed = Lane(_lane(0.0, 1).polygon.difference(gap), _lane(0.0, 1).centreline)
+    scorer = _scorer(lanes=[narrowed, _lane(3.5, 1)])
+    for speed in (10.0, 8.0, 6.0):
+        assert scorer.score(*_plan(speed=speed), T0_US)["dac"] == 1.0
+
+
+def test_lane_keeping_is_forgiven_where_the_recording_is_off_centre() -> None:
+    assert _scorer(recorded_y=-1.5).score(*_plan(y_end=-1.5), T0_US)["lk"] == 1.0
+    assert _scorer().score(*_plan(y_end=-1.5), T0_US)["lk"] < 1.0
+
+
+def test_comfort_sees_the_step_out_of_t0() -> None:
+    plan, speeds, controls, start, _ = _plan(speed=19.0)  # holds 19 m/s ...
+    terms = _scorer().score(plan, speeds, controls, start, 20.0, T0_US)  # ... after 20 m/s at t0
+    assert terms["comfort"] < 1.0
