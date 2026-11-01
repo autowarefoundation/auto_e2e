@@ -424,3 +424,64 @@ type SceneSearchResponse struct {
 	Available     int        `json:"available"`
 	Truncated     bool       `json:"truncated"`
 }
+
+// ODDCondition is one search term: the scene must carry a valid ODD
+// observation of Key whose values include Value.
+type ODDCondition struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// ODDQuality is the review state the ODD LabelSet manifest declares.
+type ODDQuality struct {
+	StructuralStatus    string `json:"structural_status"`
+	AuditStatus         string `json:"audit_status"`
+	CertificationStatus string `json:"certification_status"`
+}
+
+// ODDFacetValue counts the matched scenes carrying one value of a key.
+type ODDFacetValue struct {
+	Value  string `json:"value"`
+	Scenes int    `json:"scenes"`
+}
+
+// ODDFacet lists the values of one ODD key across the matched scenes.
+type ODDFacet struct {
+	Key    string          `json:"key"`
+	Values []ODDFacetValue `json:"values"`
+}
+
+// ODDSceneMatch is where one search condition first holds in a scene, as an
+// offset from the scene start.
+type ODDSceneMatch struct {
+	Key           string `json:"key"`
+	Value         string `json:"value"`
+	FirstOffsetNS int64  `json:"first_offset_ns"`
+}
+
+// ODDScene is one matched scene. Shard is the shard name in the requested
+// version, which the player opens.
+type ODDScene struct {
+	SceneUID   string          `json:"scene_uid"`
+	Shard      string          `json:"shard"`
+	DurationNS int64           `json:"duration_ns"`
+	DistanceM  float64         `json:"distance_m"`
+	Matches    []ODDSceneMatch `json:"matches"`
+}
+
+// ODDSearchResponse wraps GET /api/v1/odd/scenes. LabelVersion is the dataset
+// version the LabelSet was made for; it differs from Version when the labels
+// are carried forward to a later pack of the same scenes.
+type ODDSearchResponse struct {
+	Dataset        string         `json:"dataset"`
+	Version        string         `json:"version"`
+	LabelVersion   string         `json:"label_version"`
+	LabelSetID     string         `json:"labelset_id"`
+	ManifestSHA256 string         `json:"manifest_sha256"`
+	Quality        ODDQuality     `json:"quality"`
+	LabeledScenes  int            `json:"labeled_scenes"`
+	Where          []ODDCondition `json:"where"`
+	Facets         []ODDFacet     `json:"facets"`
+	Scenes         []ODDScene     `json:"scenes"`
+	Page           Page           `json:"page"`
+}
