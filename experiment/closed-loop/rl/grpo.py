@@ -23,7 +23,11 @@ The anchor to the imitation planner covers all 64 steps, so high-frequency
 drift is held back as well. Its value, and the trust region of the update,
 use the distance ``|(mu_a - mu_b) / sigma|^2 / 2`` (the KL of two policies
 with these means, were the noise on every step). Its gradient is
-preconditioned like the policy term, ``mu_theta - mu_ref``.
+preconditioned like the policy term: the KL's gradient is
+``(mu_theta - mu_ref) / sigma^2`` and its natural gradient ``mu_theta - mu_ref``,
+which is what the raw squared distance in ``grpo_loss`` gives. Both terms of
+the loss are therefore in the same preconditioned units, and the line search
+in ``grpo_step.py`` lowers that preconditioned surrogate.
 
 GRPO (Shao et al., 2024, arXiv:2402.03300) standardises the rewards of a
 group of samples drawn for the same state and needs no value network. With
