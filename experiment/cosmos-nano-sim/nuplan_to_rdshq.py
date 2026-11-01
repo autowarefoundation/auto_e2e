@@ -295,7 +295,7 @@ def main() -> None:
             component, key = member.split("/")
             tar_write(root / "rds-hq" / component / f"{name}.tar", {f"{name}.{key}": json.dumps({"labels": labels}).encode()})
         tar_write(root / "rds-hq/3d_traffic_lights_lightnet_status" / f"{name}.tar",
-                  {f"{name}.aggregated_states.json": json.dumps({}).encode()})
+                  {f"{name}.aggregated_states.json": json.dumps({"state_to_legacy_render_state": {}, "traffic_light_states": {}}).encode()})
         variants.append({"name": name, "lateral_m": lateral_m, "yaw_deg": yaw_deg})
 
     # Recorded 10 Hz images of the window, undistorted, for the first-frame conditioning and the comparison.
