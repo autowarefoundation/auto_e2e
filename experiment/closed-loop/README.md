@@ -30,6 +30,30 @@ and the driver config; [`scenes.txt`](./scenes.txt) lists the scenes. The
 scenes come from the gated Hugging Face dataset
 `nvidia/PhysicalAI-Autonomous-Vehicles-NuRec` (release 26.01), about 2 GB each.
 
+## AlpaSim patch
+
+AlpaSim's driver API gives a model the cameras, ego poses and route
+(`PredictionInput.route`), but not the HD map, and not which scene it drives.
+AutoE2E was trained with a 14-channel map raster and a route mask, so without
+them it runs on its camera-only track (#221). [`alpasim.patch`](./alpasim.patch)
+is the whole fork: 4 lines that add `PredictionInput.scene_id` from the
+session's `debug_info.scene_id`. With it the plugin opens the scene's USDZ in
+the scene cache, which `driver=autoe2e*` mounts read-only at `/mnt/nre-data`,
+and draws the map and route with the nuPlan training rasterizer
+(`Model/plugins/alpasim_driver/alpasim_autoe2e/scene_map.py`).
+
+`setup_alpasim.sh` applies the patch after checking out `ALPASIM_COMMIT`. On a
+host that is already set up, apply it by hand; the driver mounts `src/`, so no
+image rebuild is needed:
+
+```bash
+git -C ~/alpasim apply <repo>/experiment/closed-loop/alpasim.patch   # undo: git apply -R
+```
+
+Rollouts recorded before the patch ran camera-only; `replay_driver.py` now
+replays them with the map and route, so their replayed plans differ from the
+logged ones.
+
 ## Host requirements
 
 NVIDIA driver >= 570, Docker with compose and buildx, the NVIDIA Container
@@ -75,3 +99,61 @@ Each run lands in `~/closed-loop-runs/<run name>/`:
 - `setup_alpasim.sh` also adds `alpasim_autoe2e = { workspace = true }` to
   the root `[tool.uv.sources]`, as AlpaSim does for the transfuser plugin.
   Whether the `autoe2e` extra resolves without it was not tested.
+
+## Closed-loop RL: GRPO on one scene
+
+[`rl/`](./rl) is the smallest RL loop on top of the runs above. It is an
+experiment outside `wf_autoe2e`: the checkpoints it writes have no Flyte
+lineage and stay on the GPU host. If it proves useful, the loop is redesigned
+for the pipeline in `Design/` first.
+
+```bash
+# One scene, 3 GRPO steps, 4 s of closed loop per rollout (about 40 min on an L40S).
+ITERATIONS=3 bash experiment/closed-loop/rl/rl_loop.sh
+python -m pytest experiment/closed-loop/rl/test_grpo.py   # CPU unit tests
+```
+
+Each iteration rolls out the current policy with `run_scenes.sh`, then
+`rl/grpo_step.py` replays every decision of that rollout, samples a group of
+plans per decision and takes one SGD step on the GRU planner. The encoders
+stay frozen. Each step writes `iter-<n>.pt` and `iter-<n>.json` (per-decision
+rewards, KL, replay error) under `$ALPASIM_ROOT/data/drivers/autoe2e/rl/<tag>/`.
+
+Choices and why:
+
+- Reward: the phase-1 reward of `Design/reinforcement_learning.md` §6.1,
+  `-(ADE + 0.5 FDE)` of each sampled plan against the recorded drive. Decisions
+  after the ego first leaves the 3 m renderer bound are dropped, which is the
+  truncation the reward asks for. The bound term is the same for every sample
+  of a state, so it carries no advantage; it only ends the episode.
+- Update rule: GRPO (Shao et al., 2024, arXiv:2402.03300), with groups of 8
+  plans sampled at the same closed-loop state. The phase-1 reward of a plan
+  depends only on the plan and the state, so the plans of one state can be
+  compared without rolling each of them out, and no value network is needed.
+  One rollout gives a group at every decision for the cost of extra planner
+  passes. Rollout-level groups (several rollouts of a scene, scored by their
+  return) would cost one 5-minute rollout per sample at the current 6.6 s per
+  decision.
+- Exploration (#211): the GRU planner is deterministic, so the policy adds
+  Gaussian noise to 4 low-frequency DCT coefficients of each control signal,
+  acceleration and curvature. Samples differ by smooth trajectory-level
+  changes rather than per-step jitter, which is the idea of Qwen-Drive's
+  structured low-frequency perturbations. A closed-form KL to the imitation
+  planner keeps the policy near it. The same perturbation works on Bézier
+  control points, so it does not decide #211's planner question.
+- On-policy states: AlpaSim executes the mean plan, and the samples are drawn
+  at the states that plan reached. The drift of #221 brings the ego to states
+  away from the recording, and there the reward favours the samples that head
+  back to it. This is the recovery signal DAgger (Ross et al., 2011) gets from
+  an expert, here from the log.
+- SGD, not Adam: each step runs in a fresh process, and Adam's first step moves
+  every parameter by about the learning rate, including the directions the
+  reward does not see (`test_grpo.py`).
+
+Limits: the reward of a decision ignores what the executed plan does to later
+decisions, so this is a contextual bandit on visited states, not credit
+assignment over the episode. The bound and the reward both come from the
+recording, so the loop optimises for staying on the log, not for driving well
+where the log is wrong. Rollout-level groups and the phase-2 terms
+(`Design/reinforcement_learning.md` §6.2) are the next steps.
+
