@@ -99,8 +99,8 @@ bash run.sh > run.log 2>&1   # about 20 minutes on a p5.4xlarge
 ```
 
 Everything, including the 31 GB of weights, is written under `/home/ubuntu/cosmos-nano-sim`
-on the EBS root volume (about 60 GB). Outputs are in `outputs/nuplan/` (generated and
-control videos per shift) and `outputs/compare/`.
+on the EBS root volume (about 60 GB). Outputs are in `outputs/nuplan_480p_seed0/` and `outputs/nuplan_480p_seed1/`
+(generated and control videos per shift) and `outputs/compare_480p/`.
 
 Delete the resources afterwards:
 
