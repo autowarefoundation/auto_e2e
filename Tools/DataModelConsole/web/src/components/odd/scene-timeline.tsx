@@ -45,6 +45,8 @@ function TimeAxis({ durationNs }: { durationNs: number }) {
   const step = niceStep(durationS);
   const ticks: number[] = [];
   for (let t = 0; t <= durationS + 1e-6; t += step) ticks.push(t);
+  // Label the scene end too unless it would crowd the last regular tick.
+  if (durationS - ticks[ticks.length - 1] > step * 0.4) ticks.push(durationS);
   return (
     <div className="relative h-4 text-[10px] tabular-nums text-slate-500" aria-hidden>
       {ticks.map((t) => (
@@ -56,7 +58,7 @@ function TimeAxis({ durationNs }: { durationNs: number }) {
           }
           style={{ left: `${(t / durationS) * 100}%` }}
         >
-          {t}s
+          {Number.isInteger(t) ? t : t.toFixed(1)}s
         </span>
       ))}
     </div>
