@@ -161,7 +161,7 @@ function ODDPageInner() {
         </div>
       )}
 
-      {noLabels ? (
+      {datasets.error ? null : noLabels ? (
         <Card className="border-slate-800 bg-slate-950/50">
           <CardContent className="py-6 text-sm text-slate-400">
             No ODD labels for {friendlyDataset(dataset)} {version}.
@@ -287,7 +287,7 @@ function ODDPageInner() {
                               where: [...where, { key: facet.key, value }],
                             })
                           }
-                          aria-label={`Filter ${term}`}
+                          aria-label={`Filter ${term}, ${scenes} scenes`}
                         >
                           <span className="font-mono text-xs">{value}</span>
                           <span className="text-xs text-slate-500">{scenes}</span>
