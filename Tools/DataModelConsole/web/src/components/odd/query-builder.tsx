@@ -252,7 +252,7 @@ function ConditionEditor({
           <div className="space-y-1 text-[11px] text-slate-400">
             <span>From sources</span>
             <div className="flex flex-wrap gap-1">
-              {facet.sources.map((source) => {
+              {[...new Set([...facet.sources, ...(condition.sources ?? [])])].map((source) => {
                 const selected = condition.sources?.includes(source) ?? false;
                 return (
                   <button
