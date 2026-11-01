@@ -1,7 +1,7 @@
 """One GRPO update of AutoE2E's planner from the closed-loop rollouts of one run.
 
 For every AutoE2E decision of every ``rollout.asl`` under ``run_dir``, until
-the ego first leaves the renderer's valid region (3 m from the recording),
+the ego first leaves the renderer's valid region (3 m from the recorded path),
 this rebuilds the driver's inputs from the log (``replay_driver.py``), runs
 the frozen encoders once and keeps what the planner received. It then samples
 a group of plans around the planner's mean (``grpo.py``) and scores each with
@@ -14,10 +14,14 @@ policy visited in closed loop, so the update is on-policy even though AlpaSim
 executed the mean plan; the replayed mean must reproduce the executed plan.
 
 The step follows the planner-parameter gradient of the natural-gradient
-surrogate (natural in the mean plan, not in the parameters), shortened until
-the new mean plan stays within ``--trust-region`` of the old one on every
-scored state (backtracking, as in TRPO, with the largest distance in place of
-the mean).
+surrogate (natural in the mean plan, not in the parameters). The GRU planner
+detaches its recurrent state from the deformable lookup's query, so this is
+the gradient of the planner as trained, not the exact gradient of the
+surrogate. The step is therefore halved until it both lowers the surrogate
+(advantage term plus anchor) on the scored states and keeps the new mean plan
+within ``--trust-region`` of the old one on every state: TRPO's line search,
+with the largest distance in place of the mean. If no length qualifies, the
+planner is left unchanged.
 
 Run inside the AlpaSim image with a GPU (``rl_loop.sh`` does):
 
@@ -31,6 +35,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -51,6 +56,7 @@ from alpasim_autoe2e.scene_map import SCENE_ROOT, find_artifact  # noqa: E402
 from training.losses.control_rollout import integrate_controls_torch  # noqa: E402
 
 RENDERER_BOUND_M = 3.0
+MAX_REPLAY_HEADING_ERROR_RAD = 0.01
 WAYPOINT_US = 100_000
 MAX_REPLAY_ERROR_M = 0.05
 STEPS = 64
@@ -68,11 +74,13 @@ class PlannerInputs:
         self.args, self.kwargs = args, kwargs
 
 
-def logged_plan_in_rig(poses: list) -> np.ndarray:
-    """The plan the driver returned, in the rig frame at its anchor (as ``score_rollout``)."""
+def logged_plan_in_rig(poses: list) -> tuple[np.ndarray, np.ndarray]:
+    """XY and heading of the plan the driver returned, in the rig frame at its anchor."""
     plan = to_trajectory(poses)
     rig_from_local = np.linalg.inv(se3(plan, int(poses[0].timestamp_us)))
-    return np.array([(rig_from_local @ se3(plan, int(p.timestamp_us)))[:2, 3] for p in poses[1:]])
+    in_rig = [rig_from_local @ se3(plan, int(p.timestamp_us)) for p in poses[1:]]
+    return (np.array([m[:2, 3] for m in in_rig]),
+            np.array([math.atan2(m[1, 0], m[0, 0]) for m in in_rig]))
 
 
 def to_local(positions: np.ndarray, headings: np.ndarray, local_from_rig: np.ndarray) -> np.ndarray:
@@ -143,8 +151,7 @@ def main() -> None:
                 break  # the rollout ended before this request was answered
             parsed = driver.parser.parse(prediction_input(log, driver.camera_ids, now_us))
             local_from_rig = np.asarray(parsed.pose_local_to_rig_t0.as_se3(), dtype=np.float64)
-            deviation = float(np.linalg.norm(
-                (np.linalg.inv(local_from_rig) @ se3(recorded, parsed.t0_us))[:2, 3]))
+            deviation = scorer.path_distance(local_from_rig[:2, 3])
             if deviation > RENDERER_BOUND_M or parsed.t0_us + 2 * WAYPOINT_US >= recorded.time_range_us.stop:
                 break  # the renderer is no longer reliable, or the clip ends: truncated here
             driver._run_model(parsed)  # no grad; the hook keeps the planner inputs
@@ -157,16 +164,18 @@ def main() -> None:
             positions, headings, speeds = integrate_controls_torch(
                 controls, torch.full((opts.group_size + 1,), parsed.initial_speed_mps)
             )
-            logged = logged_plan_in_rig(logged_plans[index])
-            replay_error = float(np.abs(positions[0].numpy() - logged).max())
-            if replay_error > MAX_REPLAY_ERROR_M:
+            logged_xy, logged_heading = logged_plan_in_rig(logged_plans[index])
+            replay_error = float(np.abs(positions[0].numpy() - logged_xy).max())
+            heading_error = float(np.abs(np.angle(np.exp(1j * (headings[0].numpy() - logged_heading)))).max())
+            if replay_error > MAX_REPLAY_ERROR_M or heading_error > MAX_REPLAY_HEADING_ERROR_RAD:
                 raise SystemExit(
-                    f"{asl} decision {index + 1}: the replayed plan is {replay_error:.3f} m from the "
-                    "executed one, so the update would be off-policy"
+                    f"{asl} decision {index + 1}: the replayed plan is {replay_error:.3f} m and "
+                    f"{heading_error:.4f} rad from the executed one, so the update would be off-policy"
                 )
             local = to_local(positions.numpy(), headings.numpy(), local_from_rig)
             start = to_local(np.zeros((1, 1, 2)), np.zeros((1, 1)), local_from_rig)[0, 0]
-            scores = [scorer.score(local[g], speeds[g].numpy(), controls[g].numpy(), start, parsed.t0_us)
+            scores = [scorer.score(local[g], speeds[g].numpy(), controls[g].numpy(), start,
+                                   parsed.initial_speed_mps, parsed.t0_us)
                       for g in range(opts.group_size + 1)]
             gated = torch.tensor([s["gated"] for s in scores[1:]], dtype=torch.bool)
             rewards = torch.tensor([s["reward"] - 1.0 + s["safe_fraction"] if s["gated"] else s["reward"]
@@ -176,7 +185,8 @@ def main() -> None:
                 loss, anchor = grpo_loss(mu, mu_ref, z, advantages, basis, sigma, opts.anchor_weight)
                 loss.backward()
             # On the CPU: one state's BEV features can take over 100 MB of GPU memory.
-            states.append((_to(captured.args, "cpu"), _to(captured.kwargs, "cpu"), mu.detach().cpu()))
+            states.append((_to(captured.args, "cpu"), _to(captured.kwargs, "cpu"), mu.detach().cpu(),
+                           mu_ref.cpu(), z.cpu(), advantages))
             rows.append({
                 "rollout": str(asl.relative_to(opts.run_dir)),
                 "decision": index + 1,
@@ -191,29 +201,35 @@ def main() -> None:
     if not rows:
         raise SystemExit(f"no decision within the valid region under {opts.run_dir}")
 
-    # Natural-gradient direction averaged over the decisions, then backtracking.
+    # The gradient averaged over the decisions, then TRPO's backtracking line search.
     parameters = [p for p in planner.parameters()]
-    start = [p.detach().clone() for p in parameters]
+    start_params = [p.detach().clone() for p in parameters]
     direction = [-(p.grad / len(rows)) if p.grad is not None else torch.zeros_like(p) for p in parameters]
-    scale, moved = opts.lr, float("nan")
+
+    def evaluate() -> tuple[float, float]:
+        """Mean surrogate and largest plan change of the current planner on the scored states."""
+        losses, moves = [], []
+        for args, kwargs, mu_old, mu_ref, z, advantages in states:
+            mu_new = planner(*_to(args, "cuda"), **_to(kwargs, "cuda")).reshape(STEPS, 2).float().cpu()
+            policy = -(advantages * (z * (basis.T @ (mu_new - mu_old))).sum(dim=(1, 2))).mean()
+            losses.append(float(policy + opts.anchor_weight * ((mu_new - mu_ref) ** 2).sum() / 2.0))
+            moves.append(float(plan_distance(mu_new, mu_old, sigma)))
+        return float(np.mean(losses)), max(moves)
+
     with torch.no_grad():
+        surrogate_before, _ = evaluate()
+        scale, moved, surrogate_after = opts.lr, 0.0, surrogate_before
         for _ in range(12):
-            for p, p0, d in zip(parameters, start, direction):
+            for p, p0, d in zip(parameters, start_params, direction):
                 p.copy_(p0 + scale * d)
-            moved = max(
-                float(plan_distance(
-                    planner(*_to(args, "cuda"), **_to(kwargs, "cuda")).reshape(STEPS, 2).float().cpu(),
-                    mu_old, sigma,
-                ))
-                for args, kwargs, mu_old in states
-            )
-            if moved <= opts.trust_region:
+            surrogate_after, moved = evaluate()
+            if moved <= opts.trust_region and surrogate_after < surrogate_before:
                 break
             scale /= 2.0
         else:
-            for p, p0 in zip(parameters, start):
+            for p, p0 in zip(parameters, start_params):
                 p.copy_(p0)
-            scale, moved = 0.0, 0.0
+            scale, moved, surrogate_after = 0.0, 0.0, surrogate_before
 
     summary = {
         "decisions": len(rows),
@@ -223,6 +239,8 @@ def main() -> None:
         "anchor": float(np.mean([r["anchor"] for r in rows])),
         "step_scale": scale,
         "step_plan_distance": moved,
+        "surrogate_before": surrogate_before,
+        "surrogate_after": surrogate_after,
         "max_replay_error_m": float(max(r["replay_error_m"] for r in rows)),
     }
     checkpoint = torch.load(opts.checkpoint, map_location="cpu")
