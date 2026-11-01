@@ -5,15 +5,18 @@ the ego first leaves the renderer's valid region (3 m from the recording),
 this rebuilds the driver's inputs from the log (``replay_driver.py``), runs
 the frozen encoders once and keeps what the planner received. It then samples
 a group of plans around the planner's mean (``grpo.py``) and scores each with
-the gated driving reward (``reward.py``). Plans a safety gate rejects get
-advantage -1, so a group in which every plan fails still pushes away from it
-(DiffusionDriveV2's truncated advantage). The states are those the current
+the gated driving reward (``reward.py``). A plan a safety gate rejects scores
+-1 instead of 0, so it ranks below every plan that passes, however little that
+plan progresses; a group in which every plan fails has no ranking and no
+gradient. The states are those the current
 policy visited in closed loop, so the update is on-policy even though AlpaSim
 executed the mean plan; the replayed mean must reproduce the executed plan.
 
-The step on the planner is the natural-gradient direction, shortened until
-the new mean plans stay within ``--trust-region`` of the old ones on the
-scored states (backtracking, as in TRPO).
+The step follows the planner-parameter gradient of the natural-gradient
+surrogate (natural in the mean plan, not in the parameters), shortened until
+the new mean plan stays within ``--trust-region`` of the old one on every
+scored state (backtracking, as in TRPO, with the largest distance in place of
+the mean).
 
 Run inside the AlpaSim image with a GPU (``rl_loop.sh`` does):
 
@@ -47,6 +50,7 @@ from alpasim_autoe2e.scene_map import SCENE_ROOT, find_artifact  # noqa: E402
 from training.losses.control_rollout import integrate_controls_torch  # noqa: E402
 
 RENDERER_BOUND_M = 3.0
+WAYPOINT_US = 100_000
 MAX_REPLAY_ERROR_M = 0.05
 STEPS = 64
 
@@ -77,6 +81,17 @@ def to_local(positions: np.ndarray, headings: np.ndarray, local_from_rig: np.nda
     return np.concatenate([xy, (headings + yaw0)[..., None]], axis=-1)
 
 
+def _to(value, device: str):
+    """``value`` with every tensor inside tuples and dicts moved to ``device``."""
+    if torch.is_tensor(value):
+        return value.to(device)
+    if isinstance(value, tuple):
+        return tuple(_to(v, device) for v in value)
+    if isinstance(value, dict):
+        return {k: _to(v, device) for k, v in value.items()}
+    return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("run_dir", type=Path)
@@ -90,9 +105,9 @@ def main() -> None:
         help="std of each orthonormal-basis coefficient; per step about 0.25x this",
     )
     parser.add_argument("--anchor-weight", type=float, default=0.1)
-    parser.add_argument("--lr", type=float, default=1.0, help="largest step tried on the natural gradient")
+    parser.add_argument("--lr", type=float, default=1.0, help="largest step tried along the gradient")
     parser.add_argument("--trust-region", type=float, default=1.0,
-                        help="largest mean plan_distance between new and old mean plans")
+                        help="largest plan_distance between new and old mean plans on any scored state")
     parser.add_argument("--seed", type=int, default=0)
     opts = parser.parse_args()
 
@@ -129,8 +144,8 @@ def main() -> None:
             local_from_rig = np.asarray(parsed.pose_local_to_rig_t0.as_se3(), dtype=np.float64)
             deviation = float(np.linalg.norm(
                 (np.linalg.inv(local_from_rig) @ se3(recorded, parsed.t0_us))[:2, 3]))
-            if deviation > RENDERER_BOUND_M or parsed.t0_us >= recorded.time_range_us.stop - 1:
-                break  # the renderer is no longer reliable, or the clip ended: truncated here
+            if deviation > RENDERER_BOUND_M or parsed.t0_us + 2 * WAYPOINT_US >= recorded.time_range_us.stop:
+                break  # the renderer is no longer reliable, or the clip ends: truncated here
             driver._run_model(parsed)  # no grad; the hook keeps the planner inputs
             with torch.enable_grad():
                 mu = planner(*captured.args, **captured.kwargs).reshape(STEPS, 2).float()
@@ -149,15 +164,17 @@ def main() -> None:
                     "executed one, so the update would be off-policy"
                 )
             local = to_local(positions.numpy(), headings.numpy(), local_from_rig)
-            scores = [scorer.score(local[g], speeds[g].numpy(), controls[g].numpy(), parsed.t0_us)
+            start = to_local(np.zeros((1, 1, 2)), np.zeros((1, 1)), local_from_rig)[0, 0]
+            scores = [scorer.score(local[g], speeds[g].numpy(), controls[g].numpy(), start, parsed.t0_us)
                       for g in range(opts.group_size + 1)]
-            rewards = torch.tensor([s["reward"] for s in scores[1:]])
             gated = torch.tensor([s["gated"] for s in scores[1:]], dtype=torch.bool)
-            advantages = torch.where(gated, torch.tensor(-1.0), group_advantages(rewards))
+            rewards = torch.where(gated, torch.tensor(-1.0), torch.tensor([s["reward"] for s in scores[1:]]))
+            advantages = group_advantages(rewards)
             with torch.enable_grad():
                 loss, anchor = grpo_loss(mu, mu_ref, z, advantages, basis, sigma, opts.anchor_weight)
                 loss.backward()
-            states.append((captured.args, captured.kwargs, mu.detach()))
+            # On the CPU: one state's BEV features can take over 100 MB of GPU memory.
+            states.append((_to(captured.args, "cpu"), _to(captured.kwargs, "cpu"), mu.detach().cpu()))
             rows.append({
                 "rollout": str(asl.relative_to(opts.run_dir)),
                 "decision": index + 1,
@@ -181,10 +198,13 @@ def main() -> None:
         for _ in range(12):
             for p, p0, d in zip(parameters, start, direction):
                 p.copy_(p0 + scale * d)
-            moved = float(np.mean([
-                plan_distance(planner(*args, **kwargs).reshape(STEPS, 2).float(), mu_old, sigma)
+            moved = max(
+                float(plan_distance(
+                    planner(*_to(args, "cuda"), **_to(kwargs, "cuda")).reshape(STEPS, 2).float().cpu(),
+                    mu_old, sigma,
+                ))
                 for args, kwargs, mu_old in states
-            ]))
+            )
             if moved <= opts.trust_region:
                 break
             scale /= 2.0
