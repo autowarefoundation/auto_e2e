@@ -115,45 +115,56 @@ python -m pytest experiment/closed-loop/rl/test_grpo.py   # CPU unit tests
 
 Each iteration rolls out the current policy with `run_scenes.sh`, then
 `rl/grpo_step.py` replays every decision of that rollout, samples a group of
-plans per decision and takes one SGD step on the GRU planner. The encoders
-stay frozen. Each step writes `iter-<n>.pt` and `iter-<n>.json` (per-decision
-rewards, KL, replay error) under `$ALPASIM_ROOT/data/drivers/autoe2e/rl/<tag>/`.
+plans per decision, scores them and takes one trust-region step on the GRU
+planner. The encoders stay frozen. Each step writes `iter-<n>.pt` and
+`iter-<n>.json` (per-decision reward terms, anchor, replay error) under
+`$ALPASIM_ROOT/data/drivers/autoe2e/rl/<tag>/`.
 
 Choices and why:
 
-- Reward: the phase-1 reward of `Design/reinforcement_learning.md` §6.1,
-  `-(ADE + 0.5 FDE)` of each sampled plan against the recorded drive. Decisions
-  after the ego first leaves the 3 m renderer bound are dropped, which is the
-  truncation the reward asks for. The bound term is the same for every sample
-  of a state, so it carries no advantage; it only ends the episode.
-- Update rule: GRPO (Shao et al., 2024, arXiv:2402.03300), with groups of 8
-  plans sampled at the same closed-loop state. The phase-1 reward of a plan
-  depends only on the plan and the state, so the plans of one state can be
-  compared without rolling each of them out, and no value network is needed.
-  One rollout gives a group at every decision for the cost of extra planner
-  passes. Rollout-level groups (several rollouts of a scene, scored by their
-  return) would cost one 5-minute rollout per sample at the current 6.6 s per
-  decision.
+- Reward ([`rl/reward.py`](./rl/reward.py)): progress gated by safety,
+  `NC * DAC * DDC * V * EP * TTC * LK * C` over 4 s of each plan. The terms
+  are those of NAVSIM's EPDMS (arXiv:2406.15349, arXiv:2506.04218), and the
+  product with progress follows CaRL (arXiv:2504.17838): a plan that stops
+  scores 0, where a weighted average would still pay for its safety (#123).
+  NC and TTC use the logged objects' future boxes, which the policy never
+  observes, and DAC, DDC and LK use the vector map rather than the raster the
+  policy reads, so every term can change the ranking of plans (#123's
+  non-redundancy). V keeps plans within 2.5-3 m of the recorded path, where
+  the reconstruction is reliable; as RAD (arXiv:2502.13144) does, it measures
+  distance to the path, not to the recorded position at the same time, so
+  braking is not penalised. The phase-1 reward of
+  `Design/reinforcement_learning.md` §6.1 (distance to the log) is dropped:
+  the anchor to the imitation planner already keeps the policy near the log.
+  Episodes still end when the ego is more than 3 m from the recording.
+- Update rule: GRPO (Shao et al., 2024, arXiv:2402.03300) with groups of 8
+  plans sampled at the same closed-loop state, as ReCogDrive
+  (arXiv:2506.08052) and AutoVLA (arXiv:2506.13757) score whole trajectories
+  as one action. The reward of a plan depends only on the plan and the
+  state, so the plans of one state can be compared without rolling each out,
+  and no value network is needed. Rollout-level groups would cost one
+  5-minute rollout per sample at the current 6.6 s per decision. Plans a
+  safety gate rejects get advantage -1, so a group that fails everywhere
+  still moves the policy (DiffusionDriveV2, arXiv:2512.07745).
 - Exploration (#211): the GRU planner is deterministic, so the policy adds
   Gaussian noise to 4 low-frequency DCT coefficients of each control signal,
   acceleration and curvature. Samples differ by smooth trajectory-level
-  changes rather than per-step jitter, which is the idea of Qwen-Drive's
-  structured low-frequency perturbations. A closed-form KL to the imitation
-  planner keeps the policy near it. The same perturbation works on Bézier
-  control points, so it does not decide #211's planner question.
+  changes rather than per-step jitter, the structured exploration #211 asks
+  for. It does not follow a published recipe. The same perturbation works on
+  Bézier control points, so it does not decide #211's planner question.
 - On-policy states: AlpaSim executes the mean plan, and the samples are drawn
-  at the states that plan reached. The drift of #221 brings the ego to states
-  away from the recording, and there the reward favours the samples that head
-  back to it. This is the recovery signal DAgger (Ross et al., 2011) gets from
-  an expert, here from the log.
-- SGD, not Adam: each step runs in a fresh process, and Adam's first step moves
-  every parameter by about the learning rate, including the directions the
-  reward does not see (`test_grpo.py`).
+  at the states that plan reached; `grpo_step.py` stops if the replayed mean
+  differs from the executed plan by more than 5 cm. The drift of #221 brings
+  the ego to states away from the recording, where samples that recover score
+  higher, the signal DAgger (Ross et al., 2011) gets from an expert.
+- Step: the natural gradient of the mean plan (Fisher-preconditioned, so
+  acceleration and curvature learn alike), plus a pull towards the imitation
+  planner over all 64 steps. The step is halved until the new mean plans stay
+  within a trust region of the old ones on the scored states, as in TRPO.
+  Without it the first run's steps diverged (below).
 
 Limits: the reward of a decision ignores what the executed plan does to later
 decisions, so this is a contextual bandit on visited states, not credit
-assignment over the episode. The bound and the reward both come from the
-recording, so the loop optimises for staying on the log, not for driving well
-where the log is wrong. Rollout-level groups and the phase-2 terms
-(`Design/reinforcement_learning.md` §6.2) are the next steps.
-
+assignment over the episode. Logged objects do not react to the ego. The
+renderer bound keeps the policy near the recorded path. Scene maps are
+rasterized whole at every decision (about 0.4 s for 400 lanes).
