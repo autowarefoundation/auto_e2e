@@ -49,9 +49,11 @@ func (h *ODDHandler) Search(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+dataset)
 		return
 	}
+	// version is required: newest-version discovery falls back to v1.0 on an
+	// S3 error, which would turn an outage into a false "no labels" 404.
 	version := q.Get("version")
-	if version != "" && !service.ValidVersion(version) {
-		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid version")
+	if !service.ValidVersion(version) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid version")
 		return
 	}
 	where, ok := parseODDConditions(q["where"])
