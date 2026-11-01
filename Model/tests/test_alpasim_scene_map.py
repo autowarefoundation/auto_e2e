@@ -144,6 +144,7 @@ def test_parse_feeds_map_and_route_for_a_known_scene(scene_map: SceneMap) -> Non
     prediction_input.scene_id = "clipgt-unknown"
     inputs = driver.parser.parse(prediction_input).model_inputs
     assert not inputs["map_valid"].any() and not inputs["route_mask"].any()
+    assert not inputs["route_valid"].any()
 
 
 def test_destination_is_drawn_without_a_route(scene_map: SceneMap) -> None:
