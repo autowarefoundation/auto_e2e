@@ -183,3 +183,39 @@ def test_comfort_sees_the_step_out_of_t0() -> None:
     plan, speeds, controls, start, _ = _plan(speed=19.0)  # holds 19 m/s ...
     terms = _scorer().score(plan, speeds, controls, start, 20.0, T0_US)  # ... after 20 m/s at t0
     assert terms["comfort"] < 1.0
+
+
+def test_human_filter_holds_between_recorded_samples() -> None:
+    """A plan on the recorded line, starting between two recorded samples, is still forgiven."""
+    gap = Polygon([(40, -1.75), (46, -1.75), (46, -0.5), (40, -0.5)])
+    narrowed = Lane(_lane(0.0, 1).polygon.difference(gap), _lane(0.0, 1).centreline)
+    scorer = _scorer(lanes=[narrowed, _lane(3.5, 1)])
+    for x0 in (10.05, 10.5, 10.95):
+        assert scorer.score(*_plan(x0=x0), T0_US)["dac"] == 1.0
+
+
+def test_a_static_track_stays_where_it_was_seen() -> None:
+    # A parked car seen only in the first second of the clip, 30 m ahead of the ego's path.
+    times = np.array([0, 1_000_000])
+    parked = Track(Box(4.5, 2.0), times, np.array([[40.0, 0.0, 0.0], [40.0, 0.0, 0.0]]), road_user=True,
+                   static=True)
+    terms = _scorer(tracks=[parked]).score(*_plan(), T0_US + 1_000_000)
+    assert terms["nc"] == 0.0
+
+
+def test_a_moving_track_is_not_stopped_at_its_last_sample() -> None:
+    times = np.array([0, 2_000_000])
+    track = Track(Box(4.5, 2.0), times, np.array([[0.0, 0.0, 0.0], [20.0, 0.0, 0.0]]), road_user=True)
+    assert track.speed(2_000_000) == pytest.approx(10.0)
+    assert track.speed(0) == pytest.approx(10.0)
+
+
+def test_progress_follows_the_log_from_the_ego_s_place() -> None:
+    """The log stopped 30 m ahead of where the ego is now; from the ego's place it was driving."""
+    times = np.arange(0, 11_000_001, 100_000, dtype=np.int64)
+    x = np.minimum(10.0 * times / 1e6, 40.0)  # reaches x = 40 m at 4 s, then stops
+    scorer = SceneScorer([_lane(0.0, 1), _lane(3.5, 1)], [], [], EGO, times,
+                         np.column_stack([x, np.zeros(len(times))]), np.zeros(len(times)))
+    t0 = 6_000_000  # the log is stopped at x = 40 m; the ego is still at x = 10 m
+    assert scorer.score(*_plan(speed=0.0), t0)["ep"] == 0.0
+    assert scorer.score(*_plan(speed=7.5), t0)["ep"] == pytest.approx(1.0)
