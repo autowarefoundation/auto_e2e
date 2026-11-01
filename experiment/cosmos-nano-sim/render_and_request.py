@@ -20,6 +20,7 @@ def main() -> None:
     p.add_argument("--scene", type=Path, required=True, help="scene directory written by nuplan_to_rdshq.py")
     p.add_argument("--captions", type=Path, required=True, help="JSON mapping camera_key to its caption")
     p.add_argument("--resolution", default="480")
+    p.add_argument("--seed", type=int, default=0, help="a second seed shows how much the scene varies without any shift")
     args = p.parse_args()
 
     meta = json.loads((args.scene / "meta.json").read_text())
@@ -58,11 +59,11 @@ def main() -> None:
         requests.append({
             "name": variant["name"], "model_mode": "image2video", "resolution": args.resolution,
             "aspect_ratio": "16,9", "fps": 30, "num_frames": frames, "num_video_frames_per_chunk": frames,
-            "num_outputs": 1, "seed": 0, "guidance": 1, "control_guidance": 1, "normalize_cfg": False,
+            "num_outputs": 1, "seed": args.seed, "guidance": 1, "control_guidance": 1, "normalize_cfg": False,
             "autoregressive": True, "wsm": {}, "condition_frame_indexes_vision": [0], "num_conditional_frames": 1,
             "prompt": "", "multiview": {"load_caption_from_data": True, "use_first_chunk_only": True,
                                         "condition_video_as_image": True, "views": views}})
-    out = args.scene / f"requests_{args.resolution}p.jsonl"
+    out = args.scene / f"requests_{args.resolution}p_seed{args.seed}.jsonl"
     out.write_text("".join(json.dumps(r) + "\n" for r in requests))
     print(out, len(requests), "requests")
 
