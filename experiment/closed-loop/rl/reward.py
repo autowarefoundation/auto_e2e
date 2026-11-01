@@ -24,8 +24,9 @@ scored at the plan's 0.1 s steps over its first 4 s, in the scene's local frame:
   path; 1 up to 2.5 m, falling to 0 at 3.0 m. A path distance, so braking or
   falling behind the log is not penalised (RAD's position deviation).
 * EP (ego progress): arc length the plan gains along the recorded path from
-  the ego's own position, over what the recording gained in 4 s from the same
-  place (by place, since the ego can trail or lead the log), clipped
+  the ego's own position, over what the recording gained from the same place
+  in 4 s of its moving time (by place, since the ego can trail or lead the
+  log; waiting excluded, since the reward has no traffic-light term), clipped
   to [0, 1]; 1 when the recording moves less than 5 m (NAVSIM). Multiplying by
   EP gives a plan that stops 0, where PDMS's weighted average would still give
   it 9/14 (#123).
@@ -109,14 +110,11 @@ class Track:
     times_us: np.ndarray
     poses: np.ndarray
     road_user: bool
-    static: bool = False
-    """Holds its pose outside its time range, as AlpaSim's trafficsim does for static tracks."""
 
     def pose(self, time_us: int) -> np.ndarray | None:
+        """The pose at ``time_us``, or None outside the track: replayed objects exist only then."""
         if not self.times_us[0] <= time_us <= self.times_us[-1]:
-            if not self.static:
-                return None
-            time_us = int(np.clip(time_us, self.times_us[0], self.times_us[-1]))
+            return None
         return np.array([np.interp(time_us, self.times_us, self.poses[:, 0]),
                          np.interp(time_us, self.times_us, self.poses[:, 1]),
                          np.interp(time_us, self.times_us, np.unwrap(self.poses[:, 2]))])
@@ -126,8 +124,8 @@ class Track:
         return None if pose is None else self.box.at(*pose)
 
     def speed(self, time_us: int) -> float:
-        """Finite-difference speed, one-sided at the ends of the track; 0 for a static track."""
-        if self.static or len(self.times_us) < 2:
+        """Finite-difference speed over 0.1 s, one-sided at the ends of the track."""
+        if self.times_us[-1] - self.times_us[0] < 100_000:
             return 0.0
         start = int(np.clip(time_us - 50_000, self.times_us[0], self.times_us[-1] - 100_000))
         before, after = self.pose(start), self.pose(start + 100_000)
@@ -170,7 +168,12 @@ class SceneScorer:
         self.recorded_xy = recorded_xy
         self.recorded_yaw = np.unwrap(recorded_yaw)
         self.recorded_path = LineString(recorded_xy)
-        self.recorded_arc = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(recorded_xy, axis=0), axis=1))]
+        steps_m = np.linalg.norm(np.diff(recorded_xy, axis=0), axis=1)
+        self.recorded_arc = np.r_[0.0, np.cumsum(steps_m)]
+        # Time the log spent moving (faster than STOPPED_MPS) up to each sample.
+        steps_s = np.diff(recorded_times_us) / 1e6
+        moving = steps_m > STOPPED_MPS * np.maximum(steps_s, 1e-6)
+        self.recorded_moving_s = np.r_[0.0, np.cumsum(np.where(moving, steps_s, 0.0))]
         # Where the recorded drive itself breaks a rule, for the human filter.
         self.recorded_rules = self._rule_steps(np.column_stack([recorded_xy, self.recorded_yaw]))
 
@@ -316,11 +319,13 @@ class SceneScorer:
         valid = float(np.clip((VALID_ZERO_M - distances.max()) / (VALID_ZERO_M - VALID_FULL_M), 0.0, 1.0))
         if valid == 0.0:
             first_violation.append(int(np.argmax(distances >= VALID_ZERO_M)))
-        # The log's own gain over the same 4 s, from when it passed the ego's place.
+        # The log's gain from the ego's place over the plan's horizon of the log's
+        # moving time: where the log waited (a light, a queue) is not counted, or a
+        # plan that waits there for good would match it.
         ego_arc = self._progress(start[:2])
-        passed_us = np.interp(ego_arc, self.recorded_arc, self.recorded_times_us)
-        recorded_gain = float(np.interp(passed_us + (times[-1] - t0_us), self.recorded_times_us,
-                                        self.recorded_arc)) - ego_arc
+        moving_s = np.interp(ego_arc, self.recorded_arc, self.recorded_moving_s)
+        target_s = moving_s + (times[-1] - t0_us) / 1e6
+        recorded_gain = float(np.interp(target_s, self.recorded_moving_s, self.recorded_arc)) - ego_arc
         plan_gain = self._progress(plan[-1, :2]) - ego_arc
         ep = 1.0 if recorded_gain < MIN_RECORDED_PROGRESS_M else float(np.clip(plan_gain / recorded_gain, 0.0, 1.0))
 
@@ -346,8 +351,17 @@ class SceneScorer:
         return float(self.recorded_path.distance(Point(xy)))
 
 
-def scene_scorer(artifact: Any, recorded: Any) -> SceneScorer:
-    """Build the scorer from an AlpaSim ``Artifact`` and the rollout's recorded ego ``Trajectory``."""
+MIN_TRAFFIC_DURATION_US = 3_000_000
+"""AlpaSim's ``simulation_config.min_traffic_duration_us``: shorter tracks are not simulated."""
+
+
+def scene_scorer(artifact: Any, recorded: Any, end_us: int) -> SceneScorer:
+    """Build the scorer from an AlpaSim ``Artifact`` and the rollout's recorded ego ``Trajectory``.
+
+    The objects are those the rollout simulated: AlpaSim clips the log's tracks
+    to the rollout, from the rig trajectory's start to ``end_us``, drops those
+    shorter than 3 s and hides them from the renders (``unbound_rollout.py``).
+    """
     from trajdata.maps.vec_map_elements import MapElementType
 
     elements = artifact.map.elements
@@ -360,10 +374,13 @@ def scene_scorer(artifact: Any, recorded: Any) -> SceneScorer:
         lanes.append(Lane(shapely.make_valid(polygon), lane.center.xy))
     road_edges = [edge.polyline.xy for edge in elements.get(MapElementType.ROAD_EDGE, {}).values()]
     tracks = []
-    for obj in artifact.traffic_objects.values():
+    simulated = artifact.traffic_objects.clip_trajectories(
+        artifact.rig.trajectory.time_range_us.start, end_us + 1, exclude_empty=True
+    ).filter_short_trajectories(MIN_TRAFFIC_DURATION_US)
+    for obj in simulated.values():
         times, xy, yaw = _poses(obj.trajectory)
         tracks.append(Track(Box(obj.aabb.x, obj.aabb.y), times, np.column_stack([xy, yaw]),
-                            obj.label_class not in STATIC_OBSTACLE_CLASSES, bool(obj.is_static)))
+                            obj.label_class not in STATIC_OBSTACLE_CLASSES))
     vehicle = artifact.rig.vehicle_config
     if vehicle is None:
         raise ValueError("the scene's rig has no vehicle config, so the ego box is unknown")
