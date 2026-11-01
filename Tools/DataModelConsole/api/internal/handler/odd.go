@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strings"
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
@@ -13,11 +12,6 @@ import (
 
 // maxODDConditions bounds one search; a scene carries about 50 ODD keys.
 const maxODDConditions = 16
-
-var (
-	oddKeyPattern   = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
-	oddValuePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_]*$`)
-)
 
 // ODDHandler serves the ODD scene search.
 type ODDHandler struct {
@@ -37,9 +31,7 @@ func parseODDConditions(raw []string) ([]model.ODDCondition, bool) {
 	conditions := make([]model.ODDCondition, 0, len(raw))
 	for _, term := range raw {
 		key, value, ok := strings.Cut(term, "=")
-		if !ok || len(key) > 128 || len(value) > 64 ||
-			!oddKeyPattern.MatchString(key) ||
-			!oddValuePattern.MatchString(value) {
+		if !ok || !service.ValidODDKey(key) || !service.ValidODDValue(value) {
 			return nil, false
 		}
 		conditions = append(conditions, model.ODDCondition{Key: key, Value: value})
