@@ -147,7 +147,8 @@ function SceneCard({
             <SceneTimeline lanes={scene.lanes} durationNs={scene.duration_ns} vocabulary={vocabulary} />
           ) : (
             <p className="text-xs text-slate-500">
-              No conditions, so no matched intervals. Open all labels to see what this scene carries.
+              The query has no conditions, or only “is not” ones, so there are no matched intervals
+              to draw. Open all labels to see what this scene carries.
             </p>
           )
         ) : all.error ? (
