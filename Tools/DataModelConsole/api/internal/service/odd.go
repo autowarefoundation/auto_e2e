@@ -100,8 +100,8 @@ type oddManifest struct {
 
 // oddInterval is one valid labelled interval, in absolute timestamps.
 type oddInterval struct {
-	values     []string
-	source     string
+	values   []string
+	source   string
 	cameraID string
 	// confidence stays float32 as stored, so a threshold compares exactly.
 	confidence float32
