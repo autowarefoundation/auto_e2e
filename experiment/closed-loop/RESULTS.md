@@ -90,10 +90,10 @@ loaded the scene's HD map and fed map context and route mask from here on.
 
 r1 ran the first version of `rl/grpo_step.py`: phase-1 reward
 `-(ADE + 0.5 FDE)`, plain SGD (lr 1e-4) on the log-likelihood, KL only in the
-low-frequency subspace, no trust region. Review found the SGD step scaled
-curvature about 100x over acceleration and the KL ignored high frequencies;
-both are fixed in the current code, so r1 documents the failure, not the
-current method.
+low-frequency subspace, no trust region. That SGD step scaled curvature
+about 100x over acceleration and the KL ignored high frequencies; both are
+fixed in the current code, so r1 documents the failure, not the current
+method.
 
 | Iteration | Collision | Off-road (first) | Max dist to GT traj. [m] | Driven / recorded [m] |
 | :--- | :--- | :--- | ---: | ---: |
@@ -121,11 +121,10 @@ the whole 20 s recording.
 - The phase-1 reward never sees other vehicles; iterations 1 and 3 hit one
   front-first. The current reward (`rl/reward.py`) gates collisions.
 
-## 2026-11-01: review rounds and the loop across iterations (r2)
+## 2026-11-01: changes after r1, and the loop across iterations (r2)
 
-Seven adversarial review rounds (Claude Code and Codex, each round on the
-whole diff with the same neutral prompt) changed the reward and the update
-between r1 and r3. The fixes that changed results:
+Between r1 and r3 the reward, the update and the driver input changed. The
+changes that changed results:
 
 - Reward: NAVSIM's collision types and TTC rule, AlpaSim's offroad rule,
   EPDMS's human filter matched by place, EP from the ego's place over the
@@ -159,7 +158,7 @@ was stopped in its third step once that was shown:
 ## 2026-11-01: GRPO with the final reward and update (r3)
 
 Same setup as r1 (scene `clipgt-01d503d4`, 110 steps, one rollout per
-iteration), with the code after the seventh review round.
+iteration), with the final code of this branch.
 
 | Iteration | Collision | Off-road (first) | Max dist to GT traj. [m] | Driven [m] |
 | :--- | :--- | :--- | ---: | ---: |
