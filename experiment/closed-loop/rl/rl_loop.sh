@@ -37,6 +37,7 @@ checkpoint="${REFERENCE}"
 for ((iteration = 0; iteration <= ITERATIONS; iteration++)); do
     run="${TAG}-iter-${iteration}"
     RUN_NAME="${run}" SCENES="${SCENE}" CHECKPOINT="/mnt/drivers/${checkpoint}" \
+        CHECKPOINT_SHA256="$(sha256sum "${DRIVERS}/${checkpoint}" | cut -d' ' -f1)" \
         bash "${CLOSED_LOOP}/run_scenes.sh" "runtime.simulation_config.n_sim_steps=${SIM_STEPS}"
     (cd "${ALPASIM_ROOT}" && uv run --no-sync python "${CLOSED_LOOP}/summarize_run.py" "${RUNS_ROOT}/${run}")
     ((iteration == ITERATIONS)) && break
@@ -50,7 +51,7 @@ for ((iteration = 0; iteration <= ITERATIONS; iteration++)); do
         -v "${REPO_ROOT}:/src:ro" \
         -e AUTOE2E_MODEL_ROOT=/src/Model \
         -e PYTHONPATH=/src/Model/plugins/alpasim_driver:/src/Model/plugins/alpasim_driver/tools \
-        "${ALPASIM_BASE_IMAGE}" bash -lc "cd /repo && uv run python \
+        "${ALPASIM_BASE_IMAGE}" bash -lc "cd /repo && uv run --no-sync python \
             /src/experiment/closed-loop/rl/grpo_step.py /rundir /mnt/drivers/${checkpoint} \
             --reference /mnt/drivers/${REFERENCE} --output /mnt/drivers/${next}" \
         | tee "${RUNS_ROOT}/${run}/grpo_step.log"
