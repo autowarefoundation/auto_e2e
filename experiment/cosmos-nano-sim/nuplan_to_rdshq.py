@@ -48,7 +48,6 @@ CAMERAS = {
 OBJECT_TYPES = {"vehicle": "Car", "bicycle": "Cyclist", "pedestrian": "Pedestrian", "generic_object": "Others"}
 FPS = 30
 MAP_MARGIN_M = 120.0
-RAMP_S = 2.0
 
 
 class _Values(list):
@@ -143,11 +142,11 @@ def pick_start(db: sqlite3.Connection, duration_s: float) -> int:
     raise ValueError("no straight window of 5 m/s or more in this log")
 
 
-def shifted(vehicle_to_world: list[np.ndarray], lateral_m: float, yaw_deg: float) -> list[np.ndarray]:
-    """Displace the ego to its left by lateral_m and rotate it by yaw_deg, ramping in over RAMP_S."""
+def shifted(vehicle_to_world: list[np.ndarray], lateral_m: float, yaw_deg: float, ramp_s: float) -> list[np.ndarray]:
+    """Displace the ego to its left by lateral_m and rotate it by yaw_deg, ramping in over ramp_s."""
     out = []
     for i, pose in enumerate(vehicle_to_world):
-        s = np.clip(i / FPS / RAMP_S, 0.0, 1.0)
+        s = np.clip(i / FPS / ramp_s, 0.0, 1.0)
         s = s * s * (3 - 2 * s)
         out.append(pose @ rigid(rot_z(np.radians(yaw_deg * s)), [0.0, lateral_m * s, 0.0]))
     return out
@@ -244,6 +243,7 @@ def main() -> None:
     p.add_argument("--log", default="2021.05.12.22.28.35_veh-35_00620_01164")
     p.add_argument("--start-us", type=int, help="window start (image timestamp clock); default picks a straight window")
     p.add_argument("--frames", type=int, default=121, help="30 Hz frames, 4k+1")
+    p.add_argument("--ramp-s", type=float, default=2.0, help="seconds over which each shift ramps in")
     p.add_argument("--shifts", default="0:0,0.5:0,1.0:0,1.0:3",
                    help="comma-separated lateral_m:yaw_deg pairs; positive is to the ego's left")
     args = p.parse_args()
@@ -296,7 +296,7 @@ def main() -> None:
         # L/R: to the ego's left/right; the log name keeps its own characters.
         suffix = f"lat{lateral_m:+.1f}_yaw{yaw_deg:+.1f}".replace(".", "p").replace("+", "L").replace("-", "R")
         name = f"{clip}_{suffix}"
-        poses = shifted(vehicle_to_world, lateral_m, yaw_deg)
+        poses = shifted(vehicle_to_world, lateral_m, yaw_deg, args.ramp_s)
         tar_write(root / "rds-hq/pose" / f"{name}.tar", {
             f"{name}.{i:06d}.pose.{key}.npy": npy(pose @ c2v)
             for i, pose in enumerate(poses) for key, c2v in camera_to_vehicle.items()})
@@ -334,7 +334,7 @@ def main() -> None:
             (root / "rgb" / f"{key}.jpg").write_bytes(first.read_bytes())
 
     meta = {"log": args.log, "location": location, "start_us": int(t0), "frames": args.frames, "fps": FPS,
-            "ramp_s": RAMP_S, "ground_z": ground_z, "cameras": CAMERAS, "variants": variants,
+            "ramp_s": args.ramp_s, "ground_z": ground_z, "cameras": CAMERAS, "variants": variants,
             "ftheta_fit_max_error_px": ftheta_error_px,
             "first_rgb_frame": {k: sorted((root / "gt" / k).glob("*.jpg"))[0].stem for k in CAMERAS.values()},
             "map_label_counts": {k: len(v) for k, v in layers.items()},
