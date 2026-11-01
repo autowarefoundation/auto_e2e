@@ -120,3 +120,38 @@ the whole 20 s recording.
   iteration they cannot be separated from that drift.
 - The phase-1 reward never sees other vehicles; iterations 1 and 3 hit one
   front-first. The current reward (`rl/reward.py`) gates collisions.
+
+## 2026-11-01: review rounds and the loop across iterations (r2)
+
+Seven adversarial review rounds (Claude Code and Codex, each round on the
+whole diff with the same neutral prompt) changed the reward and the update
+between r1 and r3. The fixes that changed results:
+
+- Reward: NAVSIM's collision types and TTC rule, AlpaSim's offroad rule,
+  EPDMS's human filter matched by place, EP from the ego's place over the
+  log's moving time, only the objects AlpaSim simulated, nuPlan's comfort
+  filtering, a full 4 s horizon.
+- Update: Dr. GRPO advantages, gated plans scored by their safe fraction, a
+  line search that requires the surrogate to fall and bounds every state's
+  plan change, a fresh seed per step, a replay check on position and heading.
+- Driver input: a route corridor along the route's direction, the travelled
+  path behind the ego and unique successors ahead, lanes without edges
+  widened as in AlpaSim.
+
+r2 ran the loop with the round-4 reward to check it across iterations, and
+was stopped in its third step once that was shown:
+
+| GRPO step | Decisions | Replay error [m] | Anchor | Step scale | Surrogate before / after |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| 1 (imitation rollout) | 37 | 1.3e-4 | 0 | 1/256 | 0 / -0.0133 |
+| 2 (rollout of the step-1 planner) | 37 | 3.4e-4 | 0.22 | 1/1024 | 0.0047 / -0.0015 |
+
+- The driver ran the RL checkpoint, and the replay of that rollout matched it
+  to 0.3 mm, so checkpoints pass between steps and updates stay on-policy.
+- The anchor rose from 0 to 0.22 after one step and the line search shrank
+  the next step to stay in the trust region; r1's unbounded steps had reached
+  71 and then 1852.
+- A GRPO step takes about 8 minutes on the L40S for 37 decisions (scoring
+  9 plans per decision on the CPU dominates) and peaks at 4.3 GB of GPU memory.
+- The replay check also refused a rollout recorded before a driver-input
+  change (0.095 m at decision 5), which is the case it exists for.
