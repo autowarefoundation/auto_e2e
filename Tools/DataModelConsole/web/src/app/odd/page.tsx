@@ -96,7 +96,8 @@ function SceneCard({
   const [expanded, setExpanded] = useState(false);
   const all = useApi(
     () => getODDScene(response.dataset, response.version, scene.scene_uid),
-    [response.dataset, response.version, scene.scene_uid],
+    // The manifest digest changes when the LabelSet behind the version does.
+    [response.dataset, response.version, response.manifest_sha256, scene.scene_uid],
     expanded,
   );
   const playerHref = `/scenes/${encodeURIComponent(response.dataset)}/${encodeURIComponent(scene.shard)}/0?version=${encodeURIComponent(response.version)}`;
