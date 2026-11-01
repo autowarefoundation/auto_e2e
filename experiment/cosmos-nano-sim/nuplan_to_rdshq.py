@@ -280,7 +280,9 @@ def main() -> None:
     variants = []
     for spec in args.shifts.split(","):
         lateral_m, yaw_deg = (float(v) for v in spec.split(":"))
-        name = f"{clip}_lat{lateral_m:+.1f}_yaw{yaw_deg:+.1f}".replace(".", "p").replace("+", "L").replace("-", "R")
+        # L/R: to the ego's left/right; the log name keeps its own characters.
+        suffix = f"lat{lateral_m:+.1f}_yaw{yaw_deg:+.1f}".replace(".", "p").replace("+", "L").replace("-", "R")
+        name = f"{clip}_{suffix}"
         poses = shifted(vehicle_to_world, lateral_m, yaw_deg)
         tar_write(root / "rds-hq/pose" / f"{name}.tar", {
             f"{name}.{i:06d}.pose.{key}.npy": npy(pose @ c2v)
