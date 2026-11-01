@@ -99,7 +99,7 @@ function ConditionEditor({
           value={condition.key}
           onChange={(e) => onChange(emptyCondition(e.target.value))}
           aria-label={`Condition ${index} label`}
-          className="h-8 min-w-0 max-w-full flex-1 rounded-md border border-slate-700 bg-slate-900 px-2 text-sm text-slate-100 sm:max-w-xs"
+          className="h-8 w-full min-w-0 rounded-md border border-slate-700 bg-slate-900 px-2 text-sm text-slate-100 sm:w-auto sm:max-w-xs sm:flex-1"
         >
           <option value="">Choose a label…</option>
           {namespaces.map((namespace) => (
