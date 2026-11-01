@@ -47,14 +47,19 @@ func newODDTestService() (*S3Service, *fakePublicationS3) {
 }
 
 // addTestPublication writes a valid two-scene kitscenes publication at
-// version. sampleCounts gives the samples of partitions scene-a and scene-b.
+// version. sampleCounts gives the samples of partitions scene-a and scene-b;
+// partitionIDs, when given, renames those partitions without renaming shards.
 func addTestPublication(
 	t *testing.T,
 	client *fakePublicationS3,
 	version string,
 	sampleCounts [2]int,
+	partitionIDs ...string,
 ) string {
 	t.Helper()
+	if len(partitionIDs) == 0 {
+		partitionIDs = []string{"scene-a", "scene-b"}
+	}
 	rigBody := []byte(`{"dataset":"kitscenes","geometry_type":"pinhole"}`)
 	rig := map[string]any{
 		"key":    fmt.Sprintf("kitscenes/%s/rig/%s.json", version, sha256Hex(rigBody)),
@@ -75,8 +80,8 @@ func addTestPublication(
 		"has_map":         true,
 		"has_world_model": false,
 		"partitions": []any{
-			map[string]any{"partition_id": "scene-a", "sample_count": sampleCounts[0]},
-			map[string]any{"partition_id": "scene-b", "sample_count": sampleCounts[1]},
+			map[string]any{"partition_id": partitionIDs[0], "sample_count": sampleCounts[0]},
+			map[string]any{"partition_id": partitionIDs[1], "sample_count": sampleCounts[1]},
 		},
 		"shard_entries": []any{},
 	}
@@ -354,6 +359,13 @@ func TestSearchODDScenesReportsNoLabels(t *testing.T) {
 		"same total, different samples per partition": func(t *testing.T, client *fakePublicationS3) {
 			labelSHA := addTestPublication(t, client, "v3.0", [2]int{10, 5})
 			addTestPublication(t, client, "v3.7", [2]int{5, 10})
+			addTestLabelSet(t, client, testLabelSet{
+				version: "v3.0", publicationSHA: labelSHA, scenes: testODDScenes(),
+			})
+		},
+		"same shards and counts, different partition ids": func(t *testing.T, client *fakePublicationS3) {
+			labelSHA := addTestPublication(t, client, "v3.0", [2]int{10, 5})
+			addTestPublication(t, client, "v3.7", [2]int{10, 5}, "scene-a", "scene-c")
 			addTestLabelSet(t, client, testLabelSet{
 				version: "v3.0", publicationSHA: labelSHA, scenes: testODDScenes(),
 			})
