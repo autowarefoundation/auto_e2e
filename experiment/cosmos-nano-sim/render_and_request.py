@@ -62,7 +62,7 @@ def main() -> None:
             "autoregressive": True, "wsm": {}, "condition_frame_indexes_vision": [0], "num_conditional_frames": 1,
             "prompt": "", "multiview": {"load_caption_from_data": True, "use_first_chunk_only": True,
                                         "condition_video_as_image": True, "views": views}})
-    out = args.scene / "requests.jsonl"
+    out = args.scene / f"requests_{args.resolution}p.jsonl"
     out.write_text("".join(json.dumps(r) + "\n" for r in requests))
     print(out, len(requests), "requests")
 
