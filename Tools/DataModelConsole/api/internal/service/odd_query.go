@@ -92,20 +92,29 @@ func (s *S3Service) SearchODDScenes(
 	if err != nil {
 		return nil, err
 	}
-	matched := make([]model.ODDScene, 0)
+	compiled := compileODDQuery(query)
+	type hit struct {
+		scene oddScene
+		lanes []oddLane
+	}
+	hits := make([]hit, 0)
 	matchedScenes := make([]oddScene, 0)
 	for _, scene := range labels.scenes {
-		lanes, ok := matchODDQuery(scene, query)
+		lanes, ok := matchODDQuery(scene, compiled)
 		if !ok {
 			continue
 		}
 		matchedScenes = append(matchedScenes, scene)
-		matched = append(matched, oddSceneResult(scene, lanes))
+		hits = append(hits, hit{scene, lanes})
 	}
-	page, pageInfo := paginate(matched, limit, offset, len(matched))
+	// Lanes are converted to the response shape for one page only.
+	pageHits, pageInfo := paginate(hits, limit, offset, len(hits))
+	page := make([]model.ODDScene, len(pageHits))
+	for i, h := range pageHits {
+		page[i] = oddSceneResult(h.scene, h.lanes)
+	}
 	return &model.ODDSearchResponse{
 		ODDLabelSetInfo: info,
-		Query:           query,
 		Vocabulary:      labels.vocabulary,
 		Facets:          oddFacets(matchedScenes),
 		Scenes:          page,
@@ -175,10 +184,58 @@ type oddLane struct {
 	intervals []oddInterval
 }
 
+// oddCondition is a validated query condition with its values and sources
+// as sets, so matching an interval is a few map lookups.
+type oddCondition struct {
+	key           string
+	values        map[string]bool
+	sources       map[string]bool
+	not           bool
+	minDurationNS int64
+	minConfidence float32
+}
+
+type oddGroup struct {
+	and        bool
+	conditions []oddCondition
+}
+
+type oddCompiledQuery struct {
+	and    bool
+	groups []oddGroup
+}
+
+func setOf(items []string) map[string]bool {
+	out := make(map[string]bool, len(items))
+	for _, item := range items {
+		out[item] = true
+	}
+	return out
+}
+
+func compileODDQuery(query model.ODDQuery) oddCompiledQuery {
+	compiled := oddCompiledQuery{and: query.Op == "and"}
+	for _, group := range query.Groups {
+		g := oddGroup{and: group.Op == "and"}
+		for _, c := range group.Conditions {
+			g.conditions = append(g.conditions, oddCondition{
+				key:           c.Key,
+				values:        setOf(c.Values),
+				sources:       setOf(c.Sources),
+				not:           c.Not,
+				minDurationNS: int64(c.MinDurationS * 1e9),
+				minConfidence: float32(c.MinConfidence),
+			})
+		}
+		compiled.groups = append(compiled.groups, g)
+	}
+	return compiled
+}
+
 // matchODDQuery reports whether the scene satisfies the query and, if so, the
 // intervals of the satisfied positive conditions, one lane per key in query
 // order. A NOT condition contributes no intervals.
-func matchODDQuery(scene oddScene, query model.ODDQuery) ([]oddLane, bool) {
+func matchODDQuery(scene oddScene, query oddCompiledQuery) ([]oddLane, bool) {
 	order := make([]string, 0)
 	hits := make(map[string]map[int]bool)
 	collect := func(key string, indexes []int) {
@@ -190,21 +247,21 @@ func matchODDQuery(scene oddScene, query model.ODDQuery) ([]oddLane, bool) {
 			hits[key][index] = true
 		}
 	}
-	satisfied := query.Op == "and"
-	for _, group := range query.Groups {
-		groupHolds := group.Op == "and"
+	satisfied := query.and
+	for _, group := range query.groups {
+		groupHolds := group.and
 		type hit struct {
 			key     string
 			indexes []int
 		}
-		groupHits := make([]hit, 0, len(group.Conditions))
-		for _, condition := range group.Conditions {
-			indexes := matchingODDIntervals(scene.labels[condition.Key], condition)
-			holds := (len(indexes) > 0) != condition.Not
-			if holds && !condition.Not {
-				groupHits = append(groupHits, hit{condition.Key, indexes})
+		groupHits := make([]hit, 0, len(group.conditions))
+		for _, condition := range group.conditions {
+			indexes := matchingODDIntervals(scene.labels[condition.key], condition)
+			holds := (len(indexes) > 0) != condition.not
+			if holds && !condition.not {
+				groupHits = append(groupHits, hit{condition.key, indexes})
 			}
-			if group.Op == "and" {
+			if group.and {
 				groupHolds = groupHolds && holds
 			} else {
 				groupHolds = groupHolds || holds
@@ -215,13 +272,13 @@ func matchODDQuery(scene oddScene, query model.ODDQuery) ([]oddLane, bool) {
 				collect(h.key, h.indexes)
 			}
 		}
-		if query.Op == "and" {
+		if query.and {
 			satisfied = satisfied && groupHolds
 		} else {
 			satisfied = satisfied || groupHolds
 		}
 	}
-	if len(query.Groups) == 0 {
+	if len(query.groups) == 0 {
 		satisfied = true
 	}
 	if !satisfied {
@@ -243,19 +300,14 @@ func matchODDQuery(scene oddScene, query model.ODDQuery) ([]oddLane, bool) {
 
 // matchingODDIntervals returns the indexes of the intervals that satisfy the
 // condition, ignoring Not.
-func matchingODDIntervals(
-	intervals []oddInterval,
-	condition model.ODDQueryCondition,
-) []int {
-	minDuration := int64(condition.MinDurationS * 1e9)
+func matchingODDIntervals(intervals []oddInterval, condition oddCondition) []int {
 	out := make([]int, 0)
 	for index, interval := range intervals {
-		if interval.end-interval.start < minDuration ||
-			interval.confidence < condition.MinConfidence ||
-			(len(condition.Sources) > 0 &&
-				!slices.Contains(condition.Sources, interval.source)) ||
+		if interval.end-interval.start < condition.minDurationNS ||
+			interval.confidence < condition.minConfidence ||
+			(len(condition.sources) > 0 && !condition.sources[interval.source]) ||
 			!slices.ContainsFunc(interval.values, func(value string) bool {
-				return slices.Contains(condition.Values, value)
+				return condition.values[value]
 			}) {
 			continue
 		}
@@ -280,7 +332,7 @@ func oddSceneResult(scene oddScene, lanes []oddLane) model.ODDScene {
 				EndNS:      interval.end - scene.StartTimestampNS,
 				Values:     interval.values,
 				Source:     interval.source,
-				Confidence: interval.confidence,
+				Confidence: float64(interval.confidence),
 				CameraID:   interval.cameraID,
 			}
 		}
