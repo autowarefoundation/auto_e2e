@@ -125,6 +125,11 @@ const SLOTS = [
 ];
 export const OTHER_COLOR = "#64748b";
 
+// groupAccent marks query group i with the i-th categorical slot.
+export function groupAccent(i: number): string {
+  return SLOTS[i % SLOTS.length];
+}
+
 // valueColor follows the value, not its rank in a result: the slot is the
 // value's position in the key's vocabulary over every labelled scene, so a
 // filter never repaints a value. Past eight values a key folds to grey.
