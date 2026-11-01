@@ -26,7 +26,8 @@ Moving the ego therefore means rendering new WSM controls from a moved trajector
 | 4 | `generate.sh` | Sim-Auto generation for a request file, with peak GPU memory and wall time |
 | 5 | `compare.py` | Comparison grids, WSM/RGB blends and `metrics.json` |
 
-`run.sh` runs steps 1 to 5. `sample_run.sh <views> <480|720> <frames>` runs NVIDIA's
+`run.sh` runs steps 1 to 5. `run_drift.sh` then generates a 20 s rollout with a 3 m drift for the
+closed-loop check, and `make_videos.sh` builds the side-by-side videos attached to the PR. `sample_run.sh <views> <480|720> <frames>` runs NVIDIA's
 shared sample with fewer views or frames, to check the GPU and time the model.
 
 ### Data
