@@ -51,6 +51,23 @@ MAP_MARGIN_M = 120.0
 RAMP_S = 2.0
 
 
+class _Values(list):
+    """Stand-in for the devkit's list subclasses; the pickle fills it with APPENDS."""
+
+
+class _NuPlanTypes(pickle.Unpickler):
+    """Camera calibration is pickled as nuplan-devkit list subclasses; read them as plain lists without the devkit."""
+
+    def find_class(self, module: str, name: str):
+        if module == "nuplan.database.common.data_types":
+            return _Values
+        return super().find_class(module, name)
+
+
+def unpickle(blob: bytes):
+    return _NuPlanTypes(io.BytesIO(blob)).load()
+
+
 def open_archive(fs: s3fs.S3FileSystem, key: str) -> zipfile.ZipFile:
     name, size, etag = ARCHIVES[key]
     info = fs.info(BUCKET + name)
@@ -252,9 +269,11 @@ def main() -> None:
     camera_to_vehicle, intrinsics, undistort = {}, {}, {}
     for channel, key in CAMERAS.items():
         _, trans, rot, k, dist, w, h = cams[channel]
-        k, dist = np.array(pickle.loads(k)), np.array(pickle.loads(dist), dtype=np.float64).reshape(-1)
+        k = np.asarray(unpickle(k), dtype=np.float64).reshape(3, 3)
+        dist = np.asarray(unpickle(dist), dtype=np.float64).reshape(-1)
         new_k, _ = cv2.getOptimalNewCameraMatrix(k, dist, (w, h), 0.0, (w, h))  # same rectification as the pack
-        camera_to_vehicle[key] = rigid(quat_to_rot(*pickle.loads(rot)), pickle.loads(trans))
+        rot = np.asarray(unpickle(rot), dtype=np.float64).reshape(4)  # w, x, y, z
+        camera_to_vehicle[key] = rigid(quat_to_rot(*rot), np.asarray(unpickle(trans), dtype=np.float64).reshape(3))
         intrinsics[key] = [new_k[0, 0], new_k[1, 1], new_k[0, 2], new_k[1, 2], w, h]
         undistort[key] = (k, dist, new_k)
 
