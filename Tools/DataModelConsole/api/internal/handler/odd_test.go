@@ -34,6 +34,7 @@ func TestParseODDQuery(t *testing.T) {
 		"not JSON":       `odd.road.context=urban`,
 		"unknown field":  `{"op":"and","groups":[],"limit":5}`,
 		"two objects":    `{"op":"and","groups":[]}{"op":"and","groups":[]}`,
+		"trailing brace": `{"op":"and","groups":[]}}`,
 		"invalid query":  `{"op":"and","groups":[{"op":"and","conditions":[]}]}`,
 		"too long":       `{"op":"and","groups":[],"x":"` + strings.Repeat("a", maxODDQueryBytes) + `"}`,
 		"wrong type":     `{"op":"and","groups":{}}`,
