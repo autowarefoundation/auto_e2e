@@ -53,7 +53,7 @@ for ((iteration = 0; iteration <= ITERATIONS; iteration++)); do
         -e PYTHONPATH=/src/Model/plugins/alpasim_driver:/src/Model/plugins/alpasim_driver/tools \
         "${ALPASIM_BASE_IMAGE}" bash -lc "cd /repo && uv run --no-sync python \
             /src/experiment/closed-loop/rl/grpo_step.py /rundir /mnt/drivers/${checkpoint} \
-            --reference /mnt/drivers/${REFERENCE} --output /mnt/drivers/${next}" \
+            --reference /mnt/drivers/${REFERENCE} --output /mnt/drivers/${next} --seed ${iteration}" \
         | tee "${RUNS_ROOT}/${run}/grpo_step.log"
     # Keep the newest planner only; each step's JSON stays next to it.
     [[ "${checkpoint}" == "${REFERENCE}" ]] || rm -f "${DRIVERS}/${checkpoint}"
