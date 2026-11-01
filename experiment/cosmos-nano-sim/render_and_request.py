@@ -52,7 +52,7 @@ def main() -> None:
     for variant in meta["variants"]:
         views = []
         for key in keys:
-            (control,) = wsm_root.rglob(f"*{variant['name']}*{key}*.mp4")
+            control = wsm_root / "world_scenario" / f"ftheta_{key}" / f"{variant['name']}_0.mp4"  # renderer layout, chunk 0
             views.append({"camera_key": key, "control_path": str(control.relative_to(args.scene)),
                           "vision_path": f"rgb/{key}.mp4", "caption_path": f"captions/{key}.json"})
         requests.append({
