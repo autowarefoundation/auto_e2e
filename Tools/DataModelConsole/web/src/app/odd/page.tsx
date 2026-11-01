@@ -30,6 +30,7 @@ import { useApi } from "@/hooks/use-api";
 import { ApiError, getODDScene, listDatasets, searchODDScenes } from "@/lib/api";
 import { friendlyDataset } from "@/lib/format";
 import {
+  EMPTY_QUERY,
   MAX_CONDITIONS,
   MAX_GROUPS,
   cleanQuery,
@@ -332,7 +333,8 @@ function ODDPageInner() {
     if (sameScenes(cleaned, appliedKey, applied)) return;
     const timer = setTimeout(() => {
       if (switchingTo.current !== null) return;
-      selfApplied.current = JSON.stringify(cleaned);
+      // Record the query as the URL will read back: no q means the default.
+      selfApplied.current = JSON.stringify(cleaned.groups.length ? cleaned : EMPTY_QUERY);
       navigateRef.current({ query: cleaned }, false);
     }, APPLY_DELAY_MS);
     return () => clearTimeout(timer);
