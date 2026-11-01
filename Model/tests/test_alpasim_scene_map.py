@@ -93,7 +93,7 @@ def test_map_context_rotates_with_the_ego_heading(scene_map: SceneMap) -> None:
 
 def test_route_corridor_covers_the_roadblock_and_destination(scene_map: SceneMap) -> None:
     route = np.stack([np.arange(80.0, 160.0, 4.0), np.zeros(20), np.zeros(20)], axis=1)
-    assert scene_map.roadblock_lanes(route) == {"right", "left"}
+    assert scene_map.roadblock_lanes(route, np.array([80.0, 0.0])) == {"right", "left"}
     mask, valid = scene_map.route_mask(route, (80.0, 0.0, 0.0))
     assert valid and mask.shape == (2, 450, 300)
     assert mask[0][_pixel(10.0, 0.0)] == 1.0 and mask[0][_pixel(10.0, 3.5)] == 1.0
@@ -174,6 +174,40 @@ def test_route_corridor_keeps_one_carriageway() -> None:
     vector_map.compute_search_indices()
     two_way = SceneMap.from_vector_map(vector_map, destination_xy=np.array([150.0, 0.0, 0.0]))
     route = np.stack([np.arange(80.0, 160.0, 4.0), np.zeros(20), np.zeros(20)], axis=1)
-    assert two_way.roadblock_lanes(route) == {"east"}
+    assert two_way.roadblock_lanes(route, np.array([80.0, 0.0])) == {"east"}
     # Route points far off the map add no lane.
-    assert two_way.roadblock_lanes(route + [0.0, 50.0, 0.0]) == set()
+    assert two_way.roadblock_lanes(route + [0.0, 50.0, 0.0], np.array([80.0, 50.0])) == set()
+
+
+def _segment(lane_id: str, x0: float, x1: float, y: float = 0.0, **links) -> RoadLane:
+    return RoadLane(lane_id, _line(y, x0, x1), left_edge=_line(y + 1.75, x0, x1),
+                    right_edge=_line(y - 1.75, x0, x1), **links)
+
+
+def test_route_corridor_covers_the_travelled_lanes_and_a_unique_continuation() -> None:
+    """Behind: only the lanes the ego drove, not a side road merging in. Ahead: the
+    route's lane, then its only successor, up to 120 m from the ego."""
+    vector_map = VectorMap(map_id="test:chain")
+    vector_map.add_map_element(_segment("travelled", -100.0, 60.0, next_lanes={"route"}))
+    vector_map.add_map_element(_segment("side", -100.0, 60.0, y=40.0, next_lanes={"route"}))
+    vector_map.add_map_element(
+        _segment("route", 60.0, 140.0, prev_lanes={"travelled", "side"}, next_lanes={"next"})
+    )
+    vector_map.add_map_element(_segment("next", 140.0, 250.0, prev_lanes={"route"}, next_lanes={"far"}))
+    vector_map.add_map_element(_segment("far", 250.0, 400.0, prev_lanes={"next"}))
+    vector_map.__post_init__()
+    vector_map.compute_search_indices()
+    chain = SceneMap.from_vector_map(vector_map, destination_xy=np.array([390.0, 0.0, 0.0]))
+    behind = np.stack([np.arange(24.0, 80.0, 4.0), np.zeros(14), np.zeros(14)], axis=1)
+    ahead = np.stack([np.arange(80.0, 136.0, 4.0), np.zeros(14), np.zeros(14)], axis=1)
+    lanes = chain.roadblock_lanes(np.vstack([behind, ahead]), np.array([80.0, 0.0]))
+    assert lanes == {"travelled", "route", "next"}  # "far" starts 170 m ahead of the ego
+
+
+def test_travelled_path_reaches_60_m_back() -> None:
+    from alpasim_autoe2e.parser import travelled_path
+
+    poses = [_pose(t, 10.0 * t / 1e6, 0.0, 0.0) for t in range(0, 10_000_001, 100_000)]
+    path = travelled_path(pose_trajectory(poses), 10_000_000)
+    assert path[-1, 0] < 100.0 and path[0, 0] == pytest.approx(40.0, abs=2.5)
+    assert np.all(np.diff(path[:, 0]) >= 4.0 - 1e-6)
