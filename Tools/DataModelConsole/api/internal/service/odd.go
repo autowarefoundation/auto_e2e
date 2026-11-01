@@ -531,8 +531,9 @@ func (labels *oddLabelSet) decodeObservations(body []byte, rowCount int64) error
 	}
 	for i := range labels.scenes {
 		for _, intervals := range labels.scenes[i].labels {
-			// Camera breaks start ties so per-camera rows keep one order.
-			sort.Slice(intervals, func(a, b int) bool {
+			// Camera breaks start ties so per-camera rows keep one order; the
+			// stable sort keeps table order for any remaining ties.
+			sort.SliceStable(intervals, func(a, b int) bool {
 				if intervals[a].start != intervals[b].start {
 					return intervals[a].start < intervals[b].start
 				}
