@@ -117,7 +117,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1.0, help="largest step tried along the gradient")
     parser.add_argument("--trust-region", type=float, default=1.0,
                         help="largest plan_distance between new and old mean plans on any scored state")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=0, help="exploration noise; vary it between steps")
     opts = parser.parse_args()
 
     driver = AutoE2EDriver(str(opts.checkpoint), NUPLAN_CAMERAS, device="cuda")
@@ -145,7 +145,8 @@ def main() -> None:
         artifact = find_artifact(SCENE_ROOT, log.scene_id)
         if artifact is None:
             raise SystemExit(f"no USDZ for scene {log.scene_id!r} under {SCENE_ROOT}")
-        scorer = scene_scorer(artifact, recorded)
+        # The rollout's last ego pose: AlpaSim clips the objects to the rollout.
+        scorer = scene_scorer(artifact, recorded, int(log.poses[-1].timestamp_us))
         for index, now_us in enumerate(log.requests):
             if index >= len(logged_plans):
                 break  # the rollout ended before this request was answered
