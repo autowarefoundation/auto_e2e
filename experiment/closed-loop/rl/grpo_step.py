@@ -1,13 +1,19 @@
 """One GRPO update of AutoE2E's planner from the closed-loop rollouts of one run.
 
 For every AutoE2E decision of every ``rollout.asl`` under ``run_dir``, until
-the ego first leaves the renderer's valid region (the phase-1 bound), this
-rebuilds the driver's inputs from the log (``replay_driver.py``), runs the
-frozen encoders once and keeps what the planner received. It then samples a
-group of plans around the planner's mean (``grpo.py``), scores each against
-the recorded drive with the phase-1 reward and takes one SGD step on the
-planner. The states are those the current policy visited in closed loop, so
-the update is on-policy even though AlpaSim executed the mean plan.
+the ego first leaves the renderer's valid region (3 m from the recording),
+this rebuilds the driver's inputs from the log (``replay_driver.py``), runs
+the frozen encoders once and keeps what the planner received. It then samples
+a group of plans around the planner's mean (``grpo.py``) and scores each with
+the gated driving reward (``reward.py``). Plans a safety gate rejects get
+advantage -1, so a group in which every plan fails still pushes away from it
+(DiffusionDriveV2's truncated advantage). The states are those the current
+policy visited in closed loop, so the update is on-policy even though AlpaSim
+executed the mean plan; the replayed mean must reproduce the executed plan.
+
+The step on the planner is the natural-gradient direction, shortened until
+the new mean plans stay within ``--trust-region`` of the old ones on the
+scored states (backtracking, as in TRPO).
 
 Run inside the AlpaSim image with a GPU (``rl_loop.sh`` does):
 
@@ -31,15 +37,18 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 
-from grpo import group_advantages, grpo_loss, low_frequency_basis, sample_plans  # noqa: E402
+from grpo import group_advantages, grpo_loss, low_frequency_basis, plan_distance, sample_plans  # noqa: E402
 from replay_driver import NUPLAN_CAMERAS, prediction_input, read_log  # noqa: E402
+from reward import scene_scorer  # noqa: E402
 from score_rollout import read_rollout, se3, to_trajectory  # noqa: E402
 
 from alpasim_autoe2e.plugin import AutoE2EDriver  # noqa: E402
-from alpasim_autoe2e.rewards import GroundTruthDeviationReward  # noqa: E402
+from alpasim_autoe2e.scene_map import SCENE_ROOT, find_artifact  # noqa: E402
 from training.losses.control_rollout import integrate_controls_torch  # noqa: E402
 
-WAYPOINT_STEP_US = 100_000
+RENDERER_BOUND_M = 3.0
+MAX_REPLAY_ERROR_M = 0.05
+STEPS = 64
 
 
 class PlannerInputs:
@@ -54,15 +63,6 @@ class PlannerInputs:
         self.args, self.kwargs = args, kwargs
 
 
-def recorded_in_rig(recorded, pose_t0_se3: np.ndarray, t0_us: int, steps: int) -> tuple[np.ndarray, float]:
-    """Recorded positions at the plan's timestamps and the ego's offset from the recording at t0."""
-    rig_from_local = np.linalg.inv(pose_t0_se3)
-    times = [t0_us + WAYPOINT_STEP_US * k for k in range(1, steps + 1)]
-    xy = [(rig_from_local @ se3(recorded, t))[:2, 3] for t in times if t in recorded.time_range_us]
-    deviation = float(np.linalg.norm((rig_from_local @ se3(recorded, t0_us))[:2, 3]))
-    return np.array(xy).reshape(-1, 2), deviation
-
-
 def logged_plan_in_rig(poses: list) -> np.ndarray:
     """The plan the driver returned, in the rig frame at its anchor (as ``score_rollout``)."""
     plan = to_trajectory(poses)
@@ -70,20 +70,29 @@ def logged_plan_in_rig(poses: list) -> np.ndarray:
     return np.array([(rig_from_local @ se3(plan, int(p.timestamp_us)))[:2, 3] for p in poses[1:]])
 
 
+def to_local(positions: np.ndarray, headings: np.ndarray, local_from_rig: np.ndarray) -> np.ndarray:
+    """``[G, T, 3]`` local x, y, heading of plans given in the rig frame at t0."""
+    xy = positions @ local_from_rig[:2, :2].T + local_from_rig[:2, 3]
+    yaw0 = np.arctan2(local_from_rig[1, 0], local_from_rig[0, 0])
+    return np.concatenate([xy, (headings + yaw0)[..., None]], axis=-1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("checkpoint", type=Path, help="policy that drove the rollouts")
-    parser.add_argument("--reference", type=Path, required=True, help="imitation checkpoint the KL anchors to")
+    parser.add_argument("--reference", type=Path, required=True, help="imitation checkpoint the anchor pulls to")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--group-size", type=int, default=8)
     parser.add_argument("--basis", type=int, default=4, help="low-frequency directions per signal")
     parser.add_argument(
         "--sigma", type=float, nargs=2, default=(0.5, 0.005), metavar=("ACCEL", "CURVATURE"),
-        help="std of each orthonormal-basis coefficient; per step about 0.15x this",
+        help="std of each orthonormal-basis coefficient; per step about 0.25x this",
     )
-    parser.add_argument("--kl-weight", type=float, default=0.01)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--anchor-weight", type=float, default=0.1)
+    parser.add_argument("--lr", type=float, default=1.0, help="largest step tried on the natural gradient")
+    parser.add_argument("--trust-region", type=float, default=1.0,
+                        help="largest mean plan_distance between new and old mean plans")
     parser.add_argument("--seed", type=int, default=0)
     opts = parser.parse_args()
 
@@ -100,60 +109,100 @@ def main() -> None:
     # cuDNN's GRU backward needs training mode; the planner has no dropout or
     # normalisation, so its output is the same as in eval mode.
     planner.train()
-    optimizer = torch.optim.SGD(planner.parameters(), lr=opts.lr)
 
-    reward = GroundTruthDeviationReward()
-    basis = low_frequency_basis(64, opts.basis)
+    basis = low_frequency_basis(STEPS, opts.basis)
     sigma = torch.tensor(opts.sigma)
     generator = torch.Generator().manual_seed(opts.seed)
+    states: list[tuple[tuple, dict, torch.Tensor]] = []
     rows: list[dict] = []
-    optimizer.zero_grad()
     for asl in sorted(opts.run_dir.glob("rollouts/*/*/rollout.asl")):
         log = asyncio.run(read_log(asl))
         recorded, logged_plans = asyncio.run(read_rollout(str(asl)))
+        artifact = find_artifact(SCENE_ROOT, log.scene_id)
+        if artifact is None:
+            raise SystemExit(f"no USDZ for scene {log.scene_id!r} under {SCENE_ROOT}")
+        scorer = scene_scorer(artifact, recorded)
         for index, now_us in enumerate(log.requests):
+            if index >= len(logged_plans):
+                break  # the rollout ended before this request was answered
             parsed = driver.parser.parse(prediction_input(log, driver.camera_ids, now_us))
-            recorded_xy, deviation = recorded_in_rig(
-                recorded, np.asarray(parsed.pose_local_to_rig_t0.as_se3()), parsed.t0_us, 64
-            )
-            if deviation > reward.max_deviation_m or not len(recorded_xy):
-                break  # renderer no longer reliable (or the clip ended): truncated here
+            local_from_rig = np.asarray(parsed.pose_local_to_rig_t0.as_se3(), dtype=np.float64)
+            deviation = float(np.linalg.norm(
+                (np.linalg.inv(local_from_rig) @ se3(recorded, parsed.t0_us))[:2, 3]))
+            if deviation > RENDERER_BOUND_M or parsed.t0_us >= recorded.time_range_us.stop - 1:
+                break  # the renderer is no longer reliable, or the clip ended: truncated here
             driver._run_model(parsed)  # no grad; the hook keeps the planner inputs
             with torch.enable_grad():
-                mu = planner(*captured.args, **captured.kwargs).reshape(64, 2).float()
-                with torch.no_grad():
-                    mu_ref = reference(*captured.args, **captured.kwargs).reshape(64, 2).float()
-                plans, z = sample_plans(mu, basis, sigma, opts.group_size, generator)
-                positions, _, _ = integrate_controls_torch(
-                    torch.cat([mu.detach()[None], plans]).cpu(),
-                    torch.full((opts.group_size + 1,), parsed.initial_speed_mps),
-                )
-                scores = [reward.compute(xy, recorded_xy, deviation) for xy in positions.numpy()]
-                rewards = torch.tensor([s.reward for s in scores[1:]])
-                loss, kl = grpo_loss(
-                    mu, mu_ref, z, group_advantages(rewards), basis, sigma, opts.kl_weight
-                )
-                loss.backward()
+                mu = planner(*captured.args, **captured.kwargs).reshape(STEPS, 2).float()
+            with torch.no_grad():
+                mu_ref = reference(*captured.args, **captured.kwargs).reshape(STEPS, 2).float()
+            plans, z = sample_plans(mu, basis, sigma, opts.group_size, generator)
+            controls = torch.cat([mu.detach()[None], plans]).cpu()
+            positions, headings, speeds = integrate_controls_torch(
+                controls, torch.full((opts.group_size + 1,), parsed.initial_speed_mps)
+            )
             logged = logged_plan_in_rig(logged_plans[index])
+            replay_error = float(np.abs(positions[0].numpy() - logged).max())
+            if replay_error > MAX_REPLAY_ERROR_M:
+                raise SystemExit(
+                    f"{asl} decision {index + 1}: the replayed plan is {replay_error:.3f} m from the "
+                    "executed one, so the update would be off-policy"
+                )
+            local = to_local(positions.numpy(), headings.numpy(), local_from_rig)
+            scores = [scorer.score(local[g], speeds[g].numpy(), controls[g].numpy(), parsed.t0_us)
+                      for g in range(opts.group_size + 1)]
+            rewards = torch.tensor([s["reward"] for s in scores[1:]])
+            gated = torch.tensor([s["gated"] for s in scores[1:]], dtype=torch.bool)
+            advantages = torch.where(gated, torch.tensor(-1.0), group_advantages(rewards))
+            with torch.enable_grad():
+                loss, anchor = grpo_loss(mu, mu_ref, z, advantages, basis, sigma, opts.anchor_weight)
+                loss.backward()
+            states.append((captured.args, captured.kwargs, mu.detach()))
             rows.append({
                 "rollout": str(asl.relative_to(opts.run_dir)),
                 "decision": index + 1,
                 "ego_deviation_m": deviation,
-                "mean_plan_reward": scores[0].reward,
+                "replay_error_m": replay_error,
+                "mean_plan": scores[0],
                 "group_reward_mean": float(rewards.mean()),
                 "group_reward_std": float(rewards.std(unbiased=False)),
-                "kl": float(kl),
-                # The replayed mean plan should be the plan the driver executed.
-                "replay_error_m": float(np.abs(positions[0].numpy() - logged).max()),
+                "group_gated": int(gated.sum()),
+                "anchor": float(anchor),
             })
     if not rows:
         raise SystemExit(f"no decision within the valid region under {opts.run_dir}")
-    for parameter in planner.parameters():
-        if parameter.grad is not None:
-            parameter.grad /= len(rows)
-    grad_norm = float(torch.nn.utils.clip_grad_norm_(planner.parameters(), float("inf")))
-    optimizer.step()
 
+    # Natural-gradient direction averaged over the decisions, then backtracking.
+    parameters = [p for p in planner.parameters()]
+    start = [p.detach().clone() for p in parameters]
+    direction = [-(p.grad / len(rows)) if p.grad is not None else torch.zeros_like(p) for p in parameters]
+    scale, moved = opts.lr, float("nan")
+    with torch.no_grad():
+        for _ in range(12):
+            for p, p0, d in zip(parameters, start, direction):
+                p.copy_(p0 + scale * d)
+            moved = float(np.mean([
+                plan_distance(planner(*args, **kwargs).reshape(STEPS, 2).float(), mu_old, sigma)
+                for args, kwargs, mu_old in states
+            ]))
+            if moved <= opts.trust_region:
+                break
+            scale /= 2.0
+        else:
+            for p, p0 in zip(parameters, start):
+                p.copy_(p0)
+            scale, moved = 0.0, 0.0
+
+    summary = {
+        "decisions": len(rows),
+        "mean_plan_reward": float(np.mean([r["mean_plan"]["reward"] for r in rows])),
+        "mean_plan_gated": float(np.mean([r["mean_plan"]["gated"] for r in rows])),
+        "group_reward_std": float(np.mean([r["group_reward_std"] for r in rows])),
+        "anchor": float(np.mean([r["anchor"] for r in rows])),
+        "step_scale": scale,
+        "step_plan_distance": moved,
+        "max_replay_error_m": float(max(r["replay_error_m"] for r in rows)),
+    }
     checkpoint = torch.load(opts.checkpoint, map_location="cpu")
     checkpoint["model_state_dict"] = {k: v.cpu() for k, v in model.state_dict().items()}
     checkpoint["closed_loop_grpo"] = {
@@ -161,20 +210,11 @@ def main() -> None:
         "reference_sha256": hashlib.sha256(opts.reference.read_bytes()).hexdigest(),
         "run_dir": str(opts.run_dir),
         "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(opts).items()},
-        "decisions": len(rows),
-        "planner_grad_norm": grad_norm,
+        "summary": summary,
     }
     opts.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(checkpoint, opts.output)
-    summary = {
-        "decisions": len(rows),
-        "mean_plan_reward": float(np.mean([r["mean_plan_reward"] for r in rows])),
-        "group_reward_std": float(np.mean([r["group_reward_std"] for r in rows])),
-        "kl": float(np.mean([r["kl"] for r in rows])),
-        "planner_grad_norm": grad_norm,
-        "max_replay_error_m": float(max(r["replay_error_m"] for r in rows)),
-    }
-    (opts.output.with_suffix(".json")).write_text(
+    opts.output.with_suffix(".json").write_text(
         json.dumps({"summary": summary, "decisions": rows}, indent=2) + "\n", encoding="utf-8"
     )
     print(json.dumps(summary))
