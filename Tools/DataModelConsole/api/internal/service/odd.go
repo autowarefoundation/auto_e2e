@@ -40,6 +40,9 @@ const (
 	// Decoded-size bounds for one LabelSet, about 10x the KITScenes one, so a
 	// malformed table fails instead of exhausting the 512 MiB pod.
 	maxODDObservationRows = 2_000_000
+	// KITScenes scenes last at most about a minute; an hour-long one is a
+	// malformed index, not a scene the timeline should draw.
+	maxODDSceneDurationNS = int64(time.Hour)
 	maxODDRowValues       = 64
 )
 
@@ -453,7 +456,8 @@ func decodeODDSceneIndex(
 		if !published || !ValidODDSceneUID(scene.SceneUID) || seen ||
 			shards[scene.ShardName] ||
 			scene.StartTimestampNS < 0 || scene.DistanceM < 0 ||
-			scene.EndTimestampNS <= scene.StartTimestampNS {
+			scene.EndTimestampNS <= scene.StartTimestampNS ||
+			scene.EndTimestampNS-scene.StartTimestampNS > maxODDSceneDurationNS {
 			return nil, fmt.Errorf("invalid scene %q", scene.SceneUID)
 		}
 		labels.sceneByUID[scene.SceneUID] = i
