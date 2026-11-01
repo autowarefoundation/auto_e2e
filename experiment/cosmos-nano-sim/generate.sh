@@ -6,6 +6,8 @@ set -euo pipefail
 ROOT=${ROOT:-/home/ubuntu/cosmos-nano-sim}
 # The framework shells out to uv to fetch the Wan2.2 VAE from Hugging Face on first use.
 export PATH="${ROOT}/bin:${PATH}" HF_HOME="${ROOT}/hf" UV_CACHE_DIR="${ROOT}/uv-cache"
+# 6 views at 720p ran out of memory on an 80 GB H100 with 4.5 GiB reserved but unused; let segments grow.
+export PYTORCH_ALLOC_CONF=expandable_segments:True
 REQUESTS=$(realpath "$1")
 OUT=$(realpath -m "$2")
 mkdir -p "${OUT}"
