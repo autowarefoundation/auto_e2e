@@ -1,17 +1,24 @@
 package handler
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
+	"regexp"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
 )
 
-// maxODDConditions bounds one search; a scene carries about 50 ODD keys.
-const maxODDConditions = 16
+// maxODDQueryBytes bounds the q parameter; a full query of 24 conditions
+// with 32 values each stays well below it.
+const maxODDQueryBytes = 16 << 10
+
+var oddSceneUIDPattern = regexp.MustCompile(`^[0-9a-f][0-9a-f-]{0,63}$`)
 
 // ODDHandler serves the ODD scene search.
 type ODDHandler struct {
@@ -23,62 +30,102 @@ func NewODDHandler(s3 *service.S3Service) *ODDHandler {
 	return &ODDHandler{s3: s3}
 }
 
-// parseODDConditions reads repeated where=<key>=<value> terms.
-func parseODDConditions(raw []string) ([]model.ODDCondition, bool) {
-	if len(raw) > maxODDConditions {
-		return nil, false
+// parseODDQuery decodes the q parameter: a JSON model.ODDQuery. An absent q
+// selects every scene.
+func parseODDQuery(raw string) (model.ODDQuery, error) {
+	if raw == "" {
+		return model.ODDQuery{Op: "and", Groups: []model.ODDQueryGroup{}}, nil
 	}
-	conditions := make([]model.ODDCondition, 0, len(raw))
-	for _, term := range raw {
-		key, value, ok := strings.Cut(term, "=")
-		if !ok || !service.ValidODDKey(key) || !service.ValidODDValue(value) {
-			return nil, false
-		}
-		conditions = append(conditions, model.ODDCondition{Key: key, Value: value})
+	var query model.ODDQuery
+	if len(raw) > maxODDQueryBytes {
+		return query, service.ErrInvalidODDQuery{Reason: "q is too long"}
 	}
-	return conditions, true
+	decoder := json.NewDecoder(bytes.NewReader([]byte(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&query); err != nil || decoder.More() {
+		return query, service.ErrInvalidODDQuery{Reason: "q must be one JSON query object"}
+	}
+	if query.Groups == nil {
+		query.Groups = []model.ODDQueryGroup{}
+	}
+	return query, service.ValidateODDQuery(query)
+}
+
+// datasetVersion reads the required dataset and version parameters. version
+// is required: newest-version discovery falls back to v1.0 on an S3 error,
+// which would turn an outage into a false "no labels" 404.
+func (h *ODDHandler) datasetVersion(w http.ResponseWriter, r *http.Request) (string, string, bool) {
+	dataset := r.URL.Query().Get("dataset")
+	if !h.s3.ValidDataset(dataset) {
+		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+dataset)
+		return "", "", false
+	}
+	version := r.URL.Query().Get("version")
+	if !service.ValidVersion(version) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid version")
+		return "", "", false
+	}
+	return dataset, version, true
+}
+
+func writeODDError(w http.ResponseWriter, err error, notFound string, logArgs ...any) {
+	var invalid service.ErrInvalidODDQuery
+	switch {
+	case errors.As(err, &invalid):
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, invalid.Error())
+	case errors.Is(err, service.ErrNotFound):
+		writeError(w, http.StatusNotFound, model.CodeNotFound, notFound)
+	default:
+		slog.Error("odd", append(logArgs, "error", err)...)
+		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to read ODD labels")
+	}
 }
 
 // Search handles
-// GET /api/v1/odd/scenes?dataset=&version=&where=<key>=<value>&limit=&offset=
-// — the scenes whose valid ODD labels satisfy every where term.
+// GET /api/v1/odd/scenes?dataset=&version=&q=<JSON ODDQuery>&limit=&offset=
+// — the scenes whose valid ODD labels satisfy q.
 func (h *ODDHandler) Search(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	dataset := q.Get("dataset")
-	if !h.s3.ValidDataset(dataset) {
-		writeError(w, http.StatusNotFound, model.CodeNotFound, "unknown dataset: "+dataset)
-		return
-	}
-	// version is required: newest-version discovery falls back to v1.0 on an
-	// S3 error, which would turn an outage into a false "no labels" 404.
-	version := q.Get("version")
-	if !service.ValidVersion(version) {
-		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "missing or invalid version")
-		return
-	}
-	where, ok := parseODDConditions(q["where"])
+	dataset, version, ok := h.datasetVersion(w, r)
 	if !ok {
-		writeError(
-			w, http.StatusBadRequest, model.CodeInvalidParam,
-			"where must be at most 16 terms of the form <odd.key>=<value>",
-		)
+		return
+	}
+	query, err := parseODDQuery(r.URL.Query().Get("q"))
+	if err != nil {
+		writeODDError(w, err, "")
 		return
 	}
 	limit, offset := parsePagination(r)
-
 	response, err := h.s3.SearchODDScenes(
-		r.Context(), dataset, version, where, limit, offset,
+		r.Context(), dataset, version, query, limit, offset,
 	)
-	if errors.Is(err, service.ErrNotFound) {
-		writeError(
-			w, http.StatusNotFound, model.CodeNotFound,
-			"no ODD labels for this dataset version",
+	if err != nil {
+		writeODDError(
+			w, err, "no ODD labels for this dataset version",
+			"dataset", dataset, "version", version,
 		)
 		return
 	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// Scene handles GET /api/v1/odd/scenes/{scene_uid}?dataset=&version= — every
+// valid ODD label of one scene.
+func (h *ODDHandler) Scene(w http.ResponseWriter, r *http.Request) {
+	sceneUID := chi.URLParam(r, "scene_uid")
+	if !oddSceneUIDPattern.MatchString(sceneUID) {
+		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid scene_uid")
+		return
+	}
+	dataset, version, ok := h.datasetVersion(w, r)
+	if !ok {
+		return
+	}
+	response, err := h.s3.ODDScene(r.Context(), dataset, version, sceneUID)
 	if err != nil {
-		slog.Error("odd scene search", "dataset", dataset, "version", version, "error", err)
-		writeError(w, http.StatusBadGateway, model.CodeS3Error, "failed to read ODD labels")
+		writeODDError(
+			w, err, "no ODD labels for this scene",
+			"dataset", dataset, "version", version, "scene_uid", sceneUID,
+		)
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
