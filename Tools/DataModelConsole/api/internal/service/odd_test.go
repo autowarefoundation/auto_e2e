@@ -507,18 +507,18 @@ func TestValidateODDQuery(t *testing.T) {
 		manyConditions.Groups = append(manyConditions.Groups, g)
 	}
 	for name, q := range map[string]model.ODDQuery{
-		"bad top op":       {Op: "xor"},
-		"bad group op":     query("and", group("nand", cond("odd.road.context", "urban"))),
-		"empty group":      query("and", group("and")),
-		"bad key":          query("and", group("and", cond("road", "urban"))),
-		"no values":        query("and", group("and", cond("odd.road.context"))),
-		"bad value":        query("and", group("and", cond("odd.road.context", "Urban"))),
-		"too many values":  query("and", group("and", tooManyValues)),
-		"negative min":     query("and", group("and", negative)),
-		"confidence > 1":   query("and", group("and", overConfident)),
-		"bad source":       query("and", group("and", badSource)),
-		"too many groups":  manyGroups,
-		"too many in all":  manyConditions,
+		"bad top op":      {Op: "xor"},
+		"bad group op":    query("and", group("nand", cond("odd.road.context", "urban"))),
+		"empty group":     query("and", group("and")),
+		"bad key":         query("and", group("and", cond("road", "urban"))),
+		"no values":       query("and", group("and", cond("odd.road.context"))),
+		"bad value":       query("and", group("and", cond("odd.road.context", "Urban"))),
+		"too many values": query("and", group("and", tooManyValues)),
+		"negative min":    query("and", group("and", negative)),
+		"confidence > 1":  query("and", group("and", overConfident)),
+		"bad source":      query("and", group("and", badSource)),
+		"too many groups": manyGroups,
+		"too many in all": manyConditions,
 	} {
 		var invalid ErrInvalidODDQuery
 		if err := ValidateODDQuery(q); !errors.As(err, &invalid) {
@@ -585,10 +585,10 @@ func TestSearchODDScenesRejectsUnverifiedLabelSet(t *testing.T) {
 		return scenes
 	}
 	cases := map[string]testLabelSet{
-		"tampered scene index":        {tamperIndex: true},
-		"missing scene index":         {omitSceneIndex: true},
-		"tampered observations":       {tamperObservations: true},
-		"row count differs":           {rowCountDelta: 1},
+		"tampered scene index":           {tamperIndex: true},
+		"missing scene index":            {omitSceneIndex: true},
+		"tampered observations":          {tamperObservations: true},
+		"row count differs":              {rowCountDelta: 1},
 		"labels for another publication": {publicationSHA: strings.Repeat("e", 64)},
 		"scene count differs from publication": {
 			scenes: testODDScenes()[:1], manifestSceneCnt: 1,
