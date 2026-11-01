@@ -143,9 +143,7 @@ Choices and why:
   as one action. The reward of a plan depends only on the plan and the
   state, so the plans of one state can be compared without rolling each out,
   and no value network is needed. Rollout-level groups would cost one
-  5-minute rollout per sample at the current 6.6 s per decision. Plans a
-  safety gate rejects get advantage -1, so a group that fails everywhere
-  still moves the policy (DiffusionDriveV2, arXiv:2512.07745).
+  5-minute rollout per sample at the current 6.6 s per decision.
 - Exploration (#211): the GRU planner is deterministic, so the policy adds
   Gaussian noise to 4 low-frequency DCT coefficients of each control signal,
   acceleration and curvature. Samples differ by smooth trajectory-level
@@ -157,14 +155,20 @@ Choices and why:
   differs from the executed plan by more than 5 cm. The drift of #221 brings
   the ego to states away from the recording, where samples that recover score
   higher, the signal DAgger (Ross et al., 2011) gets from an expert.
-- Step: the natural gradient of the mean plan (Fisher-preconditioned, so
-  acceleration and curvature learn alike), plus a pull towards the imitation
-  planner over all 64 steps. The step is halved until the new mean plans stay
-  within a trust region of the old ones on the scored states, as in TRPO.
-  Without it the first run's steps diverged (below).
+- Step: the natural gradient with respect to the mean plan
+  (Fisher-preconditioned, so the smaller-sigma signal is not favoured), passed
+  to the planner's parameters by back-propagation, plus a pull towards the
+  imitation planner over all 64 steps. The step is halved until the new mean
+  plan stays within a trust region of the old one on every scored state, as
+  in TRPO. Without it the first run's steps diverged (see RESULTS.md).
+- Gated plans score -1, below every plan that passes the gates, so a plan
+  that collides never ranks above one that merely stops; a group that fails
+  everywhere gives no gradient rather than noise.
 
 Limits: the reward of a decision ignores what the executed plan does to later
 decisions, so this is a contextual bandit on visited states, not credit
 assignment over the episode. Logged objects do not react to the ego. The
-renderer bound keeps the policy near the recorded path. Scene maps are
-rasterized whole at every decision (about 0.4 s for 400 lanes).
+renderer bound keeps the policy near the recorded path. Collisions are
+checked at the 0.1 s steps, not swept between them. The route corridor covers
+AlpaSim's 80 m route, where nuPlan training drew every route roadblock. Scene
+maps are rasterized whole at every decision (about 0.4 s for 400 lanes).
