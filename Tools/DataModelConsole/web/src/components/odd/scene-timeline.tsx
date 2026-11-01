@@ -128,7 +128,6 @@ export function SceneTimeline({
                 const width = Math.max(((interval.end_ns - interval.start_ns) / span) * 100, 0.8);
                 const color = valueColor(vocabulary, lane.key, interval.values[0]);
                 const text = interval.values.map(valueLabel).join(", ");
-                const active = hovered?.lane === laneIndex && hovered.index === index;
                 return (
                   <button
                     key={index}
