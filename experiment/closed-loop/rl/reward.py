@@ -31,12 +31,14 @@ scored at the plan's 0.1 s steps over its first 4 s, in the scene's local frame:
   EP gives a plan that stops 0, where PDMS's weighted average would still give
   it 9/14 (#123).
 * TTC: 0.5 when, at any step, the ego box projected at constant velocity 0.3,
-  0.6 or 0.9 s ahead would make an at-fault contact; else 1 (CaRL, NAVSIM).
+  0.6 or 0.9 s ahead would touch an object that is ahead, or one not behind
+  while the ego is across lanes or off the road; else 1 (NAVSIM's rule,
+  CaRL's factor).
 * LK (lane keeping): mean over the steps of 1 within 0.5 m of the nearest
   lane centreline in the plan's direction, falling linearly to 0 at 1.75 m.
 * C (comfort): 1 - 0.5 n / 6, with n the nuPlan comfort bounds the plan
-  violates (CaRL), from the realised speed (the ego's speed at t0 first) and
-  curvature.
+  violates (CaRL), from the realised speed and heading (the ego's at t0 first),
+  filtered as nuPlan does.
 
 The human filter of EPDMS forgives DAC, DDC and LK where the recorded drive
 breaks the same rule at the same place: a plan step is compared with the two
@@ -149,6 +151,16 @@ class Lane:
 
 def _angle(a: float, b: float) -> float:
     return abs((a - b + math.pi) % (2 * math.pi) - math.pi)
+
+
+AHEAD_RAD = math.radians(30.0)
+"""nuPlan's ``is_agent_ahead``/``is_agent_behind`` tolerance."""
+
+
+def _bearing(pose: np.ndarray, xy: np.ndarray) -> float:
+    """Absolute angle between the heading of ``pose`` and the direction to ``xy``."""
+    delta = xy - pose[:2]
+    return _angle(math.atan2(delta[1], delta[0]), float(pose[2]))
 
 
 class SceneScorer:
@@ -268,6 +280,7 @@ class SceneScorer:
                 near.append(track)
         ignored = {id(t) for t in near if (b := t.at(t0_us)) is not None and start_box.intersects(b)}
         nc, ttc = 1.0, 1.0
+        ttc_ignored = set(ignored)
         first_violation = [steps]  # first step at which a gate becomes 0
         for k in range(steps):
             for track in near:
@@ -283,16 +296,25 @@ class SceneScorer:
                 if value == 0.0 and nc > 0.0:
                     first_violation.append(k)
                 nc = min(nc, value)
+            if speeds[k] < STOPPED_MPS:
+                continue
             heading = float(plan[k, 2])
+            ego_box = self.ego.at(*plan[k])
+            spans_lanes = not self._in_one_lane(ego_box) or self._off_road(ego_box)
             for ahead in TTC_LOOKAHEAD_S:
-                moved = np.array([*(plan[k, :2] + speeds[k] * ahead * np.array([math.cos(heading), math.sin(heading)])),
-                                  heading])
+                time_us = int(times[k] + ahead * 1e6)
+                moved = self.ego.at(*(plan[k, :2] + speeds[k] * ahead * np.array([math.cos(heading), math.sin(heading)])),
+                                    heading)
                 for track in near:
-                    if id(track) in ignored:
+                    if id(track) in ttc_ignored or (other := track.at(time_us)) is None or not moved.intersects(other):
                         continue
-                    kind = self._contact(moved, float(speeds[k]), track, int(times[k] + ahead * 1e6))
-                    if kind is not None and self._at_fault(kind, moved):
+                    # NAVSIM: the object is ahead, or the ego is across lanes or off the road
+                    # and the object is not behind; otherwise drop it from the TTC check.
+                    bearing = _bearing(plan[k], np.array(other.centroid.coords[0]))
+                    if bearing < AHEAD_RAD or (spans_lanes and bearing < math.pi - AHEAD_RAD):
                         ttc = 0.5
+                    else:
+                        ttc_ignored.add(id(track))
 
         # --- DAC, DDC, LK with the human filter by place ---
         off_road, oncoming, keep = self._rule_steps(plan)
@@ -328,13 +350,9 @@ class SceneScorer:
         plan_gain = self._progress(plan[-1, :2]) - ego_arc
         ep = 1.0 if recorded_gain < MIN_RECORDED_PROGRESS_M else float(np.clip(plan_gain / recorded_gain, 0.0, 1.0))
 
-        # --- C, from realised motion including the step out of t0 ---
-        speed_path = np.r_[start_speed, speeds]
-        curvature = np.r_[controls[0, 1], controls[:, 1]]
-        accel = np.gradient(speed_path, DT_S)
-        lateral, yaw_rate = speed_path**2 * curvature, speed_path * curvature
-        lon_jerk, lat_jerk = np.gradient(accel, DT_S), np.gradient(lateral, DT_S)
-        signals = (accel, lateral, np.hypot(lon_jerk, lat_jerk), lon_jerk, yaw_rate, np.gradient(yaw_rate, DT_S))
+        # --- C, from realised motion including the step out of t0, filtered as nuPlan does ---
+        signals = _comfort_signals(np.r_[start_speed, speeds], np.unwrap(np.r_[start[2], plan[:, 2]]),
+                                   np.r_[controls[0, 1], controls[:, 1]])
         violated = sum(bool(((x < lo) | (x > hi)).any()) for x, (lo, hi) in zip(signals, COMFORT_BOUNDS))
         comfort = 1.0 - 0.5 * violated / 6.0
 
@@ -354,12 +372,35 @@ MIN_TRAFFIC_DURATION_US = 3_000_000
 """AlpaSim's ``simulation_config.min_traffic_duration_us``: shorter tracks are not simulated."""
 
 
+def _comfort_signals(speed: np.ndarray, heading: np.ndarray, curvature: np.ndarray) -> tuple[np.ndarray, ...]:
+    """nuPlan's comfort signals, with its Savitzky-Golay settings (``state_extractors.py``).
+
+    Acceleration is smoothed over 8 samples, jerk differentiated over 15 and the
+    yaw rate and yaw acceleration over 5, so a plan that comes to a stop is not
+    read as a jerk spike by a raw finite difference.
+    """
+    from scipy.signal import savgol_filter
+
+    def filtered(values: np.ndarray, window: int, order: int, deriv: int = 0) -> np.ndarray:
+        window = min(window, len(values))
+        return savgol_filter(values, window, min(order, window - 1), deriv=deriv, delta=DT_S)
+
+    lon = filtered(np.gradient(speed, DT_S), 8, 2)
+    lat = filtered(speed**2 * curvature, 8, 2)
+    jerk = filtered(np.hypot(lon, lat), 15, 2, deriv=1)
+    lon_jerk = filtered(lon, 15, 2, deriv=1)
+    yaw_rate = filtered(heading, 5, 2, deriv=1)
+    yaw_accel = filtered(heading, 5, 3, deriv=2)
+    return lon, lat, jerk, lon_jerk, yaw_rate, yaw_accel
+
+
 def scene_scorer(artifact: Any, recorded: Any, end_us: int) -> SceneScorer:
     """Build the scorer from an AlpaSim ``Artifact`` and the rollout's recorded ego ``Trajectory``.
 
     The objects are those the rollout simulated: AlpaSim clips the log's tracks
     to the rollout, from the rig trajectory's start to ``end_us``, drops those
     shorter than 3 s and hides them from the renders (``unbound_rollout.py``).
+    Each kept object is scored over its whole log track.
     """
     from trajdata.maps.vec_map_elements import MapElementType
 
@@ -375,10 +416,14 @@ def scene_scorer(artifact: Any, recorded: Any, end_us: int) -> SceneScorer:
         lanes.append(Lane(shapely.make_valid(polygon), lane.center.xy))
     road_edges = [edge.polyline.xy for edge in elements.get(MapElementType.ROAD_EDGE, {}).values()]
     tracks = []
+    # The clip and the 3 s filter decide which objects were simulated; their whole
+    # log track is scored, since the 4 s horizon reaches past the rollout's end.
     simulated = artifact.traffic_objects.clip_trajectories(
         artifact.rig.trajectory.time_range_us.start, end_us + 1, exclude_empty=True
     ).filter_short_trajectories(MIN_TRAFFIC_DURATION_US)
-    for obj in simulated.values():
+    for object_id, obj in artifact.traffic_objects.items():
+        if object_id not in simulated:
+            continue
         times, xy, yaw = _poses(obj.trajectory)
         tracks.append(Track(Box(obj.aabb.x, obj.aabb.y), times, np.column_stack([xy, yaw]),
                             obj.label_class not in STATIC_OBSTACLE_CLASSES))
