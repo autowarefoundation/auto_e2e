@@ -5,7 +5,7 @@
 // example) stack into sub-rows. Each bar carries its value as text when it is
 // wide enough and always as an accessible name and a tooltip.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   keyLabel,
@@ -40,7 +40,7 @@ function stack(intervals: ODDInterval[]): number[] {
 
 type Hovered = { lane: number; index: number } | null;
 
-export function TimeAxis({ durationNs }: { durationNs: number }) {
+function TimeAxis({ durationNs }: { durationNs: number }) {
   const durationS = durationNs / 1e9;
   const step = niceStep(durationS);
   const ticks: number[] = [];
@@ -73,6 +73,8 @@ export function SceneTimeline({
   vocabulary: Map<string, ODDFacet>;
 }) {
   const [hovered, setHovered] = useState<Hovered>(null);
+  // New lanes (another query) invalidate a remembered lane/interval index.
+  useEffect(() => setHovered(null), [lanes]);
   const stacked = useMemo(() => lanes.map((lane) => stack(lane.intervals)), [lanes]);
   const durationS = durationNs / 1e9;
   const step = niceStep(durationS);
@@ -127,8 +129,9 @@ export function SceneTimeline({
                 />
               ))}
               {lane.intervals.map((interval, index) => {
-                const left = (interval.start_ns / span) * 100;
                 const width = Math.max(((interval.end_ns - interval.start_ns) / span) * 100, 0.8);
+                // The minimum width must not push a late interval past the track.
+                const left = Math.min((interval.start_ns / span) * 100, 100 - width);
                 const color = valueColor(vocabulary, lane.key, interval.values[0]);
                 const text = interval.values.map(valueLabel).join(", ");
                 return (
@@ -153,7 +156,7 @@ export function SceneTimeline({
                   </button>
                 );
               })}
-              {hovered?.lane === laneIndex && (
+              {hovered?.lane === laneIndex && lane.intervals[hovered.index] && (
                 <IntervalTooltip
                   laneKey={lane.key}
                   interval={lane.intervals[hovered.index]}
