@@ -110,6 +110,29 @@ generation does follow its own controls: in the blends the taxi sits in its box 
 the road-edge line. But the scenery around them is re-imagined per clip, so a shifted clip is not the
 recorded scene seen from 1 m to the left.
 
+### Closed-loop check: a 20 s rollout with a 3 m drift
+
+`run_drift.sh` generates 20 s (601 frames) of the same window twice: unshifted, and with the ego
+drifting 3 m to the left over 6 s and staying there. A deviation this large is where the NuRec render
+broke down in experiment/closed-loop (01d503d4). No NuRec reconstruction exists for this nuPlan log,
+so the two renderers could not be compared on the same drive.
+
+Each 20 s rollout took 318-327 s of generation (1.87 frames/s for six views at 480p), with a 77.7 GB
+peak. PSNR against the recording stays at 9-13 dB from 5 s to 20 s. The 3 m controls move by 137 px
+in the front camera; phase correlation of the generated pair again finds no common shift.
+
+![drift grid at 10 s](./images/drift_grid_t10s.jpg)
+
+![drift blend at 10 s](./images/drift_blend_t10s.jpg)
+
+At 10 s the picture is still plausible after the 3 m drift: lanes and road edges follow the controls,
+and nothing breaks down the way 3DGS does off its training path. Both rollouts invent an overhead
+walkway that is neither in the recording nor in the controls. More important for closed loop, the cars
+no longer match their boxes. In the 3 m rollout the logged taxi's box sits just ahead of the ego, but
+the front view shows no taxi there, while the rear-left view shows a large taxi where there is no box.
+The unshifted rollout also has a car in rear-left without a box. A policy would see cars the collision
+check does not know about, and miss one it does.
+
 ## 4. Assessment
 
 ### As lateral-recovery data (instead of warping, `feat/lateral-recovery-kl`)
@@ -154,6 +177,14 @@ Design/reinforcement_learning.md §4 rejected video models for three reasons. Ag
 
 NuRec also runs on the L40S, while Sim-Auto needs an H100 or newer. The §4 decision stands.
 
+For closed-loop evaluation the weakness that rules out recovery data matters less, since the world
+leaves the recording anyway and metrics come from the map and boxes, not the pixels. Sim-Auto also
+stays plausible after a 3 m drift. But the drift run shows cars appearing where there are no boxes and
+missing where there are, which makes the images disagree with the collision state the metrics use.
+Cost is about 5.4 minutes and $0.33 (Spot) of H100 time per 20 s six-camera rollout, before the policy
+itself; 1,000 RL rollouts would be about 90 H100-hours. My view: not usable for closed-loop RL training,
+and only a qualitative stress test for evaluation until the generated objects stay tied to their boxes.
+
 ## 5. Limitations
 
 One scene, one log, seeds 0 and 1, 480p. Captions were written by hand from the first frames. The
@@ -168,13 +199,13 @@ within 0.01 dB. The phase-correlation shifts of the generated pairs did not: for
 front-left value was -126.2 px in one run and -27.7 px in the other, which fits the reading above that
 the generated pairs share no common image content to correlate.
 
-Instances, both Spot, up to 2026-11-01 12:16 UTC, priced at the Spot rate seen at launch (the bill
-may differ):
+Instances, both Spot, priced at the Spot rate seen at launch (the bill may differ). The g7e was handed
+to another project after 12:16 UTC; the p5 is counted up to 16:02 UTC, including the drift run:
 
 | Instance | Use | Hours | Rate [USD/h] | Cost [USD] |
 | --- | --- | ---: | ---: | ---: |
 | g7e.2xlarge, us-east-1b | sm120 check, converter and renderer debugging | 2.2 | 2.99 | 6.5 |
-| p5.4xlarge, us-east-2b | all generation | 1.5 | 3.65 | 5.4 |
+| p5.4xlarge, us-east-2b | all generation | 5.3 | 3.65 | 19.2 |
 
 ## References
 
