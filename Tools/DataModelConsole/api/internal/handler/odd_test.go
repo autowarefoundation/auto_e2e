@@ -50,9 +50,9 @@ func TestODDHandlersRejectInvalidRequestsBeforeS3(t *testing.T) {
 	handler := NewODDHandler(&service.S3Service{})
 	badQuery := url.QueryEscape(`{"op":"xor","groups":[]}`)
 	for target, want := range map[string]int{
-		"/api/v1/odd/scenes?dataset=l2d&version=v3.7":                  http.StatusNotFound,
-		"/api/v1/odd/scenes?dataset=kitscenes":                         http.StatusBadRequest,
-		"/api/v1/odd/scenes?dataset=kitscenes&version=latest":          http.StatusBadRequest,
+		"/api/v1/odd/scenes?dataset=l2d&version=v3.7":                     http.StatusNotFound,
+		"/api/v1/odd/scenes?dataset=kitscenes":                            http.StatusBadRequest,
+		"/api/v1/odd/scenes?dataset=kitscenes&version=latest":             http.StatusBadRequest,
 		"/api/v1/odd/scenes?dataset=kitscenes&version=v3.7&q=" + badQuery: http.StatusBadRequest,
 	} {
 		recorder := httptest.NewRecorder()
