@@ -54,6 +54,7 @@ from score_rollout import read_rollout, se3, to_trajectory  # noqa: E402
 from alpasim_autoe2e.plugin import AutoE2EDriver  # noqa: E402
 from alpasim_autoe2e.scene_map import SCENE_ROOT, find_artifact  # noqa: E402
 from training.losses.control_rollout import integrate_controls_torch  # noqa: E402
+from training.reactive_stage_runner import reactive_model_state_sha256  # noqa: E402
 
 RENDERER_BOUND_M = 3.0
 MAX_REPLAY_HEADING_ERROR_RAD = 0.01
@@ -251,6 +252,8 @@ def main() -> None:
     }
     checkpoint = torch.load(opts.checkpoint, map_location="cpu")
     checkpoint["model_state_dict"] = {k: v.cpu() for k, v in model.state_dict().items()}
+    if "model_state_sha256" in checkpoint:  # the digest reactive_bev_checkpoint.py checks on load
+        checkpoint["model_state_sha256"] = reactive_model_state_sha256(checkpoint["model_state_dict"])
     checkpoint["closed_loop_grpo"] = {
         "parent_sha256": hashlib.sha256(opts.checkpoint.read_bytes()).hexdigest(),
         "reference_sha256": hashlib.sha256(opts.reference.read_bytes()).hexdigest(),
