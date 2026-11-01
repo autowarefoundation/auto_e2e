@@ -5,9 +5,10 @@ Writes, under <out>:
 - blend_t<sec>s.jpg: 50% WSM control / 50% generated RGB for each clip, to check alignment.
 - metrics.json:
   - psnr_vs_recording: unshifted generation against the undistorted recording, per camera and time.
-  - control_chamfer_px: mean distance from each control's edges to the nearest generated edge, measured
-    against the clip's own control and against the unshifted control. A generation that follows the
-    shifted ego is closer to its own control than to the unshifted one.
+  - shift_px: horizontal image shift of each shifted clip against the unshifted clip on the last frame,
+    by phase correlation of the lower image half, measured once on the WSM controls (what was asked)
+    and once on the generations (what the model did). A generation that follows the ego shows the same
+    shift as its controls.
 """
 
 from __future__ import annotations
@@ -33,19 +34,12 @@ def frames(video: Path) -> list[np.ndarray]:
         out.append(frame)
 
 
-def edges(image: np.ndarray) -> np.ndarray:
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    return cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150) > 0
-
-
-def chamfer_px(control: np.ndarray, generated: np.ndarray) -> float:
-    """Mean distance from control edge pixels to the nearest generated edge pixel, on the lower half (road)."""
-    h = control.shape[0] // 2
-    ctrl, gen = edges(control)[h:], edges(generated)[h:]
-    if not ctrl.any() or not gen.any():
-        return float("nan")
-    distance = cv2.distanceTransform((~gen).astype(np.uint8), cv2.DIST_L2, 3)
-    return float(distance[ctrl].mean())
+def shift_px(reference: np.ndarray, moved: np.ndarray) -> float:
+    """Horizontal shift of the lower image half (road and nearby objects) from reference to moved."""
+    h = reference.shape[0] // 2
+    a, b = (np.float32(cv2.cvtColor(x[h:], cv2.COLOR_BGR2GRAY)) for x in (reference, moved))
+    (dx, _), _ = cv2.phaseCorrelate(a, b, cv2.createHanningWindow(a.shape[::-1], cv2.CV_32F))
+    return round(float(dx), 1)
 
 
 def label(image: np.ndarray, text: str) -> np.ndarray:
@@ -83,7 +77,7 @@ def main() -> None:
         return None
 
     base = variants[0]["name"]
-    metrics = {"psnr_vs_recording": {}, "control_chamfer_px": {}, "generated_size": list(size)}
+    metrics = {"psnr_vs_recording": {}, "shift_px": {}, "generated_size": list(size)}
     for key in keys:
         metrics["psnr_vs_recording"][key] = {}
         for t in TIMES_S:
@@ -91,12 +85,10 @@ def main() -> None:
                 f, image = found
                 metrics["psnr_vs_recording"][key][f"{t}s"] = round(float(cv2.PSNR(image, gen[base, key][f])), 2)
     for v in variants[1:]:
-        own = [chamfer_px(ctrl[v["name"], k][-1], gen[v["name"], k][-1]) for k in keys]
-        unshifted = [chamfer_px(ctrl[base, k][-1], gen[v["name"], k][-1]) for k in keys]
-        metrics["control_chamfer_px"][v["name"]] = {
+        metrics["shift_px"][v["name"]] = {
             "lateral_m": v["lateral_m"], "yaw_deg": v["yaw_deg"],
-            "own_control": dict(zip(keys, np.round(own, 2).tolist())),
-            "unshifted_control": dict(zip(keys, np.round(unshifted, 2).tolist()))}
+            "control": {k: shift_px(ctrl[base, k][-1], ctrl[v["name"], k][-1]) for k in keys},
+            "generated": {k: shift_px(gen[base, k][-1], gen[v["name"], k][-1]) for k in keys}}
 
     for t in TIMES_S:
         frame = min(t * FPS, meta["frames"] - 1)
