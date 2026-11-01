@@ -1,54 +1,249 @@
 "use client";
 
 // ODD scene search. ODD labels are scene-level catalog metadata (road,
-// environment, traffic, image condition, ego events) from the ODD LabelSet of
-// a dataset version. The search state (dataset, version, where terms, offset)
-// lives in the URL so a search can be shared.
+// environment, traffic, image condition, ego events); each label is an
+// interval inside its scene. The page builds a query from groups of
+// conditions, lists the matching scenes with the intervals that matched on a
+// time axis, and can expand any scene to every label it carries. The applied
+// query lives in the URL so a search can be shared.
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useMemo } from "react";
-import { Play, X } from "lucide-react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChartNoAxesColumn,
+  ChevronLeft,
+  ChevronRight,
+  Layers,
+  Loader2,
+  Play,
+  ShieldAlert,
+} from "lucide-react";
 
+import { QueryBuilder, emptyCondition } from "@/components/odd/query-builder";
+import { SceneTimeline } from "@/components/odd/scene-timeline";
 import { ErrorState } from "@/components/error-state";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { useApi } from "@/hooks/use-api";
-import { ApiError, listDatasets, searchODDScenes } from "@/lib/api";
+import { ApiError, getODDScene, listDatasets, searchODDScenes } from "@/lib/api";
 import { friendlyDataset } from "@/lib/format";
-import type { ODDCondition } from "@/types";
+import {
+  cleanQuery,
+  describeQuery,
+  keyLabel,
+  namespaceLabel,
+  namespaceOf,
+  parseQueryParam,
+  seconds,
+  valueColor,
+  valueLabel,
+} from "@/lib/odd";
+import { cn } from "@/lib/utils";
+import type { ODDFacet, ODDQuery, ODDScene, ODDSearchResponse } from "@/types";
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 20;
+const APPLY_DELAY_MS = 350;
 
-// Same contract as the API (ValidODDKey / ValidODDValue), so a hand-edited
-// URL drops a malformed term instead of failing the whole search.
-const ODD_TERM = /^([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)=([a-z0-9][a-z0-9_]*)$/;
-const MAX_TERMS = 16; // maxODDConditions in the API handler
-
-function parseWhere(terms: string[]): ODDCondition[] {
-  const unique = [...new Set(terms)];
-  return unique
-    .flatMap((term) => {
-      const match = ODD_TERM.exec(term);
-      return match && match[1].length <= 128 && match[2].length <= 64
-        ? [{ key: match[1], value: match[2] }]
-        : [];
-    })
-    .slice(0, MAX_TERMS);
+function groupByNamespace<T extends { key: string }>(items: T[]): [string, T[]][] {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const namespace = namespaceOf(item.key);
+    groups.set(namespace, [...(groups.get(namespace) ?? []), item]);
+  }
+  return [...groups.entries()];
 }
 
-function seconds(ns: number): string {
-  return `${(ns / 1e9).toFixed(1)} s`;
+function StatTile({
+  label,
+  value,
+  detail,
+  busy,
+}: {
+  label: string;
+  value: string;
+  detail?: React.ReactNode;
+  busy?: boolean;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-800 bg-gradient-to-b from-slate-900/80 to-slate-950/60 p-4">
+      <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-slate-500">
+        {label}
+        {busy && <Loader2 className="size-3 animate-spin text-slate-400" aria-label="Updating" />}
+      </div>
+      <div className="mt-1 text-2xl font-semibold tabular-nums text-slate-50">{value}</div>
+      {detail && <div className="mt-1 text-xs text-slate-400">{detail}</div>}
+    </div>
+  );
+}
+
+function SceneCard({
+  scene,
+  rank,
+  response,
+  vocabulary,
+}: {
+  scene: ODDScene;
+  rank: number;
+  response: ODDSearchResponse;
+  vocabulary: Map<string, ODDFacet>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const all = useApi(
+    () => getODDScene(response.dataset, response.version, scene.scene_uid),
+    [response.dataset, response.version, scene.scene_uid],
+    expanded,
+  );
+  const playerHref = `/scenes/${encodeURIComponent(response.dataset)}/${encodeURIComponent(scene.shard)}/0?version=${encodeURIComponent(response.version)}`;
+  const shortShard = scene.shard.replace(/-train-\d+\.tar$/, "");
+
+  return (
+    <article
+      aria-label={`Scene ${scene.shard}`}
+      className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 transition-colors hover:border-slate-700"
+    >
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <span className="grid size-7 place-items-center rounded-md bg-slate-800 text-xs font-semibold tabular-nums text-slate-300">
+          {rank}
+        </span>
+        <div className="min-w-0">
+          <div className="truncate font-mono text-sm text-slate-100" title={scene.shard}>
+            {shortShard}
+          </div>
+          <div className="text-[11px] tabular-nums text-slate-500">
+            {seconds(scene.duration_ns)} · {scene.distance_m.toFixed(0)} m ·{" "}
+            <span className="font-mono">{scene.scene_uid.slice(0, 8)}</span>
+          </div>
+        </div>
+        <div className="ml-auto flex items-center gap-1.5">
+          <Button
+            type="button"
+            variant={expanded ? "secondary" : "ghost"}
+            size="sm"
+            aria-expanded={expanded}
+            onClick={() => setExpanded(!expanded)}
+          >
+            <Layers className="size-3.5" />
+            {expanded ? "Matched labels" : "All labels"}
+          </Button>
+          <Link
+            href={playerHref}
+            aria-label={`Open ${scene.shard} in the player`}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md bg-sky-500/15 px-3 text-xs font-medium text-sky-200 ring-1 ring-sky-500/40 transition-colors hover:bg-sky-500/25"
+          >
+            <Play className="size-3.5" /> Play
+          </Link>
+        </div>
+      </header>
+
+      <div className="mt-4">
+        {!expanded ? (
+          scene.lanes.length > 0 ? (
+            <SceneTimeline lanes={scene.lanes} durationNs={scene.duration_ns} vocabulary={vocabulary} />
+          ) : (
+            <p className="text-xs text-slate-500">
+              No conditions, so no matched intervals. Open all labels to see what this scene carries.
+            </p>
+          )
+        ) : all.error ? (
+          <ErrorState error={all.error} onRetry={all.reload} service="S3" />
+        ) : all.loading || !all.data ? (
+          <Skeleton className="h-40 w-full" />
+        ) : (
+          <div className="space-y-5">
+            {groupByNamespace(all.data.scene.lanes).map(([namespace, lanes]) => (
+              <section key={namespace} aria-label={namespaceLabel(namespace)}>
+                <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                  {namespaceLabel(namespace)} · {lanes.length}
+                </h4>
+                <SceneTimeline lanes={lanes} durationNs={scene.duration_ns} vocabulary={vocabulary} />
+              </section>
+            ))}
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function LabelExplorer({
+  facets,
+  matched,
+  vocabulary,
+  onPick,
+}: {
+  facets: ODDFacet[];
+  matched: number;
+  vocabulary: Map<string, ODDFacet>;
+  onPick: (key: string, value: string) => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const shown = facets.filter(
+    (f) => !filter || f.key.includes(filter.toLowerCase()) || keyLabel(f.key).toLowerCase().includes(filter.toLowerCase()),
+  );
+  return (
+    <Card className="border-slate-800 bg-slate-950/50">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm">
+          <ChartNoAxesColumn className="size-4 text-sky-400" /> Label explorer
+        </CardTitle>
+        <p className="text-xs text-slate-500">
+          Share of the {matched} matched scenes carrying each value. Click a value to add it as a new group.
+        </p>
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter labels…"
+          aria-label="Filter labels"
+          className="mt-2 h-8 w-full rounded-md border border-slate-700 bg-slate-900 px-2 text-xs placeholder:text-slate-600"
+        />
+      </CardHeader>
+      <CardContent className="max-h-[70vh] space-y-4 overflow-y-auto">
+        {groupByNamespace(shown).map(([namespace, items]) => (
+          <section key={namespace}>
+            <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+              {namespaceLabel(namespace)}
+            </h4>
+            <div className="space-y-3">
+              {items.map((facet) => (
+                <div key={facet.key}>
+                  <div className="mb-1 truncate text-xs text-slate-300" title={facet.key}>
+                    {keyLabel(facet.key)}
+                  </div>
+                  <div className="space-y-0.5">
+                    {facet.values.map(({ value, scenes }) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => onPick(facet.key, value)}
+                        aria-label={`Add ${keyLabel(facet.key)} is ${valueLabel(value)}, ${scenes} scenes`}
+                        className="group grid w-full grid-cols-[6.5rem_1fr_2.5rem] items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-slate-900"
+                      >
+                        <span className="truncate text-[11px] text-slate-400 group-hover:text-slate-200">
+                          {valueLabel(value)}
+                        </span>
+                        <span className="relative h-2.5 overflow-hidden rounded-full bg-slate-800/70">
+                          <span
+                            className="absolute inset-y-0 left-0 rounded-full"
+                            style={{
+                              width: `${matched ? (scenes / matched) * 100 : 0}%`,
+                              background: valueColor(vocabulary, facet.key, value),
+                            }}
+                          />
+                        </span>
+                        <span className="text-right text-[11px] tabular-nums text-slate-500">{scenes}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        ))}
+      </CardContent>
+    </Card>
+  );
 }
 
 function ODDPageInner() {
@@ -71,248 +266,205 @@ function ODDPageInner() {
     searchParams.get("version") ||
     datasets.data?.find((item) => item.name === dataset)?.version ||
     "";
-  // A joined string keeps the parsed terms stable across renders.
-  const whereKey = searchParams.getAll("where").join("\n");
-  const where = useMemo(
-    () => parseWhere(whereKey ? whereKey.split("\n") : []),
-    [whereKey],
-  );
+  const qParam = searchParams.get("q");
+  const applied = useMemo(() => parseQueryParam(qParam), [qParam]);
+  const appliedKey = JSON.stringify(applied);
   const offset = Math.max(0, parseInt(searchParams.get("offset") ?? "", 10) || 0);
 
+  const [draft, setDraft] = useState<ODDQuery>(applied);
+  // Follow back/forward navigation: a new applied query replaces the draft
+  // unless the draft already cleans to it (the user is mid-edit).
+  useEffect(() => {
+    setDraft((current) => (JSON.stringify(cleanQuery(current)) === appliedKey ? current : applied));
+  }, [applied, appliedKey]);
+
+  function navigate(next: { dataset?: string; query?: ODDQuery; offset?: number }, push = true) {
+    const query = new URLSearchParams();
+    query.set("dataset", next.dataset ?? dataset);
+    if (next.dataset === undefined && version) query.set("version", version);
+    const q = next.query ?? applied;
+    if (q.groups.length > 0) query.set("q", JSON.stringify(q));
+    if ((next.offset ?? 0) > 0) query.set("offset", String(next.offset));
+    const url = `${pathname}?${query.toString()}`;
+    if (push) router.push(url, { scroll: false });
+    else router.replace(url, { scroll: false });
+  }
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
+
+  // Apply the draft shortly after the last edit.
+  useEffect(() => {
+    const cleaned = cleanQuery(draft);
+    if (JSON.stringify(cleaned) === appliedKey) return;
+    const timer = setTimeout(() => navigateRef.current({ query: cleaned }, false), APPLY_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [draft, appliedKey]);
+
   const search = useApi(
-    () => searchODDScenes(dataset, version, where, offset, PAGE_SIZE),
-    [dataset, version, where, offset],
+    () => searchODDScenes(dataset, version, applied, offset, PAGE_SIZE),
+    [dataset, version, appliedKey, offset],
     Boolean(dataset && version),
   );
-  const noLabels =
-    search.error instanceof ApiError && search.error.status === 404;
-
-  function navigate(next: {
-    dataset?: string;
-    where?: ODDCondition[];
-    offset?: number;
-  }) {
-    const query = new URLSearchParams();
-    const nextDataset = next.dataset ?? dataset;
-    query.set("dataset", nextDataset);
-    if (next.dataset === undefined && version) query.set("version", version);
-    for (const condition of next.where ?? where) {
-      query.append("where", `${condition.key}=${condition.value}`);
-    }
-    const nextOffset = next.offset ?? 0;
-    if (nextOffset > 0) query.set("offset", String(nextOffset));
-    router.push(`${pathname}?${query.toString()}`, { scroll: false });
-  }
-
+  const noLabels = search.error instanceof ApiError && search.error.status === 404;
   const response = search.data;
-  const activeTerms = new Set(where.map((c) => `${c.key}=${c.value}`));
+  const vocabulary = useMemo(
+    () => new Map((response?.vocabulary ?? []).map((f) => [f.key, f])),
+    [response?.vocabulary],
+  );
+
+  function addCondition(key: string, value: string) {
+    setDraft((current) => ({
+      ...current,
+      groups: [...current.groups, { op: "and", conditions: [{ ...emptyCondition(key), values: [value] }] }],
+    }));
+  }
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-lg font-semibold">ODD Search</h2>
-        <p className="text-sm text-slate-400">
-          Find scenes by their operational design domain labels. A scene
-          matches when it has a valid label for every selected value.
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">ODD Search</h2>
+          <p className="max-w-2xl text-sm text-slate-400">
+            Find scenes by their operational design domain labels. Every label is an interval inside
+            its scene, so results show where in the scene each condition holds.
+          </p>
+        </div>
+        {datasets.error ? null : (
+          <div className="flex items-center gap-2">
+            <select
+              value={dataset}
+              onChange={(event) => navigate({ dataset: event.target.value, query: { op: "and", groups: [] } })}
+              disabled={datasets.loading || !datasets.data?.length}
+              className="h-9 rounded-md border border-slate-700 bg-slate-900 px-3 text-sm"
+              aria-label="Dataset"
+            >
+              {!datasets.data?.length && <option value="">—</option>}
+              {(datasets.data ?? []).map((item) => (
+                <option key={item.name} value={item.name}>
+                  {friendlyDataset(item.name)}
+                </option>
+              ))}
+            </select>
+            <span className="rounded-md bg-slate-900 px-2 py-1.5 font-mono text-xs text-slate-300 ring-1 ring-slate-800">
+              {version || "—"}
+            </span>
+          </div>
+        )}
       </div>
 
       {datasets.error ? (
         <ErrorState error={datasets.error} onRetry={datasets.reload} />
-      ) : (
-        <div className="flex flex-wrap items-center gap-2">
-          <select
-            value={dataset}
-            onChange={(event) =>
-              navigate({ dataset: event.target.value, where: [] })
-            }
-            disabled={datasets.loading || !datasets.data?.length}
-            className="h-9 rounded-md border border-slate-700 bg-slate-900 px-3 text-sm"
-            aria-label="Dataset"
-          >
-            {!datasets.data?.length && <option value="">—</option>}
-            {(datasets.data ?? []).map((item) => (
-              <option key={item.name} value={item.name}>
-                {friendlyDataset(item.name)}
-              </option>
-            ))}
-          </select>
-          <span className="font-mono text-sm text-slate-400">{version}</span>
-        </div>
-      )}
-
-      {where.length > 0 && (
-        <div
-          role="group"
-          className="flex flex-wrap items-center gap-2"
-          aria-label="Active filters"
-        >
-          {where.map((condition) => (
-            <Button
-              key={`${condition.key}=${condition.value}`}
-              variant="secondary"
-              size="sm"
-              onClick={() =>
-                navigate({
-                  where: where.filter(
-                    (c) => c.key !== condition.key || c.value !== condition.value,
-                  ),
-                })
-              }
-              aria-label={`Remove ${condition.key}=${condition.value}`}
-            >
-              <span className="font-mono text-xs">
-                {condition.key}={condition.value}
-              </span>
-              <X className="size-3" />
-            </Button>
-          ))}
-          <Button variant="ghost" size="sm" onClick={() => navigate({ where: [] })}>
-            Clear
-          </Button>
-        </div>
-      )}
-
-      {datasets.error ? null : noLabels ? (
+      ) : noLabels ? (
         <Card className="border-slate-800 bg-slate-950/50">
-          <CardContent className="py-6 text-sm text-slate-400">
+          <CardContent className="flex items-center gap-3 py-8 text-sm text-slate-400">
+            <ShieldAlert className="size-5 text-slate-500" />
             No ODD labels for {friendlyDataset(dataset)} {version}.
           </CardContent>
         </Card>
-      ) : search.error ? (
+      ) : search.error && !response ? (
         <ErrorState error={search.error} onRetry={search.reload} service="S3" />
-      ) : search.loading || !response ? (
-        <Skeleton className="h-64 w-full" />
+      ) : !response ? (
+        <div className="space-y-4">
+          <Skeleton className="h-24 w-full" />
+          <Skeleton className="h-64 w-full" />
+        </div>
       ) : (
         <>
-          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-            <span>
-              {response.page.total} of {response.labeled_scenes} scenes match.
-            </span>
-            <span>
-              Labels from{" "}
-              <span className="font-mono">
-                {response.dataset} {response.label_version}
-              </span>{" "}
-              (<span className="font-mono">{response.labelset_id}</span>)
-            </span>
-            <Badge variant="secondary">
-              {response.quality.certification_status}
-            </Badge>
-            <Badge variant="secondary">{response.quality.audit_status}</Badge>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <StatTile
+              label="Matched scenes"
+              value={`${response.page.total}`}
+              detail={`of ${response.labeled_scenes} scenes match.`}
+              busy={search.loading}
+            />
+            <StatTile
+              label="Share"
+              value={`${response.labeled_scenes ? Math.round((response.page.total / response.labeled_scenes) * 100) : 0}%`}
+              detail={<span className="block truncate" title={describeQuery(applied)}>{describeQuery(applied)}</span>}
+            />
+            <StatTile
+              label="Labels from"
+              value={`${response.label_version}`}
+              detail={
+                <span className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-mono">{response.dataset} {response.label_version}</span>
+                  <span className="truncate font-mono text-slate-600" title={response.labelset_id}>
+                    {response.labelset_id.slice(0, 14)}…
+                  </span>
+                  <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-200 ring-1 ring-amber-500/30">
+                    {response.quality.certification_status}
+                  </span>
+                  <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300">
+                    {response.quality.audit_status}
+                  </span>
+                </span>
+              }
+            />
           </div>
 
           <Card className="border-slate-800 bg-slate-950/50">
-            <CardHeader>
-              <CardTitle className="text-sm">Scenes</CardTitle>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm">Query</CardTitle>
             </CardHeader>
             <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Shard</TableHead>
-                    <TableHead className="text-right">Duration</TableHead>
-                    <TableHead className="text-right">Distance</TableHead>
-                    <TableHead>First match</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {response.scenes.map((scene) => (
-                    <TableRow key={scene.scene_uid}>
-                      <TableCell className="font-mono text-xs">
-                        <Link
-                          href={`/scenes/${encodeURIComponent(response.dataset)}/${encodeURIComponent(scene.shard)}/0?version=${encodeURIComponent(response.version)}`}
-                          className="inline-flex items-center gap-1 text-blue-400 hover:underline"
-                        >
-                          <Play className="size-3" />
-                          {scene.shard}
-                        </Link>
-                      </TableCell>
-                      <TableCell className="text-right text-xs">
-                        {seconds(scene.duration_ns)}
-                      </TableCell>
-                      <TableCell className="text-right text-xs">
-                        {scene.distance_m.toFixed(0)} m
-                      </TableCell>
-                      <TableCell className="text-xs text-slate-400">
-                        {scene.matches
-                          .map(
-                            (m) =>
-                              `${m.key}=${m.value} @ ${seconds(m.first_offset_ns)}`,
-                          )
-                          .join(", ") || "—"}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-              <div className="mt-4 flex items-center gap-2">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={response.page.offset === 0}
-                  onClick={() =>
-                    navigate({
-                      offset: Math.max(0, response.page.offset - PAGE_SIZE),
-                    })
-                  }
-                >
-                  Previous
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={!response.page.more}
-                  onClick={() =>
-                    navigate({ offset: response.page.offset + PAGE_SIZE })
-                  }
-                >
-                  Next
-                </Button>
-              </div>
+              <QueryBuilder draft={draft} onChange={setDraft} vocabulary={response.vocabulary} />
             </CardContent>
           </Card>
 
-          <Card className="border-slate-800 bg-slate-950/50">
-            <CardHeader>
-              <CardTitle className="text-sm">
-                Labels in the matched scenes
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {response.facets.map((facet) => (
-                <div key={facet.key} className="min-w-0">
-                  <div className="mb-1 truncate font-mono text-xs text-slate-300">
-                    {facet.key}
-                  </div>
-                  <div className="flex flex-wrap gap-1">
-                    {facet.values.map(({ value, scenes }) => {
-                      const term = `${facet.key}=${value}`;
-                      return (
-                        <Button
-                          key={term}
-                          variant="outline"
-                          size="sm"
-                          disabled={
-                            activeTerms.has(term) || where.length >= MAX_TERMS
-                          }
-                          onClick={() =>
-                            navigate({
-                              where: [...where, { key: facet.key, value }],
-                            })
-                          }
-                          aria-label={`Filter ${term}, ${scenes} scenes`}
-                        >
-                          <span className="font-mono text-xs">{value}</span>
-                          <span className="text-xs text-slate-500">{scenes}</span>
-                        </Button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+            <section aria-label="Matched scenes" className={cn("space-y-3", search.loading && "opacity-70")}>
+              {response.scenes.length === 0 ? (
+                <Card className="border-slate-800 bg-slate-950/50">
+                  <CardContent className="py-10 text-center text-sm text-slate-500">
+                    No scene matches this query. Loosen a condition or switch a group to ANY.
+                  </CardContent>
+                </Card>
+              ) : (
+                response.scenes.map((scene, i) => (
+                  <SceneCard
+                    key={scene.scene_uid}
+                    scene={scene}
+                    rank={response.page.offset + i + 1}
+                    response={response}
+                    vocabulary={vocabulary}
+                  />
+                ))
+              )}
+              {response.page.total > PAGE_SIZE && (
+                <nav aria-label="Pages" className="flex items-center justify-between pt-1 text-xs text-slate-400">
+                  <span className="tabular-nums">
+                    {response.page.offset + 1}–{response.page.offset + response.scenes.length} of {response.page.total}
+                  </span>
+                  <span className="flex gap-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={response.page.offset === 0}
+                      onClick={() => navigate({ offset: Math.max(0, response.page.offset - PAGE_SIZE) })}
+                    >
+                      <ChevronLeft className="size-3.5" /> Previous
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={!response.page.more}
+                      onClick={() => navigate({ offset: response.page.offset + PAGE_SIZE })}
+                    >
+                      Next <ChevronRight className="size-3.5" />
+                    </Button>
+                  </span>
+                </nav>
+              )}
+            </section>
+            <aside>
+              <LabelExplorer
+                facets={response.facets}
+                matched={response.page.total}
+                vocabulary={vocabulary}
+                onPick={addCondition}
+              />
+            </aside>
+          </div>
         </>
       )}
     </div>
