@@ -380,7 +380,7 @@ function ODDPageInner() {
             No ODD labels for {friendlyDataset(dataset)} {version}.
           </CardContent>
         </Card>
-      ) : search.error && !response ? (
+      ) : search.error && (!response || response.dataset !== dataset) ? (
         <ErrorState error={search.error} onRetry={search.reload} service="S3" />
       ) : !response || response.dataset !== dataset ? (
         <div className="space-y-4">
