@@ -147,3 +147,12 @@ def test_the_end_of_the_recording_is_rejected() -> None:
     plan, speeds, controls, start = _plan()
     with pytest.raises(ValueError):
         _scorer().score(plan, speeds, controls, start, 10_950_000)  # one step left
+
+
+def test_gated_plans_keep_the_order_of_their_first_violation() -> None:
+    scorer = _scorer()
+    assert scorer.score(*_plan(), T0_US)["safe_fraction"] == 1.0
+    sooner = scorer.score(*_plan(y_end=-6.0), T0_US)
+    later = scorer.score(*_plan(y_end=-2.5), T0_US)
+    assert sooner["gated"] == later["gated"] == 1.0
+    assert 0.0 < sooner["safe_fraction"] < later["safe_fraction"] < 1.0
