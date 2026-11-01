@@ -80,3 +80,43 @@ This is the copycat failure of imitation policies that condition on their own
 past motion: the history explains the logged future well open-loop, and feeds
 back closed-loop. A cheap check without retraining is a closed-loop run with
 the yaw rate and curvature history zeroed at inference.
+
+## 2026-11-01: map and route inputs, first GRPO run (r1)
+
+AlpaSim `affc2eab209f` with `alpasim.patch`, `driver=autoe2e_nuplan`,
+nuPlan Epoch 5, scene `clipgt-01d503d4`, 110 steps (7 s on the log, then
+4 s and 40 decisions in closed loop), one rollout per iteration. The driver
+loaded the scene's HD map and fed map context and route mask from here on.
+
+r1 ran the first version of `rl/grpo_step.py`: phase-1 reward
+`-(ADE + 0.5 FDE)`, plain SGD (lr 1e-4) on the log-likelihood, KL only in the
+low-frequency subspace, no trust region. Review found the SGD step scaled
+curvature about 100x over acceleration and the KL ignored high frequencies;
+both are fixed in the current code, so r1 documents the failure, not the
+current method.
+
+| Iteration | Collision | Off-road (first) | Max dist to GT traj. [m] | Driven / recorded [m] |
+| :--- | :--- | :--- | ---: | ---: |
+| 0 (imitation) | no | yes (3.8 s) | 5.89 | 30.1 / 73.8 |
+| 1 | front (2.9 s) | no | 2.33 | 28.4 / 73.8 |
+| 2 | no | no | 3.81 | 30.8 / 73.8 |
+| 3 | front (3.9 s) | no | 1.11 | 28.8 / 73.8 |
+
+Times are after takeover; "driven / recorded" compares the 11 s rollout with
+the whole 20 s recording.
+
+| GRPO step | Decisions | Mean-plan reward | Group reward std | KL to imitation | Replay error [m] |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| 1 (iteration 0 rollout) | 37 | -20.4 | 0.84 | 0 | 1.3e-4 |
+| 2 (iteration 1 rollout) | 40 | -12.5 | 0.36 | 71 | 3.5e-5 |
+| 3 (iteration 2 rollout) | 39 | -16.2 | 0.71 | 1852 | 9.4e-5 |
+
+- The replay reproduces the executed plans to 0.1 mm, so the updates were
+  on-policy.
+- The KL grows from 71 to 1852 in two steps: with no bound on the step, the
+  planner left the imitation policy far beyond the sampling scale. The
+  driving changes from one iteration to the next (off-road, then front
+  collisions) are therefore not evidence of learning; with one rollout per
+  iteration they cannot be separated from that drift.
+- The phase-1 reward never sees other vehicles; iterations 1 and 3 hit one
+  front-first. The current reward (`rl/reward.py`) gates collisions.
