@@ -434,7 +434,7 @@ func decodeODDSceneIndex(
 		_, seen := labels.sceneByUID[scene.SceneUID]
 		if !published || !ValidODDSceneUID(scene.SceneUID) || seen ||
 			shards[scene.ShardName] ||
-			scene.StartTimestampNS < 0 ||
+			scene.StartTimestampNS < 0 || scene.DistanceM < 0 ||
 			scene.EndTimestampNS <= scene.StartTimestampNS {
 			return nil, fmt.Errorf("invalid scene %q", scene.SceneUID)
 		}
