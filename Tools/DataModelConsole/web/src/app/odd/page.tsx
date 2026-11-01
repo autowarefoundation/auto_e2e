@@ -67,7 +67,7 @@ function StatTile({
   busy?: boolean;
 }) {
   return (
-    <div className="rounded-xl border border-slate-800 bg-gradient-to-b from-slate-900/80 to-slate-950/60 p-4">
+    <div className="min-w-0 rounded-xl border border-slate-800 bg-gradient-to-b from-slate-900/80 to-slate-950/60 p-4">
       <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-slate-500">
         {label}
         {busy && <Loader2 className="size-3 animate-spin text-slate-400" aria-label="Updating" />}
