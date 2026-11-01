@@ -30,7 +30,7 @@ def main() -> None:
         subprocess.run([
             str(args.root / "wsm-venv/bin/cosmos-auto-wm"),
             f"input_root={args.scene / 'rds-hq'}", f"output_root={wsm_root}",
-            "version=v4", "s3_spec=no_upload", "camera_type=pinhole",
+            "version=v4", "s3_spec=no_upload", "camera_type=ftheta",
             f"camera_spec.camera_list=[{','.join(keys)}]",
             "input_fps_spec.input_pose_fps=30", "resolution_spec=resize_1280x720",
             "output_frame_spec.target_render_fps=30", f"output_frame_spec.target_chunk_frame={frames}",
