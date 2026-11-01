@@ -425,11 +425,30 @@ type SceneSearchResponse struct {
 	Truncated     bool       `json:"truncated"`
 }
 
-// ODDCondition is one search term: the scene must carry a valid ODD
-// observation of Key whose values include Value.
-type ODDCondition struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
+// ODDQuery selects scenes by their ODD labels: the top-level Op ("and" or
+// "or") joins Groups, and each group's Op joins its Conditions.
+type ODDQuery struct {
+	Op     string          `json:"op"`
+	Groups []ODDQueryGroup `json:"groups"`
+}
+
+// ODDQueryGroup is one parenthesised group of conditions.
+type ODDQueryGroup struct {
+	Op         string              `json:"op"`
+	Conditions []ODDQueryCondition `json:"conditions"`
+}
+
+// ODDQueryCondition holds when the scene has a valid labelled interval of Key
+// whose values include one of Values and that lasts at least MinDurationS,
+// has at least MinConfidence and comes from one of Sources (any source when
+// empty). Not inverts it: no such interval exists.
+type ODDQueryCondition struct {
+	Key           string   `json:"key"`
+	Values        []string `json:"values"`
+	Not           bool     `json:"not,omitempty"`
+	MinDurationS  float64  `json:"min_duration_s,omitempty"`
+	MinConfidence float64  `json:"min_confidence,omitempty"`
+	Sources       []string `json:"sources,omitempty"`
 }
 
 // ODDQuality is the review state the ODD LabelSet manifest declares.
@@ -439,49 +458,75 @@ type ODDQuality struct {
 	CertificationStatus string `json:"certification_status"`
 }
 
-// ODDFacetValue counts the matched scenes carrying one value of a key.
+// ODDFacetValue counts the scenes carrying one value of a key.
 type ODDFacetValue struct {
 	Value  string `json:"value"`
 	Scenes int    `json:"scenes"`
 }
 
-// ODDFacet lists the values of one ODD key across the matched scenes.
+// ODDFacet lists the values of one ODD key over a set of scenes, and the
+// sources that labelled it.
 type ODDFacet struct {
-	Key    string          `json:"key"`
-	Values []ODDFacetValue `json:"values"`
+	Key     string          `json:"key"`
+	Values  []ODDFacetValue `json:"values"`
+	Sources []string        `json:"sources"`
 }
 
-// ODDSceneMatch is where one search condition first holds in a scene, as an
-// offset from the scene start.
-type ODDSceneMatch struct {
-	Key           string `json:"key"`
-	Value         string `json:"value"`
-	FirstOffsetNS int64  `json:"first_offset_ns"`
+// ODDInterval is one labelled interval. StartNS and EndNS are offsets from
+// the scene start.
+type ODDInterval struct {
+	StartNS    int64    `json:"start_ns"`
+	EndNS      int64    `json:"end_ns"`
+	Values     []string `json:"values"`
+	Source     string   `json:"source"`
+	Confidence float64  `json:"confidence"`
+	CameraID   string   `json:"camera_id,omitempty"`
 }
 
-// ODDScene is one matched scene. Shard is the shard name in the requested
-// version, which the player opens.
+// ODDLane is the intervals of one key in a scene, in start order.
+type ODDLane struct {
+	Key       string        `json:"key"`
+	Intervals []ODDInterval `json:"intervals"`
+}
+
+// ODDScene is one scene. Shard is the shard name in the requested version,
+// which the player opens. In a search result Lanes holds the intervals that
+// satisfied the query; in a scene response it holds every valid label.
 type ODDScene struct {
-	SceneUID   string          `json:"scene_uid"`
-	Shard      string          `json:"shard"`
-	DurationNS int64           `json:"duration_ns"`
-	DistanceM  float64         `json:"distance_m"`
-	Matches    []ODDSceneMatch `json:"matches"`
+	SceneUID   string    `json:"scene_uid"`
+	Shard      string    `json:"shard"`
+	DurationNS int64     `json:"duration_ns"`
+	DistanceM  float64   `json:"distance_m"`
+	Lanes      []ODDLane `json:"lanes"`
 }
 
-// ODDSearchResponse wraps GET /api/v1/odd/scenes. LabelVersion is the dataset
-// version the LabelSet was made for; it differs from Version when the labels
-// are carried forward to a later pack of the same scenes.
+// ODDLabelSetInfo identifies the LabelSet behind a response. LabelVersion is
+// the dataset version it was made for; it differs from Version when the
+// labels are carried forward to a later pack of the same scenes.
+type ODDLabelSetInfo struct {
+	Dataset        string     `json:"dataset"`
+	Version        string     `json:"version"`
+	LabelVersion   string     `json:"label_version"`
+	LabelSetID     string     `json:"labelset_id"`
+	ManifestSHA256 string     `json:"manifest_sha256"`
+	Quality        ODDQuality `json:"quality"`
+	LabeledScenes  int        `json:"labeled_scenes"`
+}
+
+// ODDSearchResponse wraps GET /api/v1/odd/scenes. Vocabulary covers every
+// labelled scene (the choices for building a query); Facets covers the
+// matched scenes.
 type ODDSearchResponse struct {
-	Dataset        string         `json:"dataset"`
-	Version        string         `json:"version"`
-	LabelVersion   string         `json:"label_version"`
-	LabelSetID     string         `json:"labelset_id"`
-	ManifestSHA256 string         `json:"manifest_sha256"`
-	Quality        ODDQuality     `json:"quality"`
-	LabeledScenes  int            `json:"labeled_scenes"`
-	Where          []ODDCondition `json:"where"`
-	Facets         []ODDFacet     `json:"facets"`
-	Scenes         []ODDScene     `json:"scenes"`
-	Page           Page           `json:"page"`
+	ODDLabelSetInfo
+	Query      ODDQuery   `json:"query"`
+	Vocabulary []ODDFacet `json:"vocabulary"`
+	Facets     []ODDFacet `json:"facets"`
+	Scenes     []ODDScene `json:"scenes"`
+	Page       Page       `json:"page"`
+}
+
+// ODDSceneResponse wraps GET /api/v1/odd/scenes/{scene_uid}.
+type ODDSceneResponse struct {
+	ODDLabelSetInfo
+	Scene ODDScene `json:"scene"`
 }
