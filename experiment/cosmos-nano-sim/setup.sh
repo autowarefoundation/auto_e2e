@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Prepare one GPU EC2 instance for the Cosmos3-Nano-Sim-Auto experiment.
-# Everything lives under ROOT (the instance-store NVMe), so the root disk stays untouched.
+# Everything lives under ROOT on the EBS root volume (about 55 GB), as experiment data must stay on EBS.
 # Re-running is safe: finished steps are skipped.
 set -euo pipefail
 
-ROOT=${ROOT:-/opt/dlami/nvme/cosmos-nano-sim}
+ROOT=${ROOT:-/home/ubuntu/cosmos-nano-sim}
 FRAMEWORK_COMMIT=55f0554d0bf167603432041c794a8babbac759b9   # NVIDIA/cosmos-framework, 2026-11-01
 MODEL_REVISION=e289a50a4049614eaa62c9edc10b1e8d6cc1a6c1      # nvidia/Cosmos3-Nano-Sim-Auto
 SAMPLE_REVISION=main                                         # shared sample in Cosmos3-Nano-Transfer-Auto
