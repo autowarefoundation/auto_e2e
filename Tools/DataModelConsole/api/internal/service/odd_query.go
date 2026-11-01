@@ -93,6 +93,7 @@ func (s *S3Service) SearchODDScenes(
 		return nil, err
 	}
 	compiled := compileODDQuery(query)
+	empty := len(query.Groups) == 0
 	type hit struct {
 		scene oddScene
 		lanes []oddLane
@@ -107,6 +108,11 @@ func (s *S3Service) SearchODDScenes(
 		matchedScenes = append(matchedScenes, scene)
 		hits = append(hits, hit{scene, lanes})
 	}
+	// Every scene matches an empty query, so its facets are the vocabulary.
+	facets := labels.vocabulary
+	if !empty {
+		facets = oddFacets(matchedScenes)
+	}
 	// Lanes are converted to the response shape for one page only.
 	pageHits, pageInfo := paginate(hits, limit, offset, len(hits))
 	page := make([]model.ODDScene, len(pageHits))
@@ -116,7 +122,7 @@ func (s *S3Service) SearchODDScenes(
 	return &model.ODDSearchResponse{
 		ODDLabelSetInfo: info,
 		Vocabulary:      labels.vocabulary,
-		Facets:          oddFacets(matchedScenes),
+		Facets:          facets,
 		Scenes:          page,
 		Page:            pageInfo,
 	}, nil
