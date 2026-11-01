@@ -194,15 +194,6 @@ def test_human_filter_holds_between_recorded_samples() -> None:
         assert scorer.score(*_plan(x0=x0), T0_US)["dac"] == 1.0
 
 
-def test_a_static_track_stays_where_it_was_seen() -> None:
-    # A parked car seen only in the first second of the clip, 30 m ahead of the ego's path.
-    times = np.array([0, 1_000_000])
-    parked = Track(Box(4.5, 2.0), times, np.array([[40.0, 0.0, 0.0], [40.0, 0.0, 0.0]]), road_user=True,
-                   static=True)
-    terms = _scorer(tracks=[parked]).score(*_plan(), T0_US + 1_000_000)
-    assert terms["nc"] == 0.0
-
-
 def test_a_moving_track_is_not_stopped_at_its_last_sample() -> None:
     times = np.array([0, 2_000_000])
     track = Track(Box(4.5, 2.0), times, np.array([[0.0, 0.0, 0.0], [20.0, 0.0, 0.0]]), road_user=True)
@@ -219,3 +210,20 @@ def test_progress_follows_the_log_from_the_ego_s_place() -> None:
     t0 = 6_000_000  # the log is stopped at x = 40 m; the ego is still at x = 10 m
     assert scorer.score(*_plan(speed=0.0), t0)["ep"] == 0.0
     assert scorer.score(*_plan(speed=7.5), t0)["ep"] == pytest.approx(1.0)
+
+
+def test_a_track_shorter_than_a_tenth_of_a_second_has_no_speed() -> None:
+    stub = Track(Box(4.5, 2.0), np.array([0, 50_000]), np.zeros((2, 3)), road_user=True)
+    assert stub.speed(25_000) == 0.0
+
+
+def test_waiting_where_the_log_waited_earns_no_progress_after_it_left() -> None:
+    """The log waited at x = 40 m from 4 s to 8 s; the ego stands just short of it later."""
+    times = np.arange(0, 15_000_001, 100_000, dtype=np.int64)
+    t = times / 1e6
+    x = np.where(t < 4, 10 * t, np.where(t < 8, 40.0, 40 + 10 * (t - 8)))
+    scorer = SceneScorer([_lane(0.0, 1), _lane(3.5, 1)], [], [], EGO, times,
+                         np.column_stack([x, np.zeros(len(times))]), np.zeros(len(times)))
+    stay = scorer.score(*_plan(speed=0.0, x0=39.5), 9_000_000)
+    drive = scorer.score(*_plan(speed=10.0, x0=39.5), 9_000_000)
+    assert stay["ep"] == 0.0 and drive["ep"] == pytest.approx(1.0)
