@@ -88,7 +88,7 @@ async function mockAPI(page: Page, searches: URL[]) {
   });
 }
 
-test("ODD search carries v3.0 labels to v3.7 and drills down by facet", async ({
+test("ODD search shows the label version and drills down by facet", async ({
   page,
 }) => {
   const searches: URL[] = [];
@@ -130,4 +130,25 @@ test("ODD search says so when a dataset has no labels", async ({ page }) => {
   ).toBeVisible();
   await page.getByLabel("Dataset").selectOption("kitscenes");
   await expect(page.getByText("2 of 404 scenes match.")).toBeVisible();
+});
+
+test("ODD search drops malformed and duplicate where terms", async ({
+  page,
+}) => {
+  const searches: URL[] = [];
+  await mockAPI(page, searches);
+  await page.goto(
+    "/odd?dataset=kitscenes&where=odd.road.context%3DUrban" +
+      "&where=odd.road.context%3Durban&where=odd.road.context%3Durban",
+  );
+
+  await expect(page.getByText("1 of 404 scenes match.")).toBeVisible();
+  expect(searches.at(-1)?.searchParams.getAll("where")).toEqual([
+    "odd.road.context=urban",
+  ]);
+  await expect(
+    page.getByRole("group", { name: "Active filters" }).getByRole("button", {
+      name: "Remove odd.road.context=urban",
+    }),
+  ).toHaveCount(1);
 });
