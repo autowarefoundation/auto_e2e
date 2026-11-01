@@ -50,7 +50,10 @@ export function TimeAxis({ durationNs }: { durationNs: number }) {
       {ticks.map((t) => (
         <span
           key={t}
-          className="absolute -translate-x-1/2"
+          // Edge ticks align inward so their text stays inside the track.
+          className={
+            t === 0 ? "absolute" : t >= durationS - 1e-6 ? "absolute -translate-x-full" : "absolute -translate-x-1/2"
+          }
           style={{ left: `${(t / durationS) * 100}%` }}
         >
           {t}s
