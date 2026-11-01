@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/model"
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
 )
 
@@ -44,6 +47,32 @@ func TestParseODDQuery(t *testing.T) {
 		if _, err := parseODDQuery(raw); !errors.As(err, &invalid) {
 			t.Errorf("%s: err = %v, want ErrInvalidODDQuery", name, err)
 		}
+	}
+}
+
+func TestParseODDQueryAcceptsTheLargestValidQuery(t *testing.T) {
+	long := func(prefix string, n int) string { return prefix + strings.Repeat("a", n-len(prefix)) }
+	condition := model.ODDQueryCondition{Key: "odd." + long("k", 124), MinDurationS: 3600, MinConfidence: 1}
+	for i := range 32 {
+		condition.Values = append(condition.Values, long(fmt.Sprintf("v%02d", i), 64))
+	}
+	for i := range 8 {
+		condition.Sources = append(condition.Sources, long(fmt.Sprintf("s%d", i), 64))
+	}
+	query := model.ODDQuery{Op: "and"}
+	for range 3 {
+		group := model.ODDQueryGroup{Op: "or"}
+		for range 8 {
+			group.Conditions = append(group.Conditions, condition)
+		}
+		query.Groups = append(query.Groups, group)
+	}
+	raw, err := json.Marshal(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseODDQuery(string(raw)); err != nil {
+		t.Fatalf("%d-byte maximal query: %v", len(raw), err)
 	}
 }
 
