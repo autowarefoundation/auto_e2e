@@ -376,10 +376,15 @@ func sameSceneInventory(left, right *publicationManifest) bool {
 		}
 	}
 	samples := make(map[string]int, len(left.Partitions))
+	total := 0
 	for _, partition := range left.Partitions {
+		if partition.PartitionID == "" || partition.SampleCount < 0 {
+			return false
+		}
 		samples[partition.PartitionID] = partition.SampleCount
+		total += partition.SampleCount
 	}
-	if len(samples) != len(left.Partitions) {
+	if len(samples) != len(left.Partitions) || total != left.TotalSamples {
 		return false
 	}
 	for _, partition := range right.Partitions {
