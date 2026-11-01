@@ -130,13 +130,16 @@ Choices and why:
   NC and TTC use the logged objects' future boxes, which the policy never
   observes, and DAC, DDC and LK use the vector map rather than the raster the
   policy reads, so every term can change the ranking of plans (#123's
-  non-redundancy). V keeps plans within 2.5-3 m of the recorded path, where
+  non-redundancy). Collisions follow NAVSIM's contact types and at-fault
+  rules, off-road follows AlpaSim's own offroad metric (not covered by lanes
+  and touching a road edge), and EPDMS's human filter forgives a rule where
+  the recorded drive breaks it at the same place. V keeps plans within 2.5-3 m of the recorded path, where
   the reconstruction is reliable; as RAD (arXiv:2502.13144) does, it measures
   distance to the path, not to the recorded position at the same time, so
   braking is not penalised. The phase-1 reward of
   `Design/reinforcement_learning.md` §6.1 (distance to the log) is dropped:
   the anchor to the imitation planner already keeps the policy near the log.
-  Episodes still end when the ego is more than 3 m from the recording.
+  Episodes end when the ego is more than 3 m from the recorded path.
 - Update rule: GRPO (Shao et al., 2024, arXiv:2402.03300) with groups of 8
   plans sampled at the same closed-loop state, as ReCogDrive
   (arXiv:2506.08052) and AutoVLA (arXiv:2506.13757) score whole trajectories
@@ -158,9 +161,11 @@ Choices and why:
 - Step: the natural gradient with respect to the mean plan
   (Fisher-preconditioned, so the smaller-sigma signal is not favoured), passed
   to the planner's parameters by back-propagation, plus a pull towards the
-  imitation planner over all 64 steps. The step is halved until the new mean
-  plan stays within a trust region of the old one on every scored state, as
-  in TRPO. Without it the first run's steps diverged (see RESULTS.md).
+  imitation planner over all 64 steps. The planner detaches its recurrent
+  state from its BEV lookup, so the parameter gradient is approximate; the
+  step is halved until it lowers the surrogate and keeps the new mean plan
+  within a trust region of the old one on every scored state, TRPO's line
+  search. Without a bound the first run's steps diverged (see RESULTS.md).
 - Gated plans score `-1 + safe_fraction`, the share of their steps before
   the first violation, so a plan that collides never ranks above one that
   merely stops, and among plans that all fail, the one that fails later ranks
@@ -170,7 +175,8 @@ Choices and why:
 
 Limits: the reward of a decision ignores what the executed plan does to later
 decisions, so this is a contextual bandit on visited states, not credit
-assignment over the episode. Logged objects do not react to the ego. The
+assignment over the episode. Noise and gradient reach all 64 steps, while the
+reward scores the first 40. Logged objects do not react to the ego. The
 renderer bound keeps the policy near the recorded path. Collisions are
 checked at the 0.1 s steps, not swept between them. The route corridor covers
 AlpaSim's 80 m route, where nuPlan training drew every route roadblock. Scene
