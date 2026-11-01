@@ -48,7 +48,7 @@ sys.path.insert(0, str(HERE.parent))
 
 from grpo import group_advantages, grpo_loss, low_frequency_basis, plan_distance, sample_plans  # noqa: E402
 from replay_driver import NUPLAN_CAMERAS, prediction_input, read_log  # noqa: E402
-from reward import scene_scorer  # noqa: E402
+from reward import HORIZON_STEPS, scene_scorer  # noqa: E402
 from score_rollout import read_rollout, se3, to_trajectory  # noqa: E402
 
 from alpasim_autoe2e.plugin import AutoE2EDriver  # noqa: E402
@@ -146,15 +146,20 @@ def main() -> None:
         if artifact is None:
             raise SystemExit(f"no USDZ for scene {log.scene_id!r} under {SCENE_ROOT}")
         # The rollout's last ego pose: AlpaSim clips the objects to the rollout.
-        scorer = scene_scorer(artifact, recorded, int(log.poses[-1].timestamp_us))
+        try:
+            scorer = scene_scorer(artifact, recorded, int(log.poses[-1].timestamp_us))
+        except ValueError as error:  # e.g. a scene without an HD map: no reward to compute
+            print(f"skipping {asl}: {error}", file=sys.stderr)
+            continue
         for index, now_us in enumerate(log.requests):
             if index >= len(logged_plans):
                 break  # the rollout ended before this request was answered
             parsed = driver.parser.parse(prediction_input(log, driver.camera_ids, now_us))
             local_from_rig = np.asarray(parsed.pose_local_to_rig_t0.as_se3(), dtype=np.float64)
             deviation = scorer.path_distance(local_from_rig[:2, 3])
-            if deviation > RENDERER_BOUND_M or parsed.t0_us + 2 * WAYPOINT_US >= recorded.time_range_us.stop:
-                break  # the renderer is no longer reliable, or the clip ends: truncated here
+            horizon_end_us = parsed.t0_us + HORIZON_STEPS * WAYPOINT_US
+            if deviation > RENDERER_BOUND_M or horizon_end_us >= recorded.time_range_us.stop:
+                break  # the renderer is no longer reliable, or the 4 s horizon passes the clip's end
             driver._run_model(parsed)  # no grad; the hook keeps the planner inputs
             with torch.enable_grad():
                 mu = planner(*captured.args, **captured.kwargs).reshape(STEPS, 2).float()
