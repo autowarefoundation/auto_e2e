@@ -18,10 +18,11 @@ import type { ODDFacet, ODDInterval, ODDLane } from "@/types";
 const MAX_SUBROWS = 4;
 
 function niceStep(durationS: number): number {
-  for (const step of [1, 2, 5, 10, 20, 30, 60]) {
+  for (const step of [1, 2, 5, 10, 20, 30, 60, 120, 300, 600]) {
     if (durationS / step <= 7) return step;
   }
-  return 120;
+  // The API caps scenes at one hour, so this is not reached.
+  return 600;
 }
 
 // stack assigns each interval (in start order) the first sub-row whose last
