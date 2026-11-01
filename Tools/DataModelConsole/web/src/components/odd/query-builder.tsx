@@ -15,6 +15,7 @@ import {
   MAX_GROUPS,
   conditionCount,
   groupAccent,
+  newConditionID,
   keyLabel,
   namespaceLabel,
   namespaceOf,
@@ -30,8 +31,8 @@ import type {
   ODDQueryGroup,
 } from "@/types";
 
-export function emptyCondition(key = ""): ODDQueryCondition {
-  return { key, values: [] };
+export function emptyCondition(key = "", id = newConditionID()): ODDQueryCondition {
+  return { key, values: [], id };
 }
 
 function OpToggle({
@@ -97,7 +98,7 @@ function ConditionEditor({
       <div className="flex flex-wrap items-center gap-2">
         <select
           value={condition.key}
-          onChange={(e) => onChange(emptyCondition(e.target.value))}
+          onChange={(e) => onChange(emptyCondition(e.target.value, condition.id))}
           aria-label={`Condition ${index} label`}
           className="h-8 w-full min-w-0 rounded-md border border-slate-700 bg-slate-900 px-2 text-sm text-slate-100 sm:w-auto sm:max-w-xs sm:flex-1"
         >
@@ -327,7 +328,7 @@ export function QueryBuilder({
           </div>
           <div className="space-y-2">
             {group.conditions.map((condition, c) => (
-              <div key={c}>
+              <div key={condition.id ?? `${g}-${c}`}>
                 {c > 0 && (
                   <div className="my-1 pl-2 text-[10px] font-semibold tracking-widest text-slate-500">
                     {group.op === "and" ? "AND" : "OR"}
