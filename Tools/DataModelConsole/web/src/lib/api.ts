@@ -15,7 +15,8 @@ import type {
   MLflowRun,
   OverlayModel,
   OverlayModelsResponse,
-  ODDCondition,
+  ODDQuery,
+  ODDSceneResponse,
   ODDSearchResponse,
   ReasoningLabelRecord,
   ReasoningLabelStats,
@@ -628,23 +629,33 @@ export function getExecution(executionId: string): Promise<FlyteExecution> {
 }
 
 // searchODDScenes lists the scenes of dataset/version whose valid ODD labels
-// satisfy every condition, with value counts over the matched scenes. An
-// ApiError with status 404 means the version has no ODD labels.
+// satisfy query, with the intervals that satisfied it. An ApiError with
+// status 404 means the version has no ODD labels.
 export function searchODDScenes(
   dataset: string,
   version: string,
-  where: ODDCondition[],
+  query: ODDQuery,
   offset = 0,
-  limit = 50,
+  limit = 20,
 ): Promise<ODDSearchResponse> {
   const q = new URLSearchParams({
     dataset,
     version,
+    q: JSON.stringify(query),
     limit: String(limit),
     offset: String(offset),
   });
-  for (const condition of where) {
-    q.append("where", `${condition.key}=${condition.value}`);
-  }
   return apiFetch<ODDSearchResponse>(`/api/v1/odd/scenes?${q.toString()}`);
+}
+
+// getODDScene returns every valid ODD label of one scene.
+export function getODDScene(
+  dataset: string,
+  version: string,
+  sceneUID: string,
+): Promise<ODDSceneResponse> {
+  const q = new URLSearchParams({ dataset, version });
+  return apiFetch<ODDSceneResponse>(
+    `/api/v1/odd/scenes/${encodeURIComponent(sceneUID)}?${q.toString()}`,
+  );
 }
