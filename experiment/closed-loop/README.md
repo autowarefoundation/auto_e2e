@@ -161,9 +161,12 @@ Choices and why:
   imitation planner over all 64 steps. The step is halved until the new mean
   plan stays within a trust region of the old one on every scored state, as
   in TRPO. Without it the first run's steps diverged (see RESULTS.md).
-- Gated plans score -1, below every plan that passes the gates, so a plan
-  that collides never ranks above one that merely stops; a group that fails
-  everywhere gives no gradient rather than noise.
+- Gated plans score `-1 + safe_fraction`, the share of their steps before
+  the first violation, so a plan that collides never ranks above one that
+  merely stops, and among plans that all fail, the one that fails later ranks
+  higher, as CaRL's episode ending at a violation implies. Without it, the
+  imitation policy's plans left the lanes within 4 s at most states and whole
+  groups scored the same.
 
 Limits: the reward of a decision ignores what the executed plan does to later
 decisions, so this is a contextual bandit on visited states, not credit
