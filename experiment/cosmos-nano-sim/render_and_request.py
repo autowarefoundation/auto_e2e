@@ -16,7 +16,7 @@ WSM_DIR = "cosmos-framework/.agents/skills/cookbooks/cosmos3/simulation/auto/wsm
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--root", type=Path, default=Path("/opt/dlami/nvme/cosmos-nano-sim"))
+    p.add_argument("--root", type=Path, default=Path("/home/ubuntu/cosmos-nano-sim"))
     p.add_argument("--scene", type=Path, required=True, help="scene directory written by nuplan_to_rdshq.py")
     p.add_argument("--captions", type=Path, required=True, help="JSON mapping camera_key to its caption")
     p.add_argument("--resolution", default="480")
