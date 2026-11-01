@@ -5,11 +5,12 @@ import math
 import pytest
 import torch
 
-from navigation.geometry import NavigationRasterGeometry
+from navigation.geometry import MapChannel, NavigationRasterGeometry
 from training.lateral_recovery import (
     LateralShift,
     MAX_OFFSET_M,
     MAX_YAW_RAD,
+    _frenet_slope,
     _history_camera_targets,
     _warp_images,
     aligned_clean_planner_bev,
@@ -17,6 +18,7 @@ from training.lateral_recovery import (
     ego_shift_transform,
     feature_bottleneck_kl,
     feature_consistency_kl,
+    preserved_batch_norm_statistics,
     recovery_trajectory,
     sample_lateral_shift,
     shift_egomotion_history,
@@ -131,10 +133,11 @@ def test_image_warp_with_identity_target_is_identity():
 
 def test_history_cameras_follow_the_past_displacement():
     rig = torch.stack([_camera(yaw) for yaw in (0, 55, -55, 110, 180, -110)])
-    rows = torch.tensor([28, 33, 38, 43, 48, 53, 58])
-    # A straight 10 m/s history puts row r at x = -(63 - r) m.
+    rows = torch.tensor([29, 34, 39, 44, 49, 54, 59])
+    # Rows end 0.1 s before now, so a straight 10 m/s history puts row r at
+    # x = -(64 - r) m.
     past_from_current = torch.eye(4).repeat(7, 1, 1)
-    past_from_current[:, 0, 3] = (63 - rows).float()
+    past_from_current[:, 0, 3] = (64 - rows).float()
     history = (rig[None] @ past_from_current[:, None])[None]
     lateral = torch.linspace(0.0, 0.6, 64)[None]
     heading = torch.linspace(0.0, 0.04, 64)[None]
@@ -154,7 +157,7 @@ def test_history_cameras_follow_the_past_displacement():
 def test_recovery_target_starts_at_the_shifted_ego_and_rejoins_the_path():
     future = _straight_future(step_m=0.05)
     shift = _shift([0.8], [0.06])
-    target = recovery_trajectory(future, shift)[0]
+    target = recovery_trajectory(future, shift, torch.zeros(1))[0]
     first = target[0]
     # The first point is 5 cm ahead of the shifted ego along its heading.
     assert torch.allclose(first, torch.tensor([0.05, 0.0]), atol=2e-3)
@@ -173,7 +176,10 @@ def test_zero_shift_leaves_target_and_history_unchanged():
     future = torch.randn(2, 64, 2).cumsum(dim=1)
     history = torch.randn(2, 256)
     shift = _shift([0.0, 0.0], [0.0, 0.0])
-    assert torch.equal(recovery_trajectory(future, shift), future)
+    assert torch.equal(
+        recovery_trajectory(future, shift, torch.zeros(2)),
+        future,
+    )
     shifted_history, _, _ = shift_egomotion_history(history, shift)
     assert torch.equal(shifted_history, history)
 
@@ -185,8 +191,12 @@ def test_history_drifts_into_the_shifted_pose():
         shift,
     )
     signals = history.reshape(64, 4)
-    assert lateral[0, -1].item() == pytest.approx(0.8, abs=1e-5)
-    assert heading[0, -1].item() == pytest.approx(0.05, abs=1e-4)
+    # The last row is 0.1 s (1 m) before the shifted current pose.
+    assert lateral[0, -1].item() == pytest.approx(
+        0.8 - math.tan(0.05),
+        abs=5e-3,
+    )
+    assert heading[0, -1].item() == pytest.approx(0.05, abs=3e-3)
     turned = signals[:, 2].sum().item() * 0.1
     assert turned == pytest.approx(0.05, abs=0.01)
     assert torch.equal(signals[:40], _straight_history().reshape(64, 4)[:40])
@@ -225,7 +235,7 @@ def _camera_batch(batch_size=2, size=16):
         "camera_history_projection_matrix": history.expand(
             batch_size, -1, -1, -1, -1
         ).clone(),
-        "map_context": torch.rand(batch_size, 3, 36, 24),
+        "map_context": torch.rand(batch_size, 14, 36, 24),
         "route_mask": torch.rand(batch_size, 2, 36, 24),
         "bev_segmentation_target": torch.rand(batch_size, 2, 36, 24) > 0.5,
         "bev_segmentation_valid": torch.ones(
@@ -284,7 +294,7 @@ def test_inactive_samples_are_bitwise_unchanged(method):
 
 
 def test_raster_mark_moves_to_its_shifted_cell():
-    raster = torch.zeros(1, 1, 36, 24)
+    raster = torch.zeros(1, 14, 36, 24)
     # Ego point (x=4.25 m, y=1.25 m) is row 15, column 9.
     raster[0, 0, 15, 9] = 1.0
     batch = _camera_batch(batch_size=1)
@@ -299,6 +309,59 @@ def test_raster_mark_moves_to_its_shifted_cell():
     # One metre to the left moves the point one metre right in E': two columns.
     peak = torch.nonzero(out["map_context"][0, 0] == 1.0)
     assert peak.tolist() == [[15, 11]]
+
+
+def test_map_traffic_direction_rotates_into_the_shifted_frame():
+    batch = _camera_batch(batch_size=1)
+    batch["map_context"] = torch.zeros(1, 14, 36, 24)
+    batch["map_context"][0, MapChannel.TRAFFIC_DIRECTION_SIN] = 0.5
+    batch["map_context"][0, MapChannel.TRAFFIC_DIRECTION_COS] = 1.0
+    batch["map_context"][0, MapChannel.TRAFFIC_DIRECTION_VALID] = 1.0
+    out = apply_lateral_recovery(
+        batch,
+        _shift([0.0], [math.radians(5.0)]),
+        method="projection",
+        geometry=_GEOMETRY,
+    )
+    cell = out["map_context"][0, :, 18, 12]
+    assert cell[MapChannel.TRAFFIC_DIRECTION_SIN].item() == pytest.approx(
+        (math.sin(math.radians(-5.0)) + 1.0) / 2.0, abs=1e-5
+    )
+    assert cell[MapChannel.TRAFFIC_DIRECTION_COS].item() == pytest.approx(
+        (math.cos(math.radians(-5.0)) + 1.0) / 2.0, abs=1e-5
+    )
+
+
+def test_heading_offset_matches_the_yaw_on_curved_paths():
+    offset = torch.tensor([1.0])
+    yaw = torch.tensor([math.radians(5.0)])
+    curvature = torch.tensor([0.1])
+    slope = _frenet_slope(offset, yaw, curvature)
+    heading = torch.atan2(slope, 1.0 - curvature * offset)
+    assert heading.item() == pytest.approx(yaw.item(), abs=1e-6)
+
+
+def test_planner_bev_alignment_uses_its_own_resolution_and_full_support():
+    shift = _shift([0.1], [0.0])
+    # The planner BEV covers the raster extent at a coarser 24x16 grid.
+    teacher = torch.zeros(1, 2, 24, 16)
+    teacher[:, 0] = 4.0
+    aligned, mask = aligned_clean_planner_bev(teacher, shift, _GEOMETRY)
+    assert aligned.shape == teacher.shape
+    assert bool(mask.any())
+    loss = feature_consistency_kl(teacher.clone(), aligned, mask)
+    assert loss.item() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_teacher_forward_keeps_batch_norm_statistics():
+    norm = torch.nn.BatchNorm2d(3).train()
+    before = [norm.running_mean.clone(), norm.num_batches_tracked.clone()]
+    with torch.no_grad(), preserved_batch_norm_statistics(norm):
+        norm(torch.randn(4, 3, 5, 5) + 2.0)
+    assert torch.equal(norm.running_mean, before[0])
+    assert torch.equal(norm.num_batches_tracked, before[1])
+    norm(torch.randn(4, 3, 5, 5) + 2.0)
+    assert not torch.equal(norm.running_mean, before[0])
 
 
 def test_consistency_kl_trains_only_the_shifted_branch():
@@ -467,11 +530,17 @@ def test_planner_bev_noise_only_applies_in_training(build_mock_model):
     assert torch.equal(plain, noisy)
     assert auxiliary["planner_bev"].shape[-2:] == (8, 8)
     model.train()
+    for module in model.modules():
+        if isinstance(module, torch.nn.Dropout):
+            module.eval()
     torch.manual_seed(0)
-    first, _ = call("train", planner_bev_noise=True)
-    torch.manual_seed(1)
-    second, _ = call("train", planner_bev_noise=True)
-    assert not torch.allclose(first, second)
+    reference, _ = call("train", return_planner_bev=True)
+    torch.manual_seed(0)
+    repeated, _ = call("train", return_planner_bev=True)
+    torch.manual_seed(0)
+    noisy, _ = call("train", planner_bev_noise=True)
+    assert torch.equal(reference, repeated)
+    assert not torch.allclose(reference, noisy)
 
 
 def test_disabled_step_matches_a_direct_forward(build_mock_model, monkeypatch):
