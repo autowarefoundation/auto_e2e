@@ -71,7 +71,7 @@ rm -rf "$ALPASIM_ROOT/plugins/alpasim_driver"
 cp -r Model/plugins/alpasim_driver "$ALPASIM_ROOT/plugins/"
 ```
 
-AlpaSim does not tell a driver model which scene it drives. Apply [`experiment/closed-loop/alpasim.patch`](../../../experiment/closed-loop/alpasim.patch) (4 lines: `PredictionInput.scene_id`); without it the driver runs camera-only.
+AlpaSim does not tell a driver model which scene it drives. Apply [`experiment/closed-loop/alpasim.patch`](../../../experiment/closed-loop/alpasim.patch) (4 lines: `PredictionInput.scene_id`); the driver needs it and fails on an unpatched AlpaSim. A scene whose USDZ has no HD map runs camera-only.
 
 Next, add `autoe2e = ["alpasim_autoe2e"]` to the plugin extras in `$ALPASIM_ROOT/pyproject.toml`, and `--extra autoe2e` to the `uv sync` line of its `Dockerfile`. Then build the image and run:
 
