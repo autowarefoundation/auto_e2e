@@ -6,9 +6,10 @@ this rebuilds the driver's inputs from the log (``replay_driver.py``), runs
 the frozen encoders once and keeps what the planner received. It then samples
 a group of plans around the planner's mean (``grpo.py``) and scores each with
 the gated driving reward (``reward.py``). A plan a safety gate rejects scores
--1 instead of 0, so it ranks below every plan that passes, however little that
-plan progresses; a group in which every plan fails has no ranking and no
-gradient. The states are those the current
+``-1 + safe_fraction`` instead of 0: it ranks below every plan that passes,
+however little that plan progresses, and among failing plans the one that
+stays safe longer ranks higher, so a group in which every plan fails still
+has a direction. The states are those the current
 policy visited in closed loop, so the update is on-policy even though AlpaSim
 executed the mean plan; the replayed mean must reproduce the executed plan.
 
@@ -168,7 +169,8 @@ def main() -> None:
             scores = [scorer.score(local[g], speeds[g].numpy(), controls[g].numpy(), start, parsed.t0_us)
                       for g in range(opts.group_size + 1)]
             gated = torch.tensor([s["gated"] for s in scores[1:]], dtype=torch.bool)
-            rewards = torch.where(gated, torch.tensor(-1.0), torch.tensor([s["reward"] for s in scores[1:]]))
+            rewards = torch.tensor([s["reward"] - 1.0 + s["safe_fraction"] if s["gated"] else s["reward"]
+                                    for s in scores[1:]])
             advantages = group_advantages(rewards)
             with torch.enable_grad():
                 loss, anchor = grpo_loss(mu, mu_ref, z, advantages, basis, sigma, opts.anchor_weight)
