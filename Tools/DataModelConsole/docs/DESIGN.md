@@ -145,14 +145,23 @@ FlyteExecution
 - `GET /api/v1/reasoning-labels/{dataset}/{sample_id}` — single label
 
 ### ODD
-- `GET /api/v1/odd/scenes?dataset=&version=&where=<key>=<value>&limit=&offset=` —
-  scenes whose valid ODD labels satisfy every `where` term, with value counts
-  over the matched scenes. `version` is required. The pointer names the manifest by SHA-256, the
-  manifest names the scene index by SHA-256, and the manifest must name the
-  dataset publication it labels. A
-  version without a LabelSet uses the newest earlier one whose publication has
-  the same shard names and samples per partition (KITScenes v3.7 reads the
-  v3.0 labels). 404 means no applicable LabelSet.
+- `GET /api/v1/odd/scenes?dataset=&version=&q=<JSON>&limit=&offset=` — scenes
+  whose valid ODD labels satisfy `q`, a JSON query
+  `{"op":"and|or","groups":[{"op":"and|or","conditions":[{"key","values","not","min_duration_s","min_confidence","sources"}]}]}`
+  (at most 8 groups and 24 conditions; no `q` selects every scene). A
+  condition holds when the scene has a valid labelled interval of `key` with
+  one of `values` that meets the refinements; `not` inverts it. Each scene
+  comes with lanes of the intervals that satisfied the query, plus value
+  counts over all scenes (`vocabulary`) and over the matched ones (`facets`).
+- `GET /api/v1/odd/scenes/{scene_uid}?dataset=&version=` — every valid labelled
+  interval of one scene.
+
+`version` is required. The pointer names the manifest by SHA-256, the
+manifest names the scene index and the observations table by SHA-256, and the
+manifest must name the dataset publication it labels. A version without a
+LabelSet uses the newest earlier one whose publication has the same shard
+names and samples per partition (KITScenes v3.7 reads the v3.1 labels). 404
+means no applicable LabelSet.
 
 ### Models (MLflow proxy)
 - `GET /api/v1/mlflow/experiments` — list experiments
