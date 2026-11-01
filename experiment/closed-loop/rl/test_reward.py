@@ -233,9 +233,12 @@ def test_coming_to_a_gentle_stop_is_comfortable() -> None:
     assert _scorer().score(*_plan(speed=5.0, accel=-2.0), T0_US)["comfort"] == 1.0
 
 
-def test_a_car_beside_the_ego_in_its_lane_is_no_time_to_collision() -> None:
-    times = np.array([T0_US, T0_US + 10_000_000])
-    # Level with the ego, its box 8 cm into the ego's: a side contact while the ego keeps its lane.
-    beside = Track(Box(4.5, 2.0), times, np.array([[11.4, 2.0, 0.0], [111.4, 2.0, 0.0]]), road_user=True)
+def test_a_car_at_the_side_costs_no_time_to_collision_while_the_ego_keeps_its_lane() -> None:
+    """NAVSIM drops an object from TTC when it is neither ahead of the ego's rear axle nor
+    met while the ego is across lanes (the object-ahead case is
+    test_time_to_collision_halves_the_reward). The track starts just after t0, so it is
+    not excused as an overlap at t0."""
+    beside = Track(Box(4.5, 2.0), np.array([T0_US + 100_000, T0_US + 10_100_000]),
+                   np.array([[11.0, 1.9, 0.0], [61.0, 1.9, 0.0]]), road_user=True)
     terms = _scorer(tracks=[beside]).score(*_plan(), T0_US)
     assert terms["nc"] == 1.0 and terms["ttc"] == 1.0
