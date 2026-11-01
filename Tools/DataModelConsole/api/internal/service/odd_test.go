@@ -468,6 +468,17 @@ func TestMatchODDQueryLanesKeepOnlySatisfyingIntervals(t *testing.T) {
 	}
 }
 
+func TestDurationNSRoundsToTheNearestNanosecond(t *testing.T) {
+	for seconds, want := range map[float64]int64{
+		8.3: 8_300_000_000, 16.1: 16_100_000_000, 1.07: 1_070_000_000,
+		0.5: 500_000_000, 1e-10: 1, 0: 0,
+	} {
+		if got := durationNS(seconds); got != want {
+			t.Errorf("durationNS(%v) = %d, want %d", seconds, got, want)
+		}
+	}
+}
+
 func TestODDSceneReturnsEveryLabel(t *testing.T) {
 	service := newODDFixture(t)
 	response, err := service.ODDScene(context.Background(), "kitscenes", "v3.0", "bb02")
