@@ -31,7 +31,26 @@ const (
 	maxODDSceneIndexBytes = 64 << 20
 )
 
-var oddLabelSetIDPattern = regexp.MustCompile(`^oddls-[0-9a-f]{32}$`)
+var (
+	oddLabelSetIDPattern = regexp.MustCompile(`^oddls-[0-9a-f]{32}$`)
+	oddKeyPattern        = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
+	oddValuePattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9_]*$`)
+)
+
+// ValidODDKey reports whether key has the form of an ODD key such as
+// "odd.road.context". Search terms and loaded labels share this contract, so
+// every facet value the API returns can be searched.
+func ValidODDKey(key string) bool {
+	return len(key) <= 128 && oddKeyPattern.MatchString(key)
+}
+
+func invalidODDValue(value string) bool { return !ValidODDValue(value) }
+
+// ValidODDValue reports whether value has the form of an ODD value such as
+// "urban".
+func ValidODDValue(value string) bool {
+	return len(value) <= 64 && oddValuePattern.MatchString(value)
+}
 
 type oddPointer struct {
 	SchemaVersion  string `json:"schema_version"`
@@ -93,10 +112,11 @@ type oddLabelSet struct {
 	scenes         []oddScene
 }
 
-// cachedODDLabelSet with a nil labels records that the version has none.
+// cachedODDLabelSet records which LabelSet, by manifest SHA-256, applies to a
+// dataset version; an empty manifestSHA256 records that none does.
 type cachedODDLabelSet struct {
-	labels *oddLabelSet
-	at     time.Time
+	manifestSHA256 string
+	at             time.Time
 }
 
 // SearchODDScenes returns the scenes of dataset/version whose ODD labels
@@ -239,40 +259,56 @@ func (s *S3Service) oddLabelSetFor(
 	defer s.oddMu.Unlock()
 	if cached, ok := s.oddCache[cacheKey]; ok &&
 		nowFunc().Sub(cached.at) < versionTTL {
-		if cached.labels == nil {
+		if cached.manifestSHA256 == "" {
 			return nil, ErrNotFound
 		}
-		return cached.labels, nil
-	}
-	labels, err := s.resolveODDLabelSet(ctx, dataset, version)
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return nil, err
+		return s.oddLabelSets[cached.manifestSHA256], nil
 	}
 	if s.oddCache == nil {
 		s.oddCache = make(map[string]cachedODDLabelSet)
+		s.oddLabelSets = make(map[string]*oddLabelSet)
 	}
-	s.oddCache[cacheKey] = cachedODDLabelSet{labels: labels, at: nowFunc()}
-	if labels == nil {
+	pointer, source, err := s.resolveODDPointer(ctx, dataset, version)
+	if errors.Is(err, ErrNotFound) {
+		s.oddCache[cacheKey] = cachedODDLabelSet{at: nowFunc()}
 		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	// A manifest digest names an immutable LabelSet, so a parsed one is kept
+	// for the process lifetime; only the pointer resolution expires.
+	labels := s.oddLabelSets[pointer.ManifestSHA256]
+	if labels == nil {
+		labels, err = s.loadODDLabelSet(ctx, pointer, source)
+		if err != nil {
+			return nil, err
+		}
+		s.oddLabelSets[pointer.ManifestSHA256] = labels
+	}
+	s.oddCache[cacheKey] = cachedODDLabelSet{
+		manifestSHA256: pointer.ManifestSHA256, at: nowFunc(),
 	}
 	return labels, nil
 }
 
-// resolveODDLabelSet returns the LabelSet of the newest version, at or before
-// the requested one, that has a ready pointer and the same scene inventory.
-// Repacking a dataset (new geometry or shard schema) keeps the scenes, so
-// their scene-level labels still apply.
-func (s *S3Service) resolveODDLabelSet(
+// resolveODDPointer returns the ODD pointer of the newest version, at or
+// before the requested one, whose publication has the same scene inventory,
+// and that publication. Repacking a dataset (new geometry or shard schema)
+// keeps the scenes, so their scene-level labels still apply. The labeler
+// writes a pointer only once its LabelSet is ready, so an invalid pointer is
+// an error rather than a reason to fall back to an older version.
+func (s *S3Service) resolveODDPointer(
 	ctx context.Context,
 	dataset, version string,
-) (*oddLabelSet, error) {
+) (oddPointer, *publicationManifest, error) {
 	target, err := s.loadPublicationManifest(ctx, dataset, version)
 	if err != nil {
-		return nil, err
+		return oddPointer{}, nil, err
 	}
 	versions, err := s.versionDirs(ctx, dataset)
 	if err != nil {
-		return nil, err
+		return oddPointer{}, nil, err
 	}
 	for _, candidate := range versions {
 		if versionLess(version, candidate) ||
@@ -284,14 +320,14 @@ func (s *S3Service) resolveODDLabelSet(
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return oddPointer{}, nil, err
 		}
 		source := target
 		if candidate != version {
 			source, err = s.loadPublicationManifest(ctx, dataset, candidate)
 			if err != nil {
 				// %v: a broken source publication is an error, not "no labels".
-				return nil, fmt.Errorf(
+				return oddPointer{}, nil, fmt.Errorf(
 					"ODD labels at %s/%s: %v", dataset, candidate, err,
 				)
 			}
@@ -299,9 +335,9 @@ func (s *S3Service) resolveODDLabelSet(
 				continue
 			}
 		}
-		return s.loadODDLabelSet(ctx, pointer, source)
+		return pointer, source, nil
 	}
-	return nil, ErrNotFound
+	return oddPointer{}, nil, ErrNotFound
 }
 
 // sameSceneInventory reports whether two publications pack the same scenes:
@@ -435,9 +471,19 @@ func (s *S3Service) loadODDLabelSet(
 		shards[scene.ShardName] = true
 		valid := scene.Observations[:0]
 		for _, observation := range scene.Observations {
-			if observation.Status == "valid" && len(observation.Values) > 0 {
-				valid = append(valid, observation)
+			if observation.Status != "valid" || len(observation.Values) == 0 {
+				continue
 			}
+			if !ValidODDKey(observation.Key) ||
+				slices.ContainsFunc(observation.Values, invalidODDValue) ||
+				observation.FirstTimestampNS < scene.StartTimestampNS ||
+				observation.FirstTimestampNS > scene.EndTimestampNS {
+				return nil, fmt.Errorf(
+					"ODD scene index %s has an invalid %s label in scene %q",
+					artifact.Key, observation.Key, scene.SceneUID,
+				)
+			}
+			valid = append(valid, observation)
 		}
 		scene.Observations = valid
 	}
