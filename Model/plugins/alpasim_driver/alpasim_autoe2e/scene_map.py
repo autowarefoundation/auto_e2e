@@ -42,10 +42,20 @@ _STOP_LINE_HALF_WIDTH_M = 0.25
 """nuPlan stop lines are polygons; NuRec wait lines are polylines."""
 
 
-def _lane_polygon(lane: Any) -> np.ndarray | None:
-    if lane.left_edge is None or lane.right_edge is None:
-        return None
-    return np.concatenate([lane.left_edge.xy, lane.right_edge.xy[::-1]])
+_LANE_WIDTH_WITHOUT_EDGES_M = 3.7
+"""Width given to a lane without both edges, as AlpaSim's offroad metric does."""
+
+_ROUTE_AHEAD_M = 120.0
+"""nuPlan draws the whole route; the raster reaches 120 m ahead of the ego."""
+
+
+def _lane_polygon(lane: Any) -> np.ndarray:
+    if lane.left_edge is not None and lane.right_edge is not None:
+        return np.concatenate([lane.left_edge.xy, lane.right_edge.xy[::-1]])
+    import shapely
+
+    widened = shapely.LineString(lane.center.xy).buffer(_LANE_WIDTH_WITHOUT_EDGES_M / 2)
+    return np.asarray(widened.exterior.coords)[:-1]
 
 
 def _segment_quads(polyline_xy: np.ndarray, half_width_m: float) -> list[np.ndarray]:
@@ -82,11 +92,7 @@ class SceneMap:
 
         elements = vector_map.elements
         lanes = dict(elements.get(MapElementType.ROAD_LANE, {}))
-        lane_polygons = {
-            lane_id: polygon
-            for lane_id, lane in lanes.items()
-            if (polygon := _lane_polygon(lane)) is not None
-        }
+        lane_polygons = {lane_id: _lane_polygon(lane) for lane_id, lane in lanes.items()}
         road_areas = [
             area.exterior_polygon.xy
             for area in elements.get(MapElementType.ROAD_AREA, {}).values()
@@ -121,8 +127,12 @@ class SceneMap:
     def map_context(self, reference_pose: tuple[float, float, float]) -> tuple[np.ndarray, bool]:
         return rasterize_navigation_map(self.layers, reference_pose, AUTOE2E_NAVIGATION_GEOMETRY)
 
-    def roadblock_lanes(self, route_xyz: np.ndarray) -> set[str]:
-        """Lanes under the route that point along it, plus their same-direction neighbours.
+    def roadblock_lanes(self, route_xyz: np.ndarray, ego_xy: np.ndarray) -> set[str]:
+        """Lanes under the route that point along it, extended to the raster's reach,
+        plus their same-direction neighbours.
+
+        ``route_xyz`` is the travelled path behind the ego followed by the route
+        ahead, all in the local frame; ``ego_xy`` is the ego's position.
 
         nuPlan roadblocks group the lanes of one carriageway, so a neighbour that
         points the other way, or a lane crossing the route, is left out. A route
@@ -140,7 +150,23 @@ class SceneMap:
                 np.r_[point, heading], max_dist=4.0, max_heading_error=np.pi / 4
             )
         ]
+        # Ahead, extend past the route's end to the raster's reach while the
+        # successor is unique; beyond a fork the route is unknown.
+        chain = list(dict.fromkeys(pending))
+        last = [lane.id for lane in self.vector_map.get_current_lane(
+            np.r_[route_xyz[-1], headings[-1]], max_dist=4.0, max_heading_error=np.pi / 4)]
+        while len(last) == 1 and last[0] in self.lanes:
+            successors = [n for n in self.lanes[last[0]].next_lanes if n in self.lanes]
+            if len(successors) != 1 or successors[0] in chain:
+                break
+            centre = self.lanes[successors[0]].center.xy
+            if float(np.min(np.linalg.norm(centre - ego_xy, axis=1))) > _ROUTE_AHEAD_M:
+                break
+            chain.append(successors[0])
+            last = successors
+
         selected: set[str] = set()
+        pending = chain
         while pending:
             lane_id = pending.pop()
             if lane_id in selected or lane_id not in self.lanes:
@@ -158,12 +184,15 @@ class SceneMap:
     def route_mask(
         self, route_xyz: np.ndarray, reference_pose: tuple[float, float, float]
     ) -> tuple[np.ndarray, bool]:
-        """``[2, H, W]`` route target and ``route_valid``, as nuPlan training builds them."""
+        """``[2, H, W]`` route target and ``route_valid``, as nuPlan training builds them.
+
+        ``route_xyz``: the travelled path behind the ego and the route ahead (local frame).
+        """
         geometry = AUTOE2E_NAVIGATION_GEOMETRY
         mask = np.zeros((ROUTE_CHANNEL_COUNT, geometry.height_px, geometry.width_px), np.float32)
         corridor = [
             self.lane_polygons[lane_id]
-            for lane_id in sorted(self.roadblock_lanes(route_xyz))
+            for lane_id in sorted(self.roadblock_lanes(route_xyz, np.asarray(reference_pose[:2])))
             if lane_id in self.lane_polygons
         ]
         if corridor:
