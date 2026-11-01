@@ -518,7 +518,6 @@ type ODDLabelSetInfo struct {
 // matched scenes.
 type ODDSearchResponse struct {
 	ODDLabelSetInfo
-	Query      ODDQuery   `json:"query"`
 	Vocabulary []ODDFacet `json:"vocabulary"`
 	Facets     []ODDFacet `json:"facets"`
 	Scenes     []ODDScene `json:"scenes"`
