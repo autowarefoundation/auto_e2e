@@ -49,6 +49,7 @@ def _two_lane_map() -> VectorMap:
     vector_map.add_map_element(
         WaitLine("stop", Polyline(np.array([[100.0, -1.75, 0.0], [100.0, 1.75, 0.0]])), "STOP", False)
     )
+    vector_map.__post_init__()  # as Artifact._finalize_map does
     vector_map.compute_search_indices()
     return vector_map
 
