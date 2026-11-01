@@ -42,10 +42,9 @@ def test_samples_differ_only_in_the_low_frequency_directions() -> None:
     assert z[..., 1].std() < z[..., 0].std()  # per-signal scales
 
 
-def test_group_advantages_are_standardised() -> None:
+def test_group_advantages_are_centred_not_scaled() -> None:
     advantages = group_advantages(torch.tensor([1.0, 2.0, 3.0, 6.0]))
-    assert advantages.mean().abs() < 1e-6
-    assert advantages.std(unbiased=False) == pytest.approx(1.0, abs=1e-4)
+    assert torch.allclose(advantages, torch.tensor([-2.0, -1.0, 0.0, 3.0]))
     assert not group_advantages(torch.full((4,), -3.0)).any()
 
 
@@ -95,7 +94,7 @@ def test_grpo_steers_a_toy_policy_to_the_rewarded_plan() -> None:
     target = basis @ torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 0.02], [0.0, 0.0]])
     mu = torch.nn.Parameter(torch.zeros(64, 2))
     reference = mu.detach().clone()
-    optimizer = torch.optim.SGD([mu], lr=0.1)
+    optimizer = torch.optim.SGD([mu], lr=1.0)
     generator = torch.Generator().manual_seed(1)
 
     def error() -> torch.Tensor:
@@ -104,7 +103,8 @@ def test_grpo_steers_a_toy_policy_to_the_rewarded_plan() -> None:
     start = error()
     for _ in range(300):
         plans, z = sample_plans(mu, basis, SIGMA, 8, generator)
-        rewards = -(((plans - target) / SIGMA) ** 2).sum(dim=(1, 2))
+        # Bounded in (0, 1], like the driving reward.
+        rewards = torch.exp(-(((plans - target) / SIGMA) ** 2).sum(dim=(1, 2)) / 32.0)
         loss, _ = grpo_loss(mu, reference, z, group_advantages(rewards), basis, SIGMA, 1e-3)
         optimizer.zero_grad()
         loss.backward()
