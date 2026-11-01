@@ -421,19 +421,19 @@ func TestMatchODDQueryOperators(t *testing.T) {
 		q    model.ODDQuery
 		want string
 	}{
-		"AND within a group":        {query("and", group("and", cond("odd.environment.sky", "clear"), cond("odd.road.context", "rural"))), "[bb02]"},
-		"OR within a group":         {query("and", group("or", cond("odd.road.context", "urban"), cond("odd.environment.day_phase", "dusk"))), "[aa01 bb02]"},
-		"IN over values":            {query("and", group("and", cond("odd.road.context", "rural", "motorway"))), "[bb02]"},
-		"NOT":                       {query("and", group("and", notDusk)), "[aa01]"},
-		"min duration":              {query("and", group("and", withDuration)), "[aa01]"},
-		"min confidence":            {query("and", group("and", withConfidence)), "[]"},
+		"AND within a group": {query("and", group("and", cond("odd.environment.sky", "clear"), cond("odd.road.context", "rural"))), "[bb02]"},
+		"OR within a group":  {query("and", group("or", cond("odd.road.context", "urban"), cond("odd.environment.day_phase", "dusk"))), "[aa01 bb02]"},
+		"IN over values":     {query("and", group("and", cond("odd.road.context", "rural", "motorway"))), "[bb02]"},
+		"NOT":                {query("and", group("and", notDusk)), "[aa01]"},
+		"min duration":       {query("and", group("and", withDuration)), "[aa01]"},
+		"min confidence":     {query("and", group("and", withConfidence)), "[]"},
 		// 0.9 is stored as float32; a 0.9 threshold must still include it.
 		"confidence at the boundary": {query("and", group("and", atBoundary)), "[aa01]"},
-		"source":                    {query("and", group("and", fromVLM)), "[]"},
-		"OR across groups":          {query("or", group("and", cond("odd.road.context", "urban")), group("and", cond("odd.road.context", "rural"))), "[aa01 bb02]"},
-		"AND across groups":         {query("and", group("and", cond("odd.environment.sky", "clear")), group("or", notDusk)), "[aa01]"},
-		"value never labelled":      {query("and", group("and", cond("odd.road.context", "motorway"))), "[]"},
-		"key absent from the scene": {query("and", group("and", cond("odd.weather.fog", "dense"))), "[]"},
+		"source":                     {query("and", group("and", fromVLM)), "[]"},
+		"OR across groups":           {query("or", group("and", cond("odd.road.context", "urban")), group("and", cond("odd.road.context", "rural"))), "[aa01 bb02]"},
+		"AND across groups":          {query("and", group("and", cond("odd.environment.sky", "clear")), group("or", notDusk)), "[aa01]"},
+		"value never labelled":       {query("and", group("and", cond("odd.road.context", "motorway"))), "[]"},
+		"key absent from the scene":  {query("and", group("and", cond("odd.weather.fog", "dense"))), "[]"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
