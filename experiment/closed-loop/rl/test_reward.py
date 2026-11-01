@@ -92,6 +92,10 @@ def test_time_to_collision_halves_the_reward() -> None:
 def test_leaving_the_road_is_gated_unless_the_recording_does_too() -> None:
     terms = _scorer().score(*_plan(y_end=-2.5), T0_US)
     assert terms["dac"] == 0.0 and terms["gated"] == 1.0
+    # The recorded drive itself leaves the mapped lanes: the map is incomplete there.
+    off_map = _scorer()
+    off_map.recorded_xy = off_map.recorded_xy + [0.0, -3.0]
+    assert off_map.score(*_plan(y_end=-2.5), T0_US)["dac"] == 1.0
 
 
 def test_lane_change_keeps_the_road_but_loses_some_lane_keeping() -> None:
