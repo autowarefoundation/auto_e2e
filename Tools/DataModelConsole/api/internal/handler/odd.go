@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"regexp"
 
 	"github.com/go-chi/chi/v5"
 
@@ -14,11 +13,9 @@ import (
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
 )
 
-// maxODDQueryBytes bounds the q parameter; a full query of 24 conditions
-// with 32 values each stays well below it.
-const maxODDQueryBytes = 16 << 10
-
-var oddSceneUIDPattern = regexp.MustCompile(`^[0-9a-f][0-9a-f-]{0,63}$`)
+// maxODDQueryBytes bounds the q parameter; the largest valid query (24
+// conditions of 32 values and 8 sources, each up to 64 bytes) fits in it.
+const maxODDQueryBytes = 64 << 10
 
 // ODDHandler serves the ODD scene search.
 type ODDHandler struct {
@@ -112,7 +109,7 @@ func (h *ODDHandler) Search(w http.ResponseWriter, r *http.Request) {
 // valid ODD label of one scene.
 func (h *ODDHandler) Scene(w http.ResponseWriter, r *http.Request) {
 	sceneUID := chi.URLParam(r, "scene_uid")
-	if !oddSceneUIDPattern.MatchString(sceneUID) {
+	if !service.ValidODDSceneUID(sceneUID) {
 		writeError(w, http.StatusBadRequest, model.CodeInvalidParam, "invalid scene_uid")
 		return
 	}
