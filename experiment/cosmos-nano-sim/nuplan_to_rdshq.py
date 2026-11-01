@@ -102,6 +102,19 @@ def rot_z(yaw: float) -> np.ndarray:
     return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
 
 
+def pinhole_as_ftheta(k: np.ndarray, w: int, h: int) -> tuple[list[float], float]:
+    """F-theta intrinsics equal to an undistorted pinhole: the forward polynomial r(theta) fits f*tan(theta)
+    up to the image corner. The renderer draws boxes only through the F-theta path. Returns the 11 values and
+    the worst radius error in pixels."""
+    f, cx, cy = (k[0, 0] + k[1, 1]) / 2, k[0, 2], k[1, 2]
+    theta_max = np.arctan(np.hypot(max(cx, w - cx), max(cy, h - cy)) / f) + np.radians(2)
+    theta = np.linspace(0, theta_max, 500)
+    basis = np.stack([theta ** p for p in range(1, 6)], axis=1)
+    coef, *_ = np.linalg.lstsq(basis, f * np.tan(theta), rcond=None)
+    error = float(np.abs(basis @ coef - f * np.tan(theta)).max())
+    return [cx, cy, w, h, 0.0, *coef, 0.0], error
+
+
 def ego_poses(db: sqlite3.Connection, times_us: np.ndarray) -> list[np.ndarray]:
     """Global vehicle-to-world poses at the requested times, interpolated from the ~100 Hz ego_pose table."""
     rows = np.array(db.execute("SELECT timestamp, x, y, z, qw, qx, qy, qz FROM ego_pose ORDER BY timestamp").fetchall())
@@ -266,7 +279,7 @@ def main() -> None:
     root = args.out / clip
     cams = {r[0]: r[1:] for r in db.execute(
         "SELECT channel, token, translation, rotation, intrinsic, distortion, width, height FROM camera")}
-    camera_to_vehicle, intrinsics, undistort = {}, {}, {}
+    camera_to_vehicle, intrinsics, undistort, ftheta_error_px = {}, {}, {}, {}
     for channel, key in CAMERAS.items():
         _, trans, rot, k, dist, w, h = cams[channel]
         k = np.asarray(unpickle(k), dtype=np.float64).reshape(3, 3)
@@ -274,7 +287,7 @@ def main() -> None:
         new_k, _ = cv2.getOptimalNewCameraMatrix(k, dist, (w, h), 0.0, (w, h))  # same rectification as the pack
         rot = np.asarray(unpickle(rot), dtype=np.float64).reshape(4)  # w, x, y, z
         camera_to_vehicle[key] = rigid(quat_to_rot(*rot), np.asarray(unpickle(trans), dtype=np.float64).reshape(3))
-        intrinsics[key] = [new_k[0, 0], new_k[1, 1], new_k[0, 2], new_k[1, 2], w, h]
+        intrinsics[key], ftheta_error_px[key] = pinhole_as_ftheta(new_k, w, h)
         undistort[key] = (k, dist, new_k)
 
     variants = []
@@ -287,8 +300,8 @@ def main() -> None:
         tar_write(root / "rds-hq/pose" / f"{name}.tar", {
             f"{name}.{i:06d}.pose.{key}.npy": npy(pose @ c2v)
             for i, pose in enumerate(poses) for key, c2v in camera_to_vehicle.items()})
-        tar_write(root / "rds-hq/pinhole_intrinsic" / f"{name}.tar",
-                  {f"{name}.pinhole_intrinsic.{key}.npy": npy(v) for key, v in intrinsics.items()})
+        tar_write(root / "rds-hq/ftheta_intrinsic" / f"{name}.tar",
+                  {f"{name}.ftheta_intrinsic.{key}.npy": npy(v) for key, v in intrinsics.items()})
         tar_write(root / "rds-hq/all_object_info" / f"{name}.tar",
                   {f"{name}.{i:06d}.all_object_info.json": json.dumps(f).encode() for i, f in enumerate(frames)})
         for member, labels in layers.items():
@@ -322,6 +335,7 @@ def main() -> None:
 
     meta = {"log": args.log, "location": location, "start_us": int(t0), "frames": args.frames, "fps": FPS,
             "ramp_s": RAMP_S, "ground_z": ground_z, "cameras": CAMERAS, "variants": variants,
+            "ftheta_fit_max_error_px": ftheta_error_px,
             "first_rgb_frame": {k: sorted((root / "gt" / k).glob("*.jpg"))[0].stem for k in CAMERAS.values()},
             "map_label_counts": {k: len(v) for k, v in layers.items()},
             "object_tracks": len({t for f in frames for t in f})}
