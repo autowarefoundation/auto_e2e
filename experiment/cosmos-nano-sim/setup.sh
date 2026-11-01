@@ -37,6 +37,8 @@ if [ ! -x wsm-venv/bin/cosmos-auto-wm ]; then
   uv venv -q --python 3.12 wsm-venv
   uv pip install -q --python wsm-venv/bin/python "./${WSM_DIR}"
 fi
+# nuplan_to_rdshq.py reads the nuPlan archives and map in the same environment.
+uv pip install -q --python wsm-venv/bin/python s3fs pyogrio geopandas shapely pyproj opencv-python-headless
 
 HF=cosmos-framework/.venv/bin/hf
 "${HF}" download nvidia/Cosmos3-Nano-Sim-Auto --revision "${MODEL_REVISION}" \
