@@ -36,6 +36,11 @@ DAC, DDC and LK forgive a step where the recorded drive breaks the same rule
 at the same step (EPDMS's human filter): the lane polygons under-cover real
 roads, and the log is the reference driver.
 
+``gated`` marks a plan that NC, DAC, DDC or V sets to 0, and ``safe_fraction``
+is the share of its steps before the first such violation. CaRL ends the
+episode at a violation, so a policy earns progress until then; ranking gated
+plans by ``safe_fraction`` keeps that order among plans that all fail.
+
 References: CaRL, arXiv:2504.17838; NAVSIM PDMS, arXiv:2406.15349; EPDMS,
 arXiv:2506.04218; RAD, arXiv:2502.13144.
 """
@@ -208,11 +213,15 @@ class SceneScorer:
         ignored = {i for i, track in enumerate(self.tracks)
                    if (other := track.at(t0_us)) is not None and start_box.intersects(other)}
         nc, ttc = 1.0, 1.0
+        first_violation = [steps]  # first step at which a gate becomes 0
         for k in range(steps):
             if speeds[k] < STOPPED_MPS:
                 continue
             xy, heading = plan[k, :2], float(plan[k, 2])
-            nc = min(nc, self._hit(self.ego.at(*plan[k]), xy, heading, int(times[k]), ignored))
+            hit = self._hit(self.ego.at(*plan[k]), xy, heading, int(times[k]), ignored)
+            if hit == 0.0 and nc > 0.0:
+                first_violation.append(k)
+            nc = min(nc, hit)
             if k % 5:
                 continue
             for ahead in TTC_LOOKAHEAD_S:
@@ -224,15 +233,22 @@ class SceneScorer:
         # EPDMS's human filter, step by step: what the recorded drive does at a step is allowed.
         drivable, oncoming, keep = self._rule_steps(plan)
         drivable_rec, oncoming_rec, keep_rec = self._rule_steps(recorded)
-        dac = float((drivable | ~drivable_rec).all())
+        off_road = ~drivable & drivable_rec
+        dac = float(not off_road.any())
         steps_m = np.linalg.norm(np.diff(np.vstack([start[None, :2], plan[:, :2]]), axis=0), axis=1)
         oncoming_m = steps_m * (oncoming & ~oncoming_rec)
-        worst = max(oncoming_m[i:i + 10].sum() for i in range(max(1, steps - 9)))
+        # Oncoming metres in the 1 s window ending at each step.
+        window_m = np.array([oncoming_m[max(0, k - 9):k + 1].sum() for k in range(steps)])
+        worst = window_m.max()
         ddc = 1.0 if worst <= 2.0 else 0.5 if worst <= 6.0 else 0.0
+        first_violation += [int(np.argmax(off_road))] if off_road.any() else []
+        first_violation += [int(np.argmax(window_m > 6.0))] if worst > 6.0 else []
         lk = float(np.mean(np.where(keep_rec < 1.0, np.maximum(keep, keep_rec), keep)))
 
-        deviation = max(self.recorded_path.distance(shapely.Point(p)) for p in plan[:, :2])
-        valid = float(np.clip((VALID_ZERO_M - deviation) / (VALID_ZERO_M - VALID_FULL_M), 0.0, 1.0))
+        distances = np.array([self.recorded_path.distance(shapely.Point(p)) for p in plan[:, :2]])
+        valid = float(np.clip((VALID_ZERO_M - distances.max()) / (VALID_ZERO_M - VALID_FULL_M), 0.0, 1.0))
+        if valid == 0.0:
+            first_violation.append(int(np.argmax(distances >= VALID_ZERO_M)))
 
         recorded_start = np.array([np.interp(t0_us, self.recorded_times_us, c) for c in self.recorded_xy.T])
         recorded_gain = self._progress(recorded[-1, :2]) - self._progress(recorded_start)
@@ -252,6 +268,7 @@ class SceneScorer:
                  "comfort": comfort}
         terms["reward"] = float(np.prod(list(terms.values())))
         terms["gated"] = float(min(nc, dac, ddc, valid) == 0.0)
+        terms["safe_fraction"] = min(first_violation) / steps
         return terms
 
 
