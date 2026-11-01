@@ -12,6 +12,9 @@ model (``data_parsing/pre_extracted.py`` and ``data_parsing/kit_scenes``):
   curvature]`` derived from the ego poses by finite differences, the way
   ``data_parsing/kit_scenes/egomotion.py`` derives them, with the curvature
   rule of the rig profile's dataset.
+* ``map_context`` / ``route_mask``: the scene's HD map and the route AlpaSim
+  sends, drawn as in nuPlan training (``scene_map.py``). Without a map the
+  model runs on its camera-only track (``map_valid = route_valid = False``).
 
 Everything is anchored at ``t0``, the timestamp of the newest camera frame; the
 driver reports the same ``t0`` back to AlpaSim with the prediction.
@@ -47,6 +50,7 @@ from training.dataset_policy import (
 )
 
 from .config import IMAGE_MEAN, IMAGE_STD, CameraCalibration, EgomotionRule, RigProfile
+from .scene_map import SceneMaps
 
 CONTEXT_FRAMES = REACTIVE_BEVFORMER_HISTORY_FRAMES + 1
 """Camera frames per view the model consumes: seven history frames plus t0."""
@@ -120,6 +124,19 @@ def egomotion_from_poses(
     return egomotion[1:-1].astype(np.float32)
 
 
+def route_in_local(route: Any, trajectory: Trajectory) -> np.ndarray:
+    """``[N, 3]`` route waypoints in the local frame; AlpaSim's NaN padding dropped.
+
+    AlpaSim sends them in the rig frame at ``route.timestamp_us``.
+    """
+    waypoints = np.array([[p.x, p.y, p.z] for p in route.waypoints], dtype=np.float64)
+    waypoints = waypoints[np.isfinite(waypoints).all(axis=1)]
+    time_range_us = trajectory.time_range_us
+    timestamp_us = min(max(int(route.timestamp_us), time_range_us.start), time_range_us.stop - 1)
+    local_from_rig = np.asarray(trajectory.interpolate_pose(timestamp_us).as_se3(), dtype=np.float64)
+    return waypoints @ local_from_rig[:3, :3].T + local_from_rig[:3, 3]
+
+
 def history_projections(
     cameras: tuple[CameraCalibration, ...],
     local_to_rig_t0: np.ndarray,
@@ -155,8 +172,10 @@ class AlpasimStreamParser:
         camera_slots: list[str],
         image_size: int,
         front_image_size: int,
+        scene_maps: SceneMaps,
     ) -> None:
         self.profile = profile
+        self.scene_maps = scene_maps
         self.cameras = profile.ordered_by_slots(camera_slots)
         self.image_size = image_size
         self.front_image_size = front_image_size
@@ -289,6 +308,20 @@ class AlpasimStreamParser:
         )
 
         height, width = AUTOE2E_NAVIGATION_GEOMETRY.height_px, AUTOE2E_NAVIGATION_GEOMETRY.width_px
+        map_context = np.zeros((MAP_CHANNEL_COUNT, height, width), np.float32)
+        route_mask = np.zeros((ROUTE_CHANNEL_COUNT, height, width), np.float32)
+        map_valid = route_valid = False
+        scene_map = (
+            self.scene_maps.get(prediction_input.scene_id) if prediction_input.scene_id else None
+        )
+        if scene_map is not None:
+            vec = np.asarray(pose_t0.vec3, dtype=np.float64)
+            reference_pose = (float(vec[0]), float(vec[1]), float(pose_t0.yaw()))
+            map_context, map_valid = scene_map.map_context(reference_pose)
+            if prediction_input.route is not None:
+                route_xyz = route_in_local(prediction_input.route, trajectory)
+                if len(route_xyz):
+                    route_mask, route_valid = scene_map.route_mask(route_xyz, reference_pose)
         model_inputs: dict[str, Any] = {
             "camera_tiles": visual_tiles.unsqueeze(0),
             "camera_projection_matrix": self.projection.unsqueeze(0),
@@ -296,13 +329,10 @@ class AlpasimStreamParser:
             "camera_history_projection_matrix": camera_history_projection.unsqueeze(0),
             "egomotion_history": egomotion_history,
             "visual_history": torch.zeros(1, 896),
-            # No map or route reaches the driver through AlpaSim's model API, so
-            # the model runs on its camera-only track behind explicit validity
-            # gates (evaluated as "camera_only_missing_map_route").
-            "map_context": torch.zeros(1, MAP_CHANNEL_COUNT, height, width),
-            "route_mask": torch.zeros(1, ROUTE_CHANNEL_COUNT, height, width),
-            "map_valid": torch.zeros(1, dtype=torch.bool),
-            "route_valid": torch.zeros(1, dtype=torch.bool),
+            "map_context": torch.from_numpy(map_context).unsqueeze(0),
+            "route_mask": torch.from_numpy(route_mask).unsqueeze(0),
+            "map_valid": torch.tensor([map_valid]),
+            "route_valid": torch.tensor([route_valid]),
         }
         if front_camera_tile is not None:
             model_inputs["front_camera_tile"] = front_camera_tile.unsqueeze(0)
