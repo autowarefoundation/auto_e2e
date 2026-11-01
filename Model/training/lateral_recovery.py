@@ -20,14 +20,19 @@ by a path that returns to the logged one within ``RECOVERY_HORIZON_S``
 
 from __future__ import annotations
 
+import contextlib
 import math
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 import torch
 import torch.nn.functional as F
 
-from navigation.geometry import NavigationRasterGeometry
+from navigation.geometry import (
+    MAP_CHANNEL_COUNT,
+    MapChannel,
+    NavigationRasterGeometry,
+)
 
 LATERAL_RECOVERY_METHODS = ("projection", "image_warp")
 MAX_OFFSET_M = 1.0
@@ -43,10 +48,10 @@ _HISTORY_STEPS = 64
 _SIGNALS = 4
 _SPEED_FLOOR_MPS = 0.5
 _MAX_CURVATURE = 0.5
-# T8 history images sit every 500 ms before the current frame, oldest first.
-# The last egomotion row is the current state.
+# Egomotion rows cover [-6.4 s, -0.1 s]; the current state is one step after
+# the last row. T8 history images sit every 500 ms before the current frame.
 _HISTORY_IMAGE_ROWS = tuple(
-    _HISTORY_STEPS - 1 - 5 * (7 - index) for index in range(7)
+    _HISTORY_STEPS - 5 * (7 - index) for index in range(7)
 )
 
 
@@ -99,6 +104,38 @@ def _history_signals(egomotion_history: torch.Tensor) -> torch.Tensor:
     return egomotion_history.reshape(-1, _HISTORY_STEPS, _SIGNALS).float()
 
 
+def _curvature(speed: torch.Tensor, yaw_rate: torch.Tensor) -> torch.Tensor:
+    curvature = torch.where(
+        speed > _SPEED_FLOOR_MPS,
+        yaw_rate / speed.clamp_min(_SPEED_FLOOR_MPS),
+        torch.zeros_like(speed),
+    )
+    return curvature.clamp(-_MAX_CURVATURE, _MAX_CURVATURE)
+
+
+def _reverse_cumsum(values: torch.Tensor) -> torch.Tensor:
+    """``out[k] = sum(values[k:])`` along dim 1."""
+    return torch.flip(torch.cumsum(torch.flip(values, [1]), dim=1), [1])
+
+
+def current_curvature(egomotion_history: torch.Tensor) -> torch.Tensor:
+    """Path curvature of the newest history row, used as the current one."""
+    signals = _history_signals(egomotion_history)
+    return _curvature(signals[:, -1, 0], signals[:, -1, 2])
+
+
+def _frenet_slope(
+    offset_m: torch.Tensor,
+    yaw_rad: torch.Tensor,
+    curvature: torch.Tensor,
+) -> torch.Tensor:
+    """``de/ds`` that gives heading offset ``yaw`` at lateral offset ``e``.
+
+    The offset path heading is ``atan2(e_s, 1 - k e)``.
+    """
+    return (1.0 - curvature * offset_m) * torch.tan(yaw_rad)
+
+
 def _history_blend(
     signals: torch.Tensor,
     offset_m: torch.Tensor,
@@ -107,28 +144,20 @@ def _history_blend(
     """Lateral offset ``e`` and its slope ``de/ds`` along the logged past path.
 
     The offset is zero before the blend window and reaches ``offset_m`` with
-    heading ``yaw_rad`` at the current row.
+    heading ``yaw_rad`` at the current time, one step after the last row.
     """
     speed = signals[..., 0]
-    arc = torch.cumsum(speed * _DT_S, dim=1)
-    start = _HISTORY_STEPS - 1 - round(HISTORY_BLEND_S / _DT_S)
-    blend_length = arc[:, -1] - arc[:, start]
+    to_now = _reverse_cumsum(speed * _DT_S)
+    start = _HISTORY_STEPS - round(HISTORY_BLEND_S / _DT_S)
+    blend_length = to_now[:, start]
     length = blend_length.clamp_min(1e-6)[:, None]
-    u = ((arc - arc[:, start : start + 1]) / length).clamp(0.0, 1.0)
+    u = (1.0 - to_now / length).clamp(0.0, 1.0)
     _, _, h4, h5, _, _, dh4, dh5 = _quintic(u)
-    slope_end = length * torch.tan(yaw_rad)[:, None]
+    curvature_now = _curvature(speed[:, -1], signals[:, -1, 2])
+    slope_end = length * _frenet_slope(offset_m, yaw_rad, curvature_now)[:, None]
     offset = offset_m[:, None] * h5 + slope_end * h4
     slope = (offset_m[:, None] * dh5 + slope_end * dh4) / length
     return offset, slope, blend_length
-
-
-def _curvature(speed: torch.Tensor, yaw_rate: torch.Tensor) -> torch.Tensor:
-    curvature = torch.where(
-        speed > _SPEED_FLOOR_MPS,
-        yaw_rate / speed.clamp_min(_SPEED_FLOOR_MPS),
-        torch.zeros_like(speed),
-    )
-    return curvature.clamp(-_MAX_CURVATURE, _MAX_CURVATURE)
 
 
 def shift_egomotion_history(
@@ -202,11 +231,13 @@ def _recovery_window(points: torch.Tensor) -> tuple[torch.Tensor, int]:
 def recovery_trajectory(
     trajectory_xy_m: torch.Tensor,
     shift: LateralShift,
+    curvature: torch.Tensor,
 ) -> torch.Tensor:
     """Return the recovery target in ``E'`` coordinates, shape ``[B,T,2]``.
 
     The logged path is offset by ``e(s)`` along its left normal, with
-    ``e(0) = offset``, ``e'(0) = tan(yaw)`` and ``e = e' = e'' = 0`` at the arc
+    ``e(0) = offset``, a start slope that gives heading offset ``yaw`` on a
+    path of the current ``curvature``, and ``e = e' = e'' = 0`` at the arc
     length reached after ``RECOVERY_HORIZON_S``. The speed profile is kept.
     """
     xy = trajectory_xy_m.float()
@@ -215,8 +246,9 @@ def recovery_trajectory(
     length = arc[:, steps - 1].clamp_min(1e-6)[:, None]
     u = (arc / length).clamp(0.0, 1.0)
     h0, h1, _, _, _, _, _, _ = _quintic(u)
+    slope_start = _frenet_slope(shift.offset_m, shift.yaw_rad, curvature)
     offset = shift.offset_m[:, None] * h0 + (
-        length * torch.tan(shift.yaw_rad)[:, None]
+        length * slope_start[:, None]
     ) * h1
     tangent = _path_tangents(points)[:, 1:]
     normal = torch.stack([-tangent[..., 1], tangent[..., 0]], dim=-1)
@@ -288,41 +320,45 @@ def sample_lateral_shift(
 def shifted_raster_grid(
     shift: LateralShift,
     geometry: NavigationRasterGeometry,
+    height: int,
+    width: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``grid_sample`` grid that reads ``E`` rasters at ``E'`` cell centres.
 
-    Returns the ``[B,H,W,2]`` grid and a ``[B,H,W]`` mask of cells whose source
-    lies inside the raster.
+    The raster covers the metric extent of ``geometry`` at ``height x width``
+    cells, so the 450x300 navigation rasters and the 300x200 planner BEV share
+    one geometry. Returns the ``[B,H,W,2]`` grid and a ``[B,H,W]`` mask of
+    cells whose bilinear support lies inside the source raster.
     """
     device = shift.offset_m.device
-    rows = torch.arange(geometry.height_px, device=device, dtype=torch.float32)
-    cols = torch.arange(geometry.width_px, device=device, dtype=torch.float32)
+    x_range = geometry.x_max_m - geometry.x_min_m
+    y_range = geometry.y_max_m - geometry.y_min_m
+    rows = torch.arange(height, device=device, dtype=torch.float32)
+    cols = torch.arange(width, device=device, dtype=torch.float32)
     row, col = torch.meshgrid(rows, cols, indexing="ij")
-    x_shifted = geometry.x_max_m - (row + 0.5) * geometry.meters_per_pixel
-    y_shifted = geometry.y_max_m - (col + 0.5) * geometry.meters_per_pixel
+    x_shifted = geometry.x_max_m - (row + 0.5) * (x_range / height)
+    y_shifted = geometry.y_max_m - (col + 0.5) * (y_range / width)
     cos = torch.cos(shift.yaw_rad.float())[:, None, None]
     sin = torch.sin(shift.yaw_rad.float())[:, None, None]
     x = cos * x_shifted - sin * y_shifted
     y = sin * x_shifted + cos * y_shifted + shift.offset_m.float()[:, None, None]
-    grid_x = 2.0 * (geometry.y_max_m - y) / (
-        geometry.y_max_m - geometry.y_min_m
-    ) - 1.0
-    grid_y = 2.0 * (geometry.x_max_m - x) / (
-        geometry.x_max_m - geometry.x_min_m
-    ) - 1.0
+    grid_x = 2.0 * (geometry.y_max_m - y) / y_range - 1.0
+    grid_y = 2.0 * (geometry.x_max_m - x) / x_range - 1.0
     grid = torch.stack([grid_x, grid_y], dim=-1)
-    inside = (grid.abs() <= 1.0).all(dim=-1)
+    # Outermost pixel centres sit half a cell inside the extent.
+    inside = (grid_x.abs() <= 1.0 - 1.0 / width) & (
+        grid_y.abs() <= 1.0 - 1.0 / height
+    )
     return grid, inside
 
 
 def _resample(
     raster: torch.Tensor,
-    grid: torch.Tensor,
-    active: torch.Tensor,
+    shift: LateralShift,
+    geometry: NavigationRasterGeometry,
     mode: str,
 ) -> torch.Tensor:
-    if tuple(raster.shape[-2:]) != tuple(grid.shape[1:3]):
-        raise ValueError("raster shape differs from the lateral shift geometry")
+    grid, _ = shifted_raster_grid(shift, geometry, *raster.shape[-2:])
     sampled = F.grid_sample(
         raster.float(),
         grid,
@@ -331,9 +367,46 @@ def _resample(
         align_corners=False,
     ).to(raster.dtype)
     return torch.where(
-        active.reshape(-1, *([1] * (raster.ndim - 1))),
+        shift.active.reshape(-1, *([1] * (raster.ndim - 1))),
         sampled,
         raster,
+    )
+
+
+def _shift_map_context(
+    map_context: torch.Tensor,
+    shift: LateralShift,
+    geometry: NavigationRasterGeometry,
+) -> torch.Tensor:
+    """Resample the map into ``E'`` and rotate its traffic directions.
+
+    Nearest sampling keeps the binary and validity channels exact. Directions
+    are stored as ``(sin + 1) / 2`` and ``(cos + 1) / 2`` in valid cells and
+    are rotated by ``-yaw`` into ``E'``.
+    """
+    if map_context.shape[1] != MAP_CHANNEL_COUNT:
+        raise ValueError("lateral recovery expects the 14-channel map")
+    shifted = _resample(map_context, shift, geometry, "nearest")
+    sin_index = int(MapChannel.TRAFFIC_DIRECTION_SIN)
+    cos_index = int(MapChannel.TRAFFIC_DIRECTION_COS)
+    valid = shifted[:, int(MapChannel.TRAFFIC_DIRECTION_VALID)] > 0.5
+    sin = 2.0 * shifted[:, sin_index].float() - 1.0
+    cos = 2.0 * shifted[:, cos_index].float() - 1.0
+    yaw_cos = torch.cos(shift.yaw_rad.float())[:, None, None]
+    yaw_sin = torch.sin(shift.yaw_rad.float())[:, None, None]
+    rotated_sin = sin * yaw_cos - cos * yaw_sin
+    rotated_cos = cos * yaw_cos + sin * yaw_sin
+    shifted = shifted.clone()
+    for index, value in ((sin_index, rotated_sin), (cos_index, rotated_cos)):
+        shifted[:, index] = torch.where(
+            valid,
+            ((value + 1.0) * 0.5).to(shifted.dtype),
+            shifted[:, index],
+        )
+    return torch.where(
+        shift.active.reshape(-1, 1, 1, 1),
+        shifted,
+        map_context,
     )
 
 
@@ -416,16 +489,13 @@ def _warp_views(
 def _past_poses(signals: torch.Tensor) -> torch.Tensor:
     """Past ego poses ``T_E<-past`` at every history row, shape ``[B,64,4,4]``.
 
-    Integrated backwards from the current row with the logged speed and yaw
-    rate.
+    Integrated backwards from the current time, one step after the last row,
+    with the logged speed and yaw rate.
     """
     speed, yaw_rate = signals[..., 0], signals[..., 2]
-    later = torch.flip(torch.cumsum(torch.flip(yaw_rate, [1]), dim=1), [1])
-    heading = -(later - yaw_rate) * _DT_S
-    step_x = speed * torch.cos(heading) * _DT_S
-    step_y = speed * torch.sin(heading) * _DT_S
-    x = -(torch.flip(torch.cumsum(torch.flip(step_x, [1]), dim=1), [1]) - step_x)
-    y = -(torch.flip(torch.cumsum(torch.flip(step_y, [1]), dim=1), [1]) - step_y)
+    heading = -_reverse_cumsum(yaw_rate) * _DT_S
+    x = -_reverse_cumsum(speed * torch.cos(heading) * _DT_S)
+    y = -_reverse_cumsum(speed * torch.sin(heading) * _DT_S)
     pose = ego_shift_transform(y, heading)
     pose[..., 0, 3] = x
     return pose
@@ -484,14 +554,16 @@ def apply_lateral_recovery(
     out["initial_speed_mps"] = _history_signals(egomotion)[:, -1, 0].to(
         batch["initial_speed_mps"].dtype
     )
-    out["trajectory_xy_m"] = recovery_trajectory(batch["trajectory_xy_m"], shift)
+    out["trajectory_xy_m"] = recovery_trajectory(
+        batch["trajectory_xy_m"],
+        shift,
+        current_curvature(batch["egomotion_history"]),
+    )
 
-    grid, _ = shifted_raster_grid(shift, geometry)
-    for key in ("map_context", "route_mask"):
-        out[key] = _resample(batch[key], grid, active, "bilinear")
-    for key in ("bev_segmentation_target", "bev_segmentation_valid"):
+    out["map_context"] = _shift_map_context(batch["map_context"], shift, geometry)
+    for key in ("route_mask", "bev_segmentation_target", "bev_segmentation_valid"):
         if torch.is_tensor(batch.get(key)) and batch[key].ndim == 4:
-            out[key] = _resample(batch[key], grid, active, "nearest")
+            out[key] = _resample(batch[key], shift, geometry, "nearest")
 
     to_original = ego_shift_transform(
         shift.offset_m.float(),
@@ -562,12 +634,11 @@ def aligned_clean_planner_bev(
     Returns the aligned feature and a ``[B,H,W]`` mask of active samples' cells
     that exist in both frames.
     """
-    if tuple(clean_planner_bev.shape[-2:]) != (
-        geometry.height_px,
-        geometry.width_px,
-    ):
-        raise ValueError("planner BEV differs from the lateral shift geometry")
-    grid, inside = shifted_raster_grid(shift, geometry)
+    grid, inside = shifted_raster_grid(
+        shift,
+        geometry,
+        *clean_planner_bev.shape[-2:],
+    )
     aligned = F.grid_sample(
         clean_planner_bev.detach().float(),
         grid,
@@ -576,6 +647,33 @@ def aligned_clean_planner_bev(
         align_corners=False,
     )
     return aligned, inside & shift.active[:, None, None]
+
+
+@contextlib.contextmanager
+def preserved_batch_norm_statistics(module: torch.nn.Module) -> Iterator[None]:
+    """Restore BatchNorm running statistics after a teacher forward.
+
+    The teacher runs in training mode so it normalises like the student, but it
+    must not advance the running statistics a second time per micro-step.
+    """
+    norms = [
+        layer for layer in module.modules()
+        if isinstance(layer, torch.nn.modules.batchnorm._BatchNorm)
+        and layer.track_running_stats
+    ]
+    saved = [
+        [buffer.clone() for buffer in (
+            layer.running_mean, layer.running_var, layer.num_batches_tracked
+        )]
+        for layer in norms
+    ]
+    try:
+        yield
+    finally:
+        for layer, (mean, var, count) in zip(norms, saved):
+            layer.running_mean.copy_(mean)
+            layer.running_var.copy_(var)
+            layer.num_batches_tracked.copy_(count)
 
 
 def feature_consistency_kl(
