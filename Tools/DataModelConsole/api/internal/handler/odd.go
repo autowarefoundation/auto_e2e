@@ -14,9 +14,10 @@ import (
 	"github.com/autowarefoundation/auto_e2e/tools/datamodelconsole/api/internal/service"
 )
 
-// maxODDQueryBytes bounds the q parameter; the largest valid query (24
-// conditions of 32 values and 8 sources, each up to 64 bytes) fits in it.
-const maxODDQueryBytes = 64 << 10
+// maxODDQueryBytes bounds the q parameter. The largest valid query (24
+// conditions with a 128-byte key, 32 values and 8 sources of 64 bytes each)
+// serialises to about 70 KiB.
+const maxODDQueryBytes = 128 << 10
 
 // ODDHandler serves the ODD scene search.
 type ODDHandler struct {
