@@ -87,11 +87,13 @@ function SceneCard({
   rank,
   response,
   vocabulary,
+  hasConditions,
 }: {
   scene: ODDScene;
   rank: number;
   response: ODDSearchResponse;
   vocabulary: Map<string, ODDFacet>;
+  hasConditions: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const all = useApi(
@@ -148,8 +150,10 @@ function SceneCard({
             <SceneTimeline lanes={scene.lanes} durationNs={scene.duration_ns} vocabulary={vocabulary} />
           ) : (
             <p className="text-xs text-slate-500">
-              The query has no conditions, or only “is not” ones, so there are no matched intervals
-              to draw. Open all labels to see what this scene carries.
+              {hasConditions
+                ? "This scene matched through “is not” conditions only, so there are no matched intervals to draw."
+                : "The query has no conditions, so there are no matched intervals to draw."}{" "}
+              Open all labels to see what this scene carries.
             </p>
           )
         ) : all.error ? (
@@ -450,7 +454,17 @@ function ODDPageInner() {
           )}
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
             <section aria-label="Matched scenes" className={cn("space-y-3", search.loading && "opacity-70")}>
-              {response.scenes.length === 0 ? (
+              {response.scenes.length === 0 && response.page.total > 0 ? (
+                // A shared or stale URL can point past the last page.
+                <Card className="border-slate-800 bg-slate-950/50">
+                  <CardContent className="flex flex-col items-center gap-3 py-10 text-sm text-slate-500">
+                    This page is past the {response.page.total} matched scenes.
+                    <Button variant="secondary" size="sm" onClick={() => navigate({ offset: 0 })}>
+                      Back to the first page
+                    </Button>
+                  </CardContent>
+                </Card>
+              ) : response.scenes.length === 0 ? (
                 <Card className="border-slate-800 bg-slate-950/50">
                   <CardContent className="py-10 text-center text-sm text-slate-500">
                     No scene matches this query. Loosen a condition or switch a group to ANY.
@@ -464,10 +478,11 @@ function ODDPageInner() {
                     rank={response.page.offset + i + 1}
                     response={response}
                     vocabulary={vocabulary}
+                    hasConditions={applied.groups.length > 0}
                   />
                 ))
               )}
-              {(response.page.total > PAGE_SIZE || response.page.offset > 0) && (
+              {response.page.total > PAGE_SIZE && response.scenes.length > 0 && (
                 <nav aria-label="Pages" className="flex items-center justify-between pt-1 text-xs text-slate-400">
                   <span className="tabular-nums">
                     {response.page.offset + 1}–{response.page.offset + response.scenes.length} of {response.page.total}
