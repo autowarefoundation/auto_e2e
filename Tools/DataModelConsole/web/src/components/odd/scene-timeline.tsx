@@ -2,7 +2,7 @@
 
 // One scene's ODD labels on a shared time axis: a lane per key, a bar per
 // labelled interval. Overlapping intervals of one key (per-camera labels, for
-// example) stack into sub-rows. Each bar carries its value as text when it is
+// example) and bars widened to the minimum width stack into sub-rows. Each bar carries its value as text when it is
 // wide enough and always as an accessible name and a tooltip.
 
 import { useEffect, useMemo, useState } from "react";
@@ -15,7 +15,8 @@ import {
 } from "@/lib/odd";
 import type { ODDFacet, ODDInterval, ODDLane } from "@/types";
 
-const MAX_SUBROWS = 4;
+// Bars are at least this wide (percent of the scene) so instants stay visible.
+const MIN_WIDTH = 0.8;
 
 function niceStep(durationS: number): number {
   for (const step of [1, 2, 5, 10, 20, 30, 60, 120, 300, 600]) {
@@ -25,17 +26,20 @@ function niceStep(durationS: number): number {
   return 600;
 }
 
-// stack assigns each interval (in start order) the first sub-row whose last
-// interval has ended; past MAX_SUBROWS the rest share the last row.
-function stack(intervals: ODDInterval[]): number[] {
+type Bar = { left: number; width: number; row: number };
+
+// layout places each interval (in start order) as drawn, in percent of the
+// scene, and gives it the first sub-row whose drawn bars have all ended, so no
+// bar ever covers another, even when the minimum width widens an instant.
+function layout(intervals: ODDInterval[], span: number): Bar[] {
   const rowEnds: number[] = [];
   return intervals.map((interval) => {
-    let row = rowEnds.findIndex((end) => end <= interval.start_ns);
-    if (row < 0) {
-      row = rowEnds.length < MAX_SUBROWS ? rowEnds.length : MAX_SUBROWS - 1;
-    }
-    rowEnds[row] = Math.max(rowEnds[row] ?? 0, interval.end_ns);
-    return row;
+    const width = Math.max(((interval.end_ns - interval.start_ns) / span) * 100, MIN_WIDTH);
+    const left = Math.min((interval.start_ns / span) * 100, 100 - width);
+    let row = rowEnds.findIndex((end) => end <= left);
+    if (row < 0) row = rowEnds.length;
+    rowEnds[row] = left + width;
+    return { left, width, row };
   });
 }
 
@@ -79,12 +83,12 @@ export function SceneTimeline({
   const [hovered, setHovered] = useState<Hovered>(null);
   // New lanes (another query) invalidate a remembered lane/interval index.
   useEffect(() => setHovered(null), [lanes]);
-  const stacked = useMemo(() => lanes.map((lane) => stack(lane.intervals)), [lanes]);
+  const span = Math.max(durationNs, 1);
+  const bars = useMemo(() => lanes.map((lane) => layout(lane.intervals, span)), [lanes, span]);
   const durationS = durationNs / 1e9;
   const step = niceStep(durationS);
   const gridlines: number[] = [];
   for (let t = step; t < durationS; t += step) gridlines.push(t / durationS);
-  const span = Math.max(durationNs, 1);
 
   return (
     <div className="space-y-1.5">
@@ -93,8 +97,8 @@ export function SceneTimeline({
         <TimeAxis durationNs={durationNs} />
       </div>
       {lanes.map((lane, laneIndex) => {
-        const rows = stacked[laneIndex];
-        const rowCount = Math.max(1, ...rows.map((r) => r + 1));
+        const laneBars = bars[laneIndex];
+        const rowCount = Math.max(1, ...laneBars.map((bar) => bar.row + 1));
         const present = [...new Set(lane.intervals.flatMap((i) => i.values))];
         return (
           <div
@@ -133,9 +137,7 @@ export function SceneTimeline({
                 />
               ))}
               {lane.intervals.map((interval, index) => {
-                const width = Math.max(((interval.end_ns - interval.start_ns) / span) * 100, 0.8);
-                // The minimum width must not push a late interval past the track.
-                const left = Math.min((interval.start_ns / span) * 100, 100 - width);
+                const { left, width, row } = laneBars[index];
                 const color = valueColor(vocabulary, lane.key, interval.values[0]);
                 const text = interval.values.map(valueLabel).join(", ");
                 return (
@@ -151,7 +153,7 @@ export function SceneTimeline({
                     style={{
                       left: `${left}%`,
                       width: `${width}%`,
-                      top: `${3 + rows[index] * 22}px`,
+                      top: `${3 + row * 22}px`,
                       background: color,
                       opacity: 0.55 + 0.45 * interval.confidence,
                     }}
