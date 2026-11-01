@@ -33,13 +33,18 @@ const PAGE_SIZE = 50;
 // Same contract as the API (ValidODDKey / ValidODDValue), so a hand-edited
 // URL drops a malformed term instead of failing the whole search.
 const ODD_TERM = /^([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)=([a-z0-9][a-z0-9_]*)$/;
+const MAX_TERMS = 16; // maxODDConditions in the API handler
 
 function parseWhere(terms: string[]): ODDCondition[] {
   const unique = [...new Set(terms)];
-  return unique.flatMap((term) => {
-    const match = ODD_TERM.exec(term);
-    return match ? [{ key: match[1], value: match[2] }] : [];
-  });
+  return unique
+    .flatMap((term) => {
+      const match = ODD_TERM.exec(term);
+      return match && match[1].length <= 128 && match[2].length <= 64
+        ? [{ key: match[1], value: match[2] }]
+        : [];
+    })
+    .slice(0, MAX_TERMS);
 }
 
 function seconds(ns: number): string {
@@ -288,7 +293,9 @@ function ODDPageInner() {
                           key={term}
                           variant="outline"
                           size="sm"
-                          disabled={activeTerms.has(term)}
+                          disabled={
+                            activeTerms.has(term) || where.length >= MAX_TERMS
+                          }
                           onClick={() =>
                             navigate({
                               where: [...where, { key: facet.key, value }],
