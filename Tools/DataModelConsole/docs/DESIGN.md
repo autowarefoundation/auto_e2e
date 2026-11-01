@@ -48,6 +48,7 @@ MLflow artifacts, Flyte execution metadata) を **読み取り専用** で可視
 | `nvidia_av/v1.0/shards/` | WebDataset .tar (7 cams, ego.npy, meta.json) | Scene browser |
 | `reasoning_labels_cache/dataset=*/teacher=*/prompt_version=*/*.json` | Per-sample reasoning labels (v2 schema) | Reasoning label viewer, taxonomy stats |
 | `mock/v1.0/shards/` | Test shards | Dev/QA only |
+| `{dataset}/{ver}/odd/latest.json`, `{dataset}/{ver}/odd/labelsets/{id}/` | ODD LabelSet ready pointer, manifest, scene index | ODD scene search |
 
 Shard naming: `{episode_prefix}_{frame_idx:06d}.{member}`
 - L2D: `ep{episode_id}_{frame_idx}`
@@ -142,6 +143,15 @@ FlyteExecution
 ### Reasoning Labels
 - `GET /api/v1/reasoning-labels/stats` — aggregate counts per dataset/teacher
 - `GET /api/v1/reasoning-labels/{dataset}/{sample_id}` — single label
+
+### ODD
+- `GET /api/v1/odd/scenes?dataset=&version=&where=<key>=<value>&limit=&offset=` —
+  scenes whose valid ODD labels satisfy every `where` term, with value counts
+  over the matched scenes. The pointer, manifest and scene index are checked by
+  SHA-256, and the manifest must name the dataset publication it labels. A
+  version without a LabelSet uses the newest earlier one whose publication has
+  the same shard names and samples per partition (KITScenes v3.7 reads the
+  v3.0 labels). 404 means no applicable LabelSet.
 
 ### Models (MLflow proxy)
 - `GET /api/v1/mlflow/experiments` — list experiments
