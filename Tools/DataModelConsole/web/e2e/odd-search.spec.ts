@@ -161,7 +161,8 @@ test("ODD query builder sends groups, NOT, IN and refinements", async ({ page })
   await values.getByRole("button", { name: /rural/ }).click();
   await page.getByRole("radiogroup", { name: "Condition 1.1 polarity" }).getByRole("radio", { name: "is not" }).click();
   await page.getByRole("button", { name: "Refine condition 1.1" }).click();
-  await page.getByRole("spinbutton").fill("2");
+  // Typed key by key: a partial "0" must not be erased mid-entry.
+  await page.getByRole("spinbutton").pressSequentially("0.5");
   await page.getByRole("button", { name: "vlm", exact: true }).click();
 
   await page.getByRole("button", { name: "Add condition" }).click();
@@ -175,7 +176,7 @@ test("ODD query builder sends groups, NOT, IN and refinements", async ({ page })
       {
         op: "or",
         conditions: [
-          { key: "odd.road.context", values: ["urban", "rural"], not: true, min_duration_s: 2, sources: ["vlm"] },
+          { key: "odd.road.context", values: ["urban", "rural"], not: true, min_duration_s: 0.5, sources: ["vlm"] },
           { key: "odd.environment.day_phase", values: ["dusk"] },
         ],
       },
