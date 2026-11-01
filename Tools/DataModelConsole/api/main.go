@@ -140,7 +140,7 @@ func main() {
 			r.Get("/reasoning-labels/{dataset}/{sample_id}", reasoningH.GetLabel)
 
 			// ODD search filters one cached, digest-verified scene index in
-			// memory; only a cold LabelSet load reads S3 (14 MB for KITScenes).
+			// memory; only a cold LabelSet load reads S3 (about 36 MB for KITScenes).
 			r.Get("/odd/scenes", oddH.Search)
 			r.Get("/odd/scenes/{scene_uid}", oddH.Scene)
 
