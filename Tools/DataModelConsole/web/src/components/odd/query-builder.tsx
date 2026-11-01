@@ -199,6 +199,7 @@ function ConditionEditor({
               {/* Uncontrolled: a controlled number input would erase the
                   partial "0" of "0.5" and turn it into 5. */}
               <input
+                key={condition.key}
                 type="number"
                 min={0}
                 max={3600}
