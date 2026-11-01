@@ -499,6 +499,22 @@ func TestSameSceneInventoryComparesShardNames(t *testing.T) {
 	if sameSceneInventory(&publicationManifest{TotalSamples: 10}, &publicationManifest{TotalSamples: 10}) {
 		t.Fatal("publications without partitions compared equal")
 	}
+	for name, mutate := range map[string]func(*publicationManifest){
+		"empty partition id": func(m *publicationManifest) { m.Partitions[0].PartitionID = "" },
+		"duplicate partition id": func(m *publicationManifest) {
+			m.Partitions[1].PartitionID = m.Partitions[0].PartitionID
+		},
+		"partition total differs from samples": func(m *publicationManifest) {
+			m.Partitions[0].SampleCount, m.Partitions[1].SampleCount = 4, 4
+		},
+	} {
+		left, right := manifest("a.tar", "b.tar"), manifest("a.tar", "b.tar")
+		mutate(left)
+		mutate(right)
+		if sameSceneInventory(left, right) {
+			t.Errorf("%s compared equal", name)
+		}
+	}
 }
 
 func TestSearchODDScenesCachesLabelSet(t *testing.T) {
