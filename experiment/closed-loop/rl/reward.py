@@ -12,18 +12,20 @@ scored at the plan's 0.1 s steps over its first 4 s, in the scene's local frame:
   gives 0 for a road user (vehicle, person, rider, animal; parked cars
   included) and 0.5 for a static obstacle.
 * DAC (drivable area), AlpaSim's offroad rule: the ego box is off the road
-  when the lanes do not cover it and it touches a road edge. Lanes are the
+  when the lanes do not cover it and it touches a road edge (in a map without
+  road edges: when its centre leaves the lanes). Lanes are the
   polygons between their edges, or the centreline widened to 3.7 m where an
   edge is missing, and their union is grown by 5 cm so the slivers between
   neighbouring lanes sampled at different vertices do not count.
-* DDC (driving direction): metres driven where every lane under the ego
-  points against the plan (> 120 deg, AlpaSim's wrong-lane rule), per 1 s
+* DDC (driving direction): metres driven where every lane under the ego box's
+  centre points against the plan (> 120 deg, AlpaSim's wrong-lane rule), per 1 s
   window; <= 2 m keeps 1, <= 6 m gives 0.5, more gives 0 (EPDMS).
 * V (renderer validity, #123): the plan's largest distance to the recorded
   path; 1 up to 2.5 m, falling to 0 at 3.0 m. A path distance, so braking or
   falling behind the log is not penalised (RAD's position deviation).
 * EP (ego progress): arc length the plan gains along the recorded path from
-  the ego's own position, over the recording's gain in the same 4 s, clipped
+  the ego's own position, over what the recording gained in 4 s from the same
+  place (by place, since the ego can trail or lead the log), clipped
   to [0, 1]; 1 when the recording moves less than 5 m (NAVSIM). Multiplying by
   EP gives a plan that stops 0, where PDMS's weighted average would still give
   it 9/14 (#123).
@@ -36,8 +38,8 @@ scored at the plan's 0.1 s steps over its first 4 s, in the scene's local frame:
   curvature.
 
 The human filter of EPDMS forgives DAC, DDC and LK where the recorded drive
-breaks the same rule at the same place: a plan step is compared with the
-recorded pose nearest along the recorded path. The lane polygons under-cover
+breaks the same rule at the same place: a plan step is compared with the two
+recorded poses around its place along the recorded path. The lane polygons under-cover
 real roads, and the log is the reference driver.
 
 ``gated`` marks a plan that NC, DAC, DDC or V sets to 0, and ``safe_fraction``
@@ -107,10 +109,14 @@ class Track:
     times_us: np.ndarray
     poses: np.ndarray
     road_user: bool
+    static: bool = False
+    """Holds its pose outside its time range, as AlpaSim's trafficsim does for static tracks."""
 
     def pose(self, time_us: int) -> np.ndarray | None:
         if not self.times_us[0] <= time_us <= self.times_us[-1]:
-            return None
+            if not self.static:
+                return None
+            time_us = int(np.clip(time_us, self.times_us[0], self.times_us[-1]))
         return np.array([np.interp(time_us, self.times_us, self.poses[:, 0]),
                          np.interp(time_us, self.times_us, self.poses[:, 1]),
                          np.interp(time_us, self.times_us, np.unwrap(self.poses[:, 2]))])
@@ -120,9 +126,11 @@ class Track:
         return None if pose is None else self.box.at(*pose)
 
     def speed(self, time_us: int) -> float:
-        before, after = self.pose(time_us - 50_000), self.pose(time_us + 50_000)
-        if before is None or after is None:
+        """Finite-difference speed, one-sided at the ends of the track; 0 for a static track."""
+        if self.static or len(self.times_us) < 2:
             return 0.0
+        start = int(np.clip(time_us - 50_000, self.times_us[0], self.times_us[-1] - 100_000))
+        before, after = self.pose(start), self.pose(start + 100_000)
         return float(np.linalg.norm(after[:2] - before[:2]) / 0.1)
 
 
@@ -177,14 +185,17 @@ class SceneScorer:
     def _off_road(self, box: Polygon) -> bool:
         if self.drivable.covers(box):
             return False
-        return self.road_edges is None or self.road_edges.intersects(box)
+        if self.road_edges is None:  # no road edges to touch: off when the centre leaves the lanes
+            return not self.drivable.covers(box.centroid)
+        return self.road_edges.intersects(box)
 
     def _rule_steps(self, poses: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Per pose of ``[T, 3]``: off the road, oncoming, lane-keeping factor."""
         off_road = np.array([self._off_road(self.ego.at(*pose)) for pose in poses])
         oncoming, keep = np.zeros(len(poses), bool), np.zeros(len(poses))
         for k, pose in enumerate(poses):
-            xy, heading = pose[:2], float(pose[2])
+            # The box centre, as NAVSIM and AlpaSim's wrong-lane rule use, not the rear axle.
+            xy, heading = np.array(self.ego.at(*pose).centroid.coords[0]), float(pose[2])
             lanes = self._lanes_at(xy)
             along = [lane for lane in lanes if _angle(lane.heading_at(xy), heading) <= ONCOMING_HEADING_RAD]
             oncoming[k] = bool(lanes) and not along
@@ -192,10 +203,11 @@ class SceneScorer:
             keep[k] = np.clip((LANE_KEEP_ZERO_M - distance) / (LANE_KEEP_ZERO_M - LANE_KEEP_FULL_M), 0.0, 1.0)
         return off_road, oncoming, keep
 
-    def _recorded_index(self, xy: np.ndarray) -> int:
-        """Index of the recorded pose nearest along the recorded path to ``xy``."""
-        return int(np.clip(np.searchsorted(self.recorded_arc, self.recorded_path.project(Point(xy))),
-                           0, len(self.recorded_arc) - 1))
+    def _recorded_neighbours(self, xy: np.ndarray) -> tuple[int, int]:
+        """Indices of the recorded poses on either side of ``xy``'s place along the recorded path."""
+        after = int(np.clip(np.searchsorted(self.recorded_arc, self.recorded_path.project(Point(xy))),
+                            0, len(self.recorded_arc) - 1))
+        return max(after - 1, 0), after
 
     def _contact(self, ego_pose: np.ndarray, speed: float, track: Track, time_us: int) -> str | None:
         """NAVSIM's collision type of the ego box at ``ego_pose`` with ``track``, or None."""
@@ -282,8 +294,12 @@ class SceneScorer:
 
         # --- DAC, DDC, LK with the human filter by place ---
         off_road, oncoming, keep = self._rule_steps(plan)
-        reference = [self._recorded_index(p) for p in plan[:, :2]]
-        off_road_rec, oncoming_rec, keep_rec = (flags[reference] for flags in self.recorded_rules)
+        # The recording breaks a rule here if it does at either recorded pose around this place.
+        before, after = np.array([self._recorded_neighbours(p) for p in plan[:, :2]]).T
+        rec_off_road, rec_oncoming, rec_keep = self.recorded_rules
+        off_road_rec = rec_off_road[before] | rec_off_road[after]
+        oncoming_rec = rec_oncoming[before] | rec_oncoming[after]
+        keep_rec = np.minimum(rec_keep[before], rec_keep[after])
         off_road &= ~off_road_rec
         dac = float(not off_road.any())
         steps_m = np.linalg.norm(np.diff(np.vstack([start[None, :2], plan[:, :2]]), axis=0), axis=1)
@@ -300,9 +316,12 @@ class SceneScorer:
         valid = float(np.clip((VALID_ZERO_M - distances.max()) / (VALID_ZERO_M - VALID_FULL_M), 0.0, 1.0))
         if valid == 0.0:
             first_violation.append(int(np.argmax(distances >= VALID_ZERO_M)))
-        recorded_start = np.array([np.interp(t0_us, self.recorded_times_us, c) for c in self.recorded_xy.T])
-        recorded_gain = self._progress(recorded[-1, :2]) - self._progress(recorded_start)
-        plan_gain = self._progress(plan[-1, :2]) - self._progress(start[:2])
+        # The log's own gain over the same 4 s, from when it passed the ego's place.
+        ego_arc = self._progress(start[:2])
+        passed_us = np.interp(ego_arc, self.recorded_arc, self.recorded_times_us)
+        recorded_gain = float(np.interp(passed_us + (times[-1] - t0_us), self.recorded_times_us,
+                                        self.recorded_arc)) - ego_arc
+        plan_gain = self._progress(plan[-1, :2]) - ego_arc
         ep = 1.0 if recorded_gain < MIN_RECORDED_PROGRESS_M else float(np.clip(plan_gain / recorded_gain, 0.0, 1.0))
 
         # --- C, from realised motion including the step out of t0 ---
@@ -344,7 +363,7 @@ def scene_scorer(artifact: Any, recorded: Any) -> SceneScorer:
     for obj in artifact.traffic_objects.values():
         times, xy, yaw = _poses(obj.trajectory)
         tracks.append(Track(Box(obj.aabb.x, obj.aabb.y), times, np.column_stack([xy, yaw]),
-                            obj.label_class not in STATIC_OBSTACLE_CLASSES))
+                            obj.label_class not in STATIC_OBSTACLE_CLASSES, bool(obj.is_static)))
     vehicle = artifact.rig.vehicle_config
     if vehicle is None:
         raise ValueError("the scene's rig has no vehicle config, so the ego box is unknown")
