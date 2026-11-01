@@ -72,6 +72,24 @@ export function cleanQuery(raw: unknown): ODDQuery {
   return { op: validOp(q.op) ? q.op : "and", groups };
 }
 
+let nextConditionID = 0;
+
+// withIDs gives every condition a stable identity so form state follows the
+// condition, not its position, when another condition is removed.
+export function withIDs(query: ODDQuery): ODDQuery {
+  return {
+    ...query,
+    groups: query.groups.map((group) => ({
+      ...group,
+      conditions: group.conditions.map((c) => (c.id === undefined ? { ...c, id: ++nextConditionID } : c)),
+    })),
+  };
+}
+
+export function newConditionID(): number {
+  return ++nextConditionID;
+}
+
 export function parseQueryParam(raw: string | null): ODDQuery {
   if (!raw) return EMPTY_QUERY;
   try {
@@ -123,7 +141,7 @@ const SLOTS = [
   "#9085e9",
   "#e66767",
 ];
-export const OTHER_COLOR = "#64748b";
+const OTHER_COLOR = "#64748b";
 
 // groupAccent marks query group i with the i-th categorical slot.
 export function groupAccent(i: number): string {
