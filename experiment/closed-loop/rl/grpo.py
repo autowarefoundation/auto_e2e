@@ -29,8 +29,9 @@ which is what the raw squared distance in ``grpo_loss`` gives. Both terms of
 the loss are therefore in the same preconditioned units, and the line search
 in ``grpo_step.py`` lowers that preconditioned surrogate.
 
-GRPO (Shao et al., 2024, arXiv:2402.03300) standardises the rewards of a
-group of samples drawn for the same state and needs no value network. With
+GRPO (Shao et al., 2024, arXiv:2402.03300) compares the rewards of a group of
+samples drawn for the same state and needs no value network; here without the
+std normalisation (Dr. GRPO). With
 one update per batch of samples the importance ratio is 1, so its clipped
 surrogate reduces to the advantage-weighted likelihood.
 """
@@ -66,10 +67,15 @@ def sample_plans(
     return mu.detach() + torch.einsum("tk,gkc->gtc", basis.to(mu.device), z), z
 
 
-def group_advantages(rewards: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Rewards of one group standardised within the group (zero when all are equal)."""
-    centred = rewards - rewards.mean()
-    return centred / (rewards.std(unbiased=False) + eps)
+def group_advantages(rewards: torch.Tensor) -> torch.Tensor:
+    """Rewards of one group minus the group mean (zero when all are equal).
+
+    Not divided by the group's std, as Dr. GRPO argues (Liu et al., 2025,
+    arXiv:2503.20783): standardising turns a 1e-4 difference in a group of
+    near-equal plans into the same push as a collision against a clean plan.
+    The rewards share one scale, [-1, 1], so the mean is a sufficient baseline.
+    """
+    return rewards - rewards.mean()
 
 
 def plan_distance(mu_a: torch.Tensor, mu_b: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
