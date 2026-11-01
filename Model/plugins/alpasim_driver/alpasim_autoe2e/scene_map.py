@@ -159,18 +159,23 @@ class SceneMaps:
         return self._maps[scene_id]
 
     def _load(self, scene_id: str) -> SceneMap | None:
-        from alpasim_utils.artifact import Artifact
-
-        for path in sorted(self.root.rglob("*.usdz")):
-            artifact = Artifact(str(path))
-            if artifact.scene_id != scene_id:
-                continue
-            if artifact.map is None:
-                break
-            logger.info("AutoE2E driver: HD map of %s from %s", scene_id, path)
-            return SceneMap.from_vector_map(artifact.map, artifact.rig.trajectory.positions[-1])
-        logger.warning("AutoE2E driver: no HD map for scene %r under %s", scene_id, self.root)
-        return None
+        artifact = find_artifact(self.root, scene_id)
+        if artifact is None or artifact.map is None:
+            logger.warning("AutoE2E driver: no HD map for scene %r under %s", scene_id, self.root)
+            return None
+        logger.info("AutoE2E driver: HD map of %s from %s", scene_id, artifact.source)
+        return SceneMap.from_vector_map(artifact.map, artifact.rig.trajectory.positions[-1])
 
 
-__all__ = ["SceneMap", "SceneMaps"]
+def find_artifact(root: Path, scene_id: str) -> Any | None:
+    """The AlpaSim ``Artifact`` of ``scene_id`` among the USDZ files under ``root``."""
+    from alpasim_utils.artifact import Artifact
+
+    for path in sorted(root.rglob("*.usdz")):
+        artifact = Artifact(str(path))
+        if artifact.scene_id == scene_id:
+            return artifact
+    return None
+
+
+__all__ = ["SceneMap", "SceneMaps", "find_artifact"]
