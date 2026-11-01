@@ -9,6 +9,9 @@ Writes, under <out>:
     by phase correlation of the lower image half, measured once on the WSM controls (what was asked)
     and once on the generations (what the model did). A generation that follows the ego shows the same
     shift as its controls.
+  - last_frame_psnr: on the last frame, each clip against the unshifted clip (what the shift changed)
+    and, with --other-seed, each clip against the same clip generated with another seed (what the seed
+    alone changes).
 """
 
 from __future__ import annotations
@@ -53,6 +56,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--scene", type=Path, required=True)
     p.add_argument("--generated", type=Path, required=True, help="inference output directory")
+    p.add_argument("--other-seed", type=Path, help="the same clips generated with another seed")
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -60,12 +64,12 @@ def main() -> None:
     meta = json.loads((args.scene / "meta.json").read_text())
     keys = list(meta["cameras"].values())
     variants = meta["variants"]
-    gen, ctrl = {}, {}
-    for v in variants:
-        for key in keys:
-            (vision,) = (args.generated / v["name"]).glob(f"vision_view*_{key}.mp4")
-            (control,) = (args.generated / v["name"]).glob(f"control_view*_{key}.mp4")
-            gen[v["name"], key], ctrl[v["name"], key] = frames(vision), frames(control)
+    def load(root: Path, kind: str) -> dict:
+        return {(v["name"], k): frames(next((root / v["name"]).glob(f"{kind}_view*_{k}.mp4")))
+                for v in variants for k in keys}
+
+    gen, ctrl = load(args.generated, "vision"), load(args.generated, "control")
+    other = load(args.other_seed, "vision") if args.other_seed else None
     size = gen[variants[0]["name"], keys[0]][0].shape[1::-1]
 
     def recorded(key: str, frame: int) -> tuple[int, np.ndarray] | None:
@@ -77,7 +81,13 @@ def main() -> None:
         return None
 
     base = variants[0]["name"]
-    metrics = {"psnr_vs_recording": {}, "shift_px": {}, "generated_size": list(size)}
+    metrics = {"psnr_vs_recording": {}, "shift_px": {}, "last_frame_psnr": {}, "generated_size": list(size)}
+    psnr = lambda a, b: round(float(cv2.PSNR(a[-1], b[-1])), 2)  # noqa: E731
+    for v in variants:
+        entry = {"vs_unshifted": {k: psnr(gen[base, k], gen[v["name"], k]) for k in keys}} if v["name"] != base else {}
+        if other:
+            entry["vs_other_seed"] = {k: psnr(gen[v["name"], k], other[v["name"], k]) for k in keys}
+        metrics["last_frame_psnr"][v["name"]] = entry
     for key in keys:
         metrics["psnr_vs_recording"][key] = {}
         for t in TIMES_S:
