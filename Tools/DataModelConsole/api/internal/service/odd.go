@@ -357,7 +357,9 @@ func (s *S3Service) resolveODDPointer(
 }
 
 // sameSceneInventory reports whether two publications pack the same scenes:
-// the same shard names and the same samples per source partition.
+// the same shard names and the same samples per source partition. A partition
+// ID is a digest of the raw scene units it packs (shard_partition_id in
+// Model/data_processing/dataset_snapshot.py), so equal IDs mean equal scenes.
 func sameSceneInventory(left, right *publicationManifest) bool {
 	if left.TotalSamples != right.TotalSamples ||
 		len(left.ShardEntries) != len(right.ShardEntries) ||
