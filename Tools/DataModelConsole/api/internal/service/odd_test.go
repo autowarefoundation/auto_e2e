@@ -351,6 +351,13 @@ func TestSearchODDScenesReportsNoLabels(t *testing.T) {
 				version: "v3.0", publicationSHA: labelSHA, scenes: testODDScenes(),
 			})
 		},
+		"same total, different samples per partition": func(t *testing.T, client *fakePublicationS3) {
+			labelSHA := addTestPublication(t, client, "v3.0", [2]int{10, 5})
+			addTestPublication(t, client, "v3.7", [2]int{5, 10})
+			addTestLabelSet(t, client, testLabelSet{
+				version: "v3.0", publicationSHA: labelSHA, scenes: testODDScenes(),
+			})
+		},
 		"labels only on a newer version": func(t *testing.T, client *fakePublicationS3) {
 			addTestPublication(t, client, "v3.7", [2]int{10, 5})
 			labelSHA := addTestPublication(t, client, "v3.8", [2]int{10, 5})
@@ -411,6 +418,24 @@ func TestSearchODDScenesRejectsUnverifiedLabelSet(t *testing.T) {
 				version: "v3.0", publicationSHA: labelSHA, scenes: scenes,
 			})
 		},
+		"value outside the search contract": func(t *testing.T, client *fakePublicationS3) {
+			labelSHA := addTestPublication(t, client, "v3.0", [2]int{10, 5})
+			scenes := testODDScenes()
+			observation := scenes[0].(map[string]any)["observations"].([]any)[0].(map[string]any)
+			observation["values"] = []string{"urban", "Urban"}
+			addTestLabelSet(t, client, testLabelSet{
+				version: "v3.0", publicationSHA: labelSHA, scenes: scenes,
+			})
+		},
+		"label before its scene starts": func(t *testing.T, client *fakePublicationS3) {
+			labelSHA := addTestPublication(t, client, "v3.0", [2]int{10, 5})
+			scenes := testODDScenes()
+			observation := scenes[0].(map[string]any)["observations"].([]any)[2].(map[string]any)
+			delete(observation, "first_timestamp_ns")
+			addTestLabelSet(t, client, testLabelSet{
+				version: "v3.0", publicationSHA: labelSHA, scenes: scenes,
+			})
+		},
 		"pointer for another version": func(t *testing.T, client *fakePublicationS3) {
 			labelSHA := addTestPublication(t, client, "v3.0", [2]int{10, 5})
 			addTestLabelSet(t, client, testLabelSet{
@@ -440,6 +465,30 @@ func TestSearchODDScenesRejectsUnverifiedLabelSet(t *testing.T) {
 	}
 }
 
+func TestSameSceneInventoryComparesShardNames(t *testing.T) {
+	manifest := func(names ...string) *publicationManifest {
+		out := &publicationManifest{TotalSamples: 10}
+		for _, name := range names {
+			out.ShardEntries = append(out.ShardEntries, publicationShardEntry{Name: name})
+			out.Partitions = append(out.Partitions, publicationPartition{
+				PartitionID: strings.TrimSuffix(name, ".tar"), SampleCount: 5,
+			})
+		}
+		return out
+	}
+	if !sameSceneInventory(manifest("a.tar", "b.tar"), manifest("a.tar", "b.tar")) {
+		t.Fatal("identical inventories differ")
+	}
+	left, right := manifest("a.tar", "b.tar"), manifest("a.tar", "b.tar")
+	right.ShardEntries[1].Name = "c.tar"
+	if sameSceneInventory(left, right) {
+		t.Fatal("different shard names compared equal")
+	}
+	if sameSceneInventory(&publicationManifest{TotalSamples: 10}, &publicationManifest{TotalSamples: 10}) {
+		t.Fatal("publications without partitions compared equal")
+	}
+}
+
 func TestSearchODDScenesCachesLabelSet(t *testing.T) {
 	service, client := newODDTestService()
 	labelSHA := addTestPublication(t, client, "v3.0", [2]int{10, 5})
@@ -449,14 +498,89 @@ func TestSearchODDScenesCachesLabelSet(t *testing.T) {
 	indexKey := fmt.Sprintf(
 		"kitscenes/v3.0/odd/labelsets/%s/scene_index.json", testLabelSetID,
 	)
-	for range 2 {
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	restore := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = restore })
+	addTestPublication(t, client, "v3.7", [2]int{10, 5})
+	pointerKey := "kitscenes/v3.0/odd/latest.json"
+	for _, version := range []string{"v3.0", "v3.0", "v3.7"} {
 		if _, err := service.SearchODDScenes(
-			context.Background(), "kitscenes", "v3.0", nil, 50, 0,
+			context.Background(), "kitscenes", version, nil, 50, 0,
 		); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if client.getCalls[indexKey] != 1 {
-		t.Fatalf("scene index GETs = %d, want 1", client.getCalls[indexKey])
+	// v3.7 resolves its own pointer but reuses the parsed v3.0 LabelSet.
+	if client.getCalls[indexKey] != 1 || client.getCalls[pointerKey] != 2 {
+		t.Fatalf(
+			"scene index GETs = %d, pointer GETs = %d, want 1 and 2",
+			client.getCalls[indexKey], client.getCalls[pointerKey],
+		)
+	}
+	now = now.Add(versionTTL)
+	if _, err := service.SearchODDScenes(
+		context.Background(), "kitscenes", "v3.0", nil, 50, 0,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if client.getCalls[pointerKey] != 3 || client.getCalls[indexKey] != 1 {
+		t.Fatalf(
+			"after TTL pointer GETs = %d, index GETs = %d, want 3 and 1",
+			client.getCalls[pointerKey], client.getCalls[indexKey],
+		)
 	}
 }
+
+func TestSearchODDScenesCachesNoLabelsUntilTTL(t *testing.T) {
+	service, client := newODDTestService()
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	restore := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = restore })
+	labelSHA := addTestPublication(t, client, "v3.0", [2]int{10, 5})
+	search := func() error {
+		_, err := service.SearchODDScenes(
+			context.Background(), "kitscenes", "v3.0", nil, 50, 0,
+		)
+		return err
+	}
+	if err := search(); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	addTestLabelSet(t, client, testLabelSet{
+		version: "v3.0", publicationSHA: labelSHA, scenes: testODDScenes(),
+	})
+	if err := search(); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want the cached ErrNotFound within TTL", err)
+	}
+	now = now.Add(versionTTL)
+	if err := search(); err != nil {
+		t.Fatalf("err = %v, want labels after TTL", err)
+	}
+}
+
+func TestSearchODDScenesDoesNotCacheErrors(t *testing.T) {
+	service, client := newODDTestService()
+	labelSHA := addTestPublication(t, client, "v3.0", [2]int{10, 5})
+	addTestLabelSet(t, client, testLabelSet{
+		version: "v3.0", publicationSHA: labelSHA,
+		scenes: testODDScenes(), omitSceneIndex: true,
+	})
+	search := func() error {
+		_, err := service.SearchODDScenes(
+			context.Background(), "kitscenes", "v3.0", nil, 50, 0,
+		)
+		return err
+	}
+	if err := search(); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want a read error", err)
+	}
+	addTestLabelSet(t, client, testLabelSet{
+		version: "v3.0", publicationSHA: labelSHA, scenes: testODDScenes(),
+	})
+	if err := search(); err != nil {
+		t.Fatalf("err = %v, want success once the index exists", err)
+	}
+}
+
