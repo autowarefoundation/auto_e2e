@@ -13,8 +13,11 @@ Within ``mu + span(B)`` the policy is an isotropic Gaussian in ``z``. Its
 log-likelihood gradient with respect to the mean is ``B z / sigma^2``; the
 Fisher information of the mean is ``1 / sigma^2``, so the natural gradient
 is ``B z``: move the mean towards the sample, in the units of the plan. The
-surrogate below has exactly that gradient, so acceleration and curvature
-learn at the same relative rate whatever their ``sigma``.
+surrogate below has exactly that gradient with respect to the mean plan, so
+the plan-space step does not favour the signal with the smaller ``sigma``.
+It is natural in the mean plan only: the planner's parameters receive
+``J^T B z``, with ``J`` the planner's Jacobian, and the trust region in
+``grpo_step.py`` bounds the change that step causes.
 
 The anchor to the imitation planner covers all 64 steps, so high-frequency
 drift is held back as well. Its value, and the trust region of the update,
