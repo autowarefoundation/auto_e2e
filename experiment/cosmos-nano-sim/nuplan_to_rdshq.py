@@ -220,14 +220,14 @@ def objects(db: sqlite3.Connection, times_us: np.ndarray, world_from_global: np.
     for t in times_us:
         token = tokens[int(np.abs(sweeps - t).argmin())]
         frame = {}
-        for track, name, x, y, z, yaw, l, w, h in db.execute(
+        for track, name, x, y, z, yaw, length, width, height in db.execute(
             "SELECT hex(b.track_token), c.name, b.x, b.y, b.z, b.yaw, b.length, b.width, b.height FROM lidar_box b "
             "JOIN track t ON t.token = b.track_token JOIN category c ON c.token = t.category_token "
             "WHERE b.lidar_pc_token = ?", (token,)):
             if name not in OBJECT_TYPES:
                 continue
             pose = world_from_global @ rigid(rot_z(yaw), [x, y, z])
-            frame[track] = {"object_type": OBJECT_TYPES[name], "object_lwh": [l, w, h], "object_to_world": pose.tolist()}
+            frame[track] = {"object_type": OBJECT_TYPES[name], "object_lwh": [length, width, height], "object_to_world": pose.tolist()}
             centers.setdefault(track, []).append(pose[:3, 3])
         frames.append(frame)
     moving = {k: bool(np.ptp(np.array(v), axis=0)[:2].max() > 1.0) for k, v in centers.items()}
