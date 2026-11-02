@@ -129,8 +129,8 @@ def route_in_local(route: Any, trajectory: Trajectory) -> np.ndarray:
 
     AlpaSim sends them in the rig frame at ``route.timestamp_us``.
     """
-    waypoints = np.array([[p.x, p.y, p.z] for p in route.waypoints], dtype=np.float64).reshape(-1, 3)
-    waypoints = waypoints[np.isfinite(waypoints).all(axis=1)]
+    raw = np.array([[p.x, p.y, p.z] for p in route.waypoints], dtype=np.float64).reshape(-1, 3)
+    waypoints: np.ndarray = raw[np.isfinite(raw).all(axis=1)]
     time_range_us = trajectory.time_range_us
     timestamp_us = min(max(int(route.timestamp_us), time_range_us.start), time_range_us.stop - 1)
     local_from_rig = np.asarray(trajectory.interpolate_pose(timestamp_us).as_se3(), dtype=np.float64)
@@ -149,7 +149,8 @@ def travelled_path(trajectory: Trajectory, t0_us: int) -> np.ndarray:
     the part behind.
     """
     start_us = trajectory.time_range_us.start
-    points, travelled, time_us = [], 0.0, t0_us
+    points: list[np.ndarray] = []
+    travelled, time_us = 0.0, t0_us
     previous = np.asarray(trajectory.interpolate_pose(t0_us).vec3, dtype=np.float64)
     while time_us > start_us and travelled < TRAVELLED_PATH_M:
         time_us = max(time_us - 200_000, start_us)
