@@ -267,8 +267,6 @@ class SceneScorer:
         if steps < HORIZON_STEPS or times[-1] > self.recorded_times_us[-1]:
             raise ValueError("the plan's 4 s horizon must lie within the recording, so plans compare alike")
         plan, speeds, controls = plan[:steps], speeds[:steps], controls[:steps]
-        recorded = np.column_stack([np.interp(times, self.recorded_times_us, column) for column in
-                                    (*self.recorded_xy.T, self.recorded_yaw)])
 
         # --- NC and TTC, against the tracks that come near the plan ---
         start_box = self.ego.at(*start)
