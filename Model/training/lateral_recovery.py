@@ -656,24 +656,17 @@ def preserved_batch_norm_statistics(module: torch.nn.Module) -> Iterator[None]:
     The teacher runs in training mode so it normalises like the student, but it
     must not advance the running statistics a second time per micro-step.
     """
-    norms = [
-        layer for layer in module.modules()
-        if isinstance(layer, torch.nn.modules.batchnorm._BatchNorm)
-        and layer.track_running_stats
-    ]
     saved = [
-        [buffer.clone() for buffer in (
-            layer.running_mean, layer.running_var, layer.num_batches_tracked
-        )]
-        for layer in norms
+        (buffer, buffer.clone())
+        for layer in module.modules()
+        if isinstance(layer, torch.nn.modules.batchnorm._BatchNorm)
+        for buffer in layer.buffers(recurse=False)
     ]
     try:
         yield
     finally:
-        for layer, (mean, var, count) in zip(norms, saved):
-            layer.running_mean.copy_(mean)
-            layer.running_var.copy_(var)
-            layer.num_batches_tracked.copy_(count)
+        for buffer, value in saved:
+            buffer.copy_(value)
 
 
 def feature_consistency_kl(
