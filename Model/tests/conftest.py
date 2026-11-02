@@ -25,8 +25,10 @@ class MockBackboneModel(nn.Module):
       Stage 2: [B*V, 384, 16, 16]
       Stage 3: [B*V, 768,  8,  8]
 
-    Adaptive pooling after each conv guarantees the spatial dims regardless of
-    input resolution while keeping gradients flowing.
+    Each stage pools to its spatial size first and then applies a 1x1 conv, so
+    the dims hold for any input resolution and gradients still flow. Pooling
+    before the conv keeps the mock cheap: a 3x3 conv on the full 256x256 input
+    made the mock the main cost of the train-step tests on CI.
 
     Only the 4-stage Swin/ConvNeXt layout is covered; timm's ResNet50 exposes
     5 stages and needs a real backbone or a separate mock.
@@ -35,20 +37,20 @@ class MockBackboneModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.stage0 = nn.Sequential(
-            nn.Conv2d(3, 96, kernel_size=3, stride=1, padding=1),
             nn.AdaptiveAvgPool2d(64),
+            nn.Conv2d(3, 96, kernel_size=1),
         )
         self.stage1 = nn.Sequential(
-            nn.Conv2d(96, 192, kernel_size=3, stride=1, padding=1),
             nn.AdaptiveAvgPool2d(32),
+            nn.Conv2d(96, 192, kernel_size=1),
         )
         self.stage2 = nn.Sequential(
-            nn.Conv2d(192, 384, kernel_size=3, stride=1, padding=1),
             nn.AdaptiveAvgPool2d(16),
+            nn.Conv2d(192, 384, kernel_size=1),
         )
         self.stage3 = nn.Sequential(
-            nn.Conv2d(384, 768, kernel_size=3, stride=1, padding=1),
             nn.AdaptiveAvgPool2d(8),
+            nn.Conv2d(384, 768, kernel_size=1),
         )
 
     def forward(self, x):
