@@ -459,6 +459,9 @@ def test_init_row_worker_preserves_l2d_source_revision(monkeypatch):
         "data_parsing.l2d",
         fake_module,
     )
+    # The L2D worker calls torch.set_num_threads(1), which is process-wide and
+    # would leave every later test in the run on a single thread.
+    monkeypatch.setattr("torch.set_num_threads", lambda _: None)
 
     pp.init_row_worker(
         "yaak-ai/L2D",
