@@ -181,10 +181,10 @@ class _MockBackbone4(nn.Module):
         self.feature_channels = [96, 192, 384, 768]
         self.backbone_channels = sum(self.feature_channels)
         self._st = nn.ModuleList([
-            nn.Sequential(nn.Conv2d(3, 96, 3, 1, 1), nn.AdaptiveAvgPool2d(64)),
-            nn.Sequential(nn.Conv2d(96, 192, 3, 1, 1), nn.AdaptiveAvgPool2d(32)),
-            nn.Sequential(nn.Conv2d(192, 384, 3, 1, 1), nn.AdaptiveAvgPool2d(16)),
-            nn.Sequential(nn.Conv2d(384, 768, 3, 1, 1), nn.AdaptiveAvgPool2d(8)),
+            nn.Sequential(nn.AdaptiveAvgPool2d(64), nn.Conv2d(3, 96, 1)),
+            nn.Sequential(nn.AdaptiveAvgPool2d(32), nn.Conv2d(96, 192, 1)),
+            nn.Sequential(nn.AdaptiveAvgPool2d(16), nn.Conv2d(192, 384, 1)),
+            nn.Sequential(nn.AdaptiveAvgPool2d(8), nn.Conv2d(384, 768, 1)),
         ])
 
     def forward(self, x):

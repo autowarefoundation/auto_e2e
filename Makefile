@@ -1,6 +1,8 @@
 .DEFAULT_GOAL := help
 
 PYTEST = python -m pytest
+# installer for make setup; CI passes PIP="uv pip" because it installs much faster
+PIP ?= pip
 # pytorch wheel channel: cpu (default, CI parity) or a CUDA build such as cu118/cu126/cu128
 TORCH_CHANNEL ?= cpu
 # suite for test-local: all | map | integration
@@ -9,7 +11,7 @@ SUITE ?= all
 # --- Setup -------------------------------------------------------------------
 
 setup: ## pinned deps from requirements.txt (make setup TORCH_CHANNEL=cu118 for CUDA)
-	pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/$(TORCH_CHANNEL)
+	$(PIP) install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/$(TORCH_CHANNEL)
 
 setup-map: ## extra deps for the map_rendering tests (not installed in CI)
 	pip install matplotlib osmnx

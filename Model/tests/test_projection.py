@@ -375,6 +375,7 @@ class TestBuildFThetaFromCalibration:
     def test_native_wh_and_max_theta_from_r2th(self):
         pytest.importorskip("scipy")
         pytest.importorskip("pandas")  # calibration import pulls the dataset pkg
+        pytest.importorskip("physical_ai_av")  # so does the dataset package itself
         from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
         # Non-square native frame: normalization must use native (W,H), not 256.
         names = ["cam_a", "cam_b"]
@@ -407,6 +408,7 @@ class TestBuildFThetaFromCalibration:
     def test_no_r2th_leaves_max_theta_none(self):
         pytest.importorskip("scipy")
         pytest.importorskip("pandas")  # calibration import pulls the dataset pkg
+        pytest.importorskip("physical_ai_av")  # so does the dataset package itself
         from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
         m = self._Model(800, 600)
         del m.r2th  # lens without a backward polynomial -> no derivable FOV bound
@@ -420,6 +422,7 @@ class TestBuildFThetaFromCalibration:
         bound must fall back to the +Z hemisphere gate, not accept everything."""
         pytest.importorskip("scipy")
         pytest.importorskip("pandas")  # calibration import pulls the dataset pkg
+        pytest.importorskip("physical_ai_av")  # so does the dataset package itself
         from data_parsing.nvidia_physical_ai.calibration import build_ftheta_projection
         bounded = self._Model(1920, 1080)             # has r2th -> finite bound
         unbounded = self._Model(1920, 1080)
