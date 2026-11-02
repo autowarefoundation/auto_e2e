@@ -200,10 +200,10 @@ def test_world_model_feature_channels_derived_from_backbone(device=torch.device(
             super().__init__()
             self.feature_channels = [256, 512, 1024, 2048]
             self.backbone_channels = sum(self.feature_channels)
-            self.s0 = nn.Sequential(nn.Conv2d(3, 256, 3, padding=1), nn.AdaptiveAvgPool2d(64))
-            self.s1 = nn.Sequential(nn.Conv2d(256, 512, 3, padding=1), nn.AdaptiveAvgPool2d(32))
-            self.s2 = nn.Sequential(nn.Conv2d(512, 1024, 3, padding=1), nn.AdaptiveAvgPool2d(16))
-            self.s3 = nn.Sequential(nn.Conv2d(1024, 2048, 3, padding=1), nn.AdaptiveAvgPool2d(8))
+            self.s0 = nn.Sequential(nn.AdaptiveAvgPool2d(64), nn.Conv2d(3, 256, 1))
+            self.s1 = nn.Sequential(nn.AdaptiveAvgPool2d(32), nn.Conv2d(256, 512, 1))
+            self.s2 = nn.Sequential(nn.AdaptiveAvgPool2d(16), nn.Conv2d(512, 1024, 1))
+            self.s3 = nn.Sequential(nn.AdaptiveAvgPool2d(8), nn.Conv2d(1024, 2048, 1))
 
         def forward(self, x):
             a = self.s0(x)
