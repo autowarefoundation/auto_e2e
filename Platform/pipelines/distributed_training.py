@@ -810,6 +810,18 @@ def _reactive_mlflow_params(
         "train/per_rank_batch_size": config["per_rank_batch_size"],
         "train/precision": config["precision"],
         "train/route_weight": config["route_weight"],
+        "train/lateral_recovery_method": config.get(
+            "lateral_recovery_method", "projection"
+        ),
+        "train/lateral_recovery_probability": config.get(
+            "lateral_recovery_probability", 0.0
+        ),
+        "train/feature_consistency_weight": config.get(
+            "feature_consistency_weight", 0.0
+        ),
+        "train/feature_bottleneck_weight": config.get(
+            "feature_bottleneck_weight", 0.0
+        ),
         "train/seed": config["training_seed"],
         "train/training_scope": config["training_scope"],
         "train/trajectory_weight": config["trajectory_weight"],
@@ -1586,6 +1598,10 @@ def _run_reactive_stage_task(
     parent_profile: str = "",
     parent_checkpoint_sha256: str = "",
     parent_checkpoint_epoch: int = 0,
+    lateral_recovery_method: str = "projection",
+    lateral_recovery_probability: float = 0.0,
+    feature_consistency_weight: float = 0.0,
+    feature_bottleneck_weight: float = 0.0,
 ) -> ReactiveRayOutput:
     from distributed_training.reactive_stage import run_reactive_stage
     from model_components.bevformer_v2_pretrained import (
@@ -1681,6 +1697,10 @@ def _run_reactive_stage_task(
         "per_rank_batch_size": per_rank_batch_size,
         "precision": precision,
         "route_weight": route_weight,
+        "lateral_recovery_method": lateral_recovery_method,
+        "lateral_recovery_probability": lateral_recovery_probability,
+        "feature_consistency_weight": feature_consistency_weight,
+        "feature_bottleneck_weight": feature_bottleneck_weight,
         "run_name": run_name,
         "selection_ade_regression_margin_m": 0.5,
         "selection_ade_scale_m": 5.0,
