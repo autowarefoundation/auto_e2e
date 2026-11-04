@@ -557,3 +557,90 @@ export interface DashboardStats {
   // (not genuinely zero/null).
   mlflow_available: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// ODD scene search (GET /api/v1/odd/scenes, /api/v1/odd/scenes/{scene_uid})
+// ---------------------------------------------------------------------------
+
+export type ODDOp = "and" | "or";
+
+// Holds when the scene has a valid labelled interval of key whose values
+// include one of values, lasting at least min_duration_s, with confidence of
+// at least min_confidence, from one of sources (any when absent). not inverts
+// it: no such interval exists.
+export interface ODDQueryCondition {
+  key: string; // e.g. "odd.road.context"
+  values: string[]; // e.g. ["urban"]
+  not?: boolean;
+  min_duration_s?: number;
+  min_confidence?: number;
+  sources?: string[];
+  // Client-only identity for the form; cleanQuery drops it before sending.
+  id?: number;
+}
+
+export interface ODDQueryGroup {
+  op: ODDOp;
+  conditions: ODDQueryCondition[];
+}
+
+export interface ODDQuery {
+  op: ODDOp;
+  groups: ODDQueryGroup[];
+}
+
+export interface ODDFacet {
+  key: string;
+  values: { value: string; scenes: number }[];
+  sources: string[];
+}
+
+// Offsets from the scene start, in nanoseconds.
+export interface ODDInterval {
+  start_ns: number;
+  end_ns: number;
+  values: string[];
+  source: string;
+  confidence: number;
+  camera_id?: string;
+}
+
+export interface ODDLane {
+  key: string;
+  intervals: ODDInterval[];
+}
+
+export interface ODDScene {
+  scene_uid: string;
+  shard: string; // shard name in the requested version
+  duration_ns: number;
+  distance_m: number;
+  lanes: ODDLane[];
+}
+
+export interface ODDLabelSetInfo {
+  dataset: string;
+  version: string;
+  // The version the LabelSet was made for; differs from version when the
+  // labels are carried forward to a later pack of the same scenes.
+  label_version: string;
+  labelset_id: string;
+  manifest_sha256: string;
+  quality: {
+    structural_status: string;
+    audit_status: string;
+    certification_status: string;
+  };
+  labeled_scenes: number;
+}
+
+export interface ODDSearchResponse extends ODDLabelSetInfo {
+  vocabulary: ODDFacet[]; // over every labelled scene
+  facets: ODDFacet[]; // over the matched scenes
+  scenes: ODDScene[]; // lanes hold the intervals that satisfied the query
+  page: Page;
+}
+
+export interface ODDSceneResponse extends ODDLabelSetInfo {
+  scene: ODDScene; // lanes hold every valid label
+}
