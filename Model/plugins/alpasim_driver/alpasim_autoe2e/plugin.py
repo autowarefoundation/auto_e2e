@@ -33,6 +33,7 @@ from training.losses.control_rollout import integrate_controls_torch
 
 from .config import find_rig_profile
 from .parser import CONTEXT_FRAMES, AlpasimStreamParser, ParsedObservation
+from .scene_map import SceneMaps
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ class AutoE2EDriver(BaseTrajectoryModel):
             front_image_size=int(
                 view_fusion.get("front_image_size", REACTIVE_FRONT_CAMERA_IMAGE_SIZE)
             ),
+            scene_maps=SceneMaps(),
         )
         logger.info(
             "AutoE2E driver: rig profile %s, cameras %s",
