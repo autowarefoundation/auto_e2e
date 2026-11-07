@@ -1151,6 +1151,8 @@ def test_fixed_step_resume_matches_uninterrupted_training(
         stage = ReactiveTrainingStage.L2D_CONTINUATION
         compute_bev_segmentation = False
         compute_route_reconstruction = False
+        feature_consistency_weight = 0.0
+        feature_bottleneck_weight = 0.0
 
         def __call__(self, predicted_controls, _auxiliary, _batch):
             total = predicted_controls.mean()
@@ -1162,6 +1164,8 @@ def test_fixed_step_resume_matches_uninterrupted_training(
                 "bev_segmentation_bce": zero,
                 "bev_segmentation_dice": zero,
                 "route_reconstruction": zero,
+                "feature_consistency": zero,
+                "feature_bottleneck": zero,
             }
 
     batches = [
