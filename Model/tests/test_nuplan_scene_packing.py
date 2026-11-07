@@ -41,10 +41,10 @@ from Platform.pipelines.dataset_publication import (
 from Platform.pipelines.dataset_publication_tasks import (
     _plan_partition_artifact_copies,
 )
+from model_components.autobev.geometry import IMAGE_H, IMAGE_W
 from reactive_training_contracts import (
     REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
     REACTIVE_BEVFORMER_FRAME_OFFSETS,
-    REACTIVE_CAMERA_IMAGE_SIZE,
 )
 
 
@@ -62,7 +62,7 @@ def _camera_calibration(yaw_offset: float = 0.0) -> list[dict[str, object]]:
         ego_from_camera[:3, :3] = rotation
         ego_from_camera[:3, 3] = [1.5, 0.1 * index, 1.5]
         cameras.append({
-            "base_scaled_rectified_intrinsic": [
+            "cropped_intrinsic": [
                 [350.0 + index, 0.0, 256.0],
                 [0.0, 700.0, 260.0],
                 [0.0, 0.0, 1.0],
@@ -78,7 +78,7 @@ def _calib(yaw_offset: float = 0.0) -> dict[str, object]:
     return {
         "camera_order": list(NUPLAN_CAMERA_CHANNELS),
         "cameras": _camera_calibration(yaw_offset),
-        "image_size": REACTIVE_CAMERA_IMAGE_SIZE,
+        "image_wh": [IMAGE_W, IMAGE_H],
         "rectification_policy": "nuplan_rectified_pinhole_v1",
         "reference_lidar_timestamp_us": 4_000_000,
         "temporal_camera_timestamps_us": [
@@ -108,6 +108,7 @@ def _scene_scenario(
         failing_iteration=failing_iteration,
         get_number_of_iterations=lambda: iterations,
         log_name=log_name,
+        map_api=SimpleNamespace(map_name="us-nv-las-vegas-strip"),
         scenario_type=scenario_type,
         token=token,
     )
@@ -198,7 +199,7 @@ def test_static_rig_matches_motion_free_sample_projection():
         np.testing.assert_allclose(matrix @ centre, 0.0, atol=1e-3)
         ahead = ego_from_camera @ np.array([0.0, 0.0, 10.0, 1.0])
         pixel = matrix @ ahead
-        intrinsic = np.asarray(camera["base_scaled_rectified_intrinsic"])
+        intrinsic = np.asarray(camera["cropped_intrinsic"])
         np.testing.assert_allclose(
             pixel[:2] / pixel[2],
             intrinsic[:2, 2],
