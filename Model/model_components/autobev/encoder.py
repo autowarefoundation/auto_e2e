@@ -190,6 +190,12 @@ class AutoBEV(nn.Module):
         self.center = CenterHead()
 
     def _depth_weight(self, depth_logits: torch.Tensor, matrix: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        # Projecting pillar points is geometry: bf16 would move them by pixels.
+        with torch.autocast(matrix.device.type, enabled=False):
+            return self._depth_weight_fp32(depth_logits, matrix, scale)
+
+    def _depth_weight_fp32(self, depth_logits: torch.Tensor, matrix: torch.Tensor,
+                           scale: torch.Tensor) -> torch.Tensor:
         """How likely each pillar point lies at its depth, per view: [B, V, N, Z].
 
         The predicted depth distribution is divided by its per-pixel maximum,
