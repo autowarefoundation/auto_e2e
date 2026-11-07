@@ -1,17 +1,21 @@
-"""Turns AlpaSim ``PredictionInput`` into AutoE2E model inputs.
+"""Turns AlpaSim ``PredictionInput`` into the named inputs of ``AutoE2E.forward``.
 
-The tensors follow the packed training contract of the reactive BEVFormer T8
-model (``data_parsing/pre_extracted.py`` and ``data_parsing/kit_scenes``):
+The tensors follow the AutoBEV sample contract
+(``data_processing/autobev_members.py``):
 
-* ``camera_tiles``: the current frame of every camera, squashed to a square
-  tile and ImageNet-normalised.
-* ``camera_history_tiles`` / ``history_projections``: the seven previous frames,
-  500 ms apart, with projections that map current-ego points into each
-  historical image (``reference_frame: current_ego``).
-* ``egomotion_history``: 64 rows of ``[speed, acceleration, yaw_rate,
-  curvature]`` derived from the ego poses by finite differences, the way
-  ``data_parsing/kit_scenes/egomotion.py`` derives them, with the curvature
-  rule of the rig profile's dataset.
+* ``images`` [1, 6, 3, 768, 1344]: the newest frame of every camera, scaled to
+  cover 1344x768 with the aspect ratio kept, centre-cropped and
+  ImageNet-normalised (``crop_params``);
+* ``history_images`` / ``history_projection``: the seven previous frames,
+  500 ms apart, oldest first, with projections that map current-ego points
+  into each past crop;
+* ``egomotion_history`` [1, 256]: 64 rows of ``[speed, acceleration,
+  yaw_rate, curvature]`` derived from the ego poses by finite differences, with
+  the curvature rule of the rig profile's dataset. ``AutoE2E`` scales it.
+
+AlpaSim passes no map or route, so the navigation rasters are zero behind
+``map_valid = route_valid = False``. The map would be cropped at the
+simulator's exact ego pose, so ``map_pose`` is zero.
 
 Everything is anchored at ``t0``, the timestamp of the newest camera frame; the
 driver reports the same ``t0`` back to AlpaSim with the prediction.
@@ -20,52 +24,56 @@ driver reports the same ``t0`` back to AlpaSim with the prediction.
 from __future__ import annotations
 
 import io
+import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from alpasim_driver.models.base import ModelInputValidationError, PredictionInput
 from alpasim_utils.geometry import Pose, Trajectory
+from data_processing.autobev_members import crop_params
+from model_components.autobev.geometry import FRAME_INTERVAL_US, HISTORY_FRAMES, IMAGE_H, IMAGE_W
 from navigation.geometry import (
     AUTOE2E_NAVIGATION_GEOMETRY,
     MAP_CHANNEL_COUNT,
     ROUTE_CHANNEL_COUNT,
 )
 from PIL import Image
-from reactive_training_contracts import (
-    REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
-    REACTIVE_BEVFORMER_HISTORY_FRAMES,
-)
 from torchvision import transforms
-from training.dataset_policy import (
-    AUTO_E2E_TIMESTEPS,
-    EGOMOTION_SIGNALS,
-    adapt_egomotion_history,
-    training_policy_for_dataset,
-)
 
 from .config import IMAGE_MEAN, IMAGE_STD, CameraCalibration, EgomotionRule, RigProfile
 
-CONTEXT_FRAMES = REACTIVE_BEVFORMER_HISTORY_FRAMES + 1
+CONTEXT_FRAMES: Final = HISTORY_FRAMES + 1
 """Camera frames per view the model consumes: seven history frames plus t0."""
 
-EGOMOTION_DT_S = 0.1
-"""Row spacing of the egomotion history (the 10 Hz KITScenes timeline)."""
+EGOMOTION_ROWS: Final = 64
+"""Rows of the egomotion history: 6.4 s at 10 Hz."""
 
-EGOMOTION_SPAN_US = int((AUTO_E2E_TIMESTEPS + 1) * EGOMOTION_DT_S * 1_000_000)
+EGOMOTION_DT_S: Final = 0.1
+"""Row spacing of the egomotion history."""
+
+EGOMOTION_SPAN_US: Final = int((EGOMOTION_ROWS + 1) * EGOMOTION_DT_S * 1_000_000)
 """Pose history needed before t0: 64 rows plus one more for centred differences."""
 
-# Same tolerance as the KITScenes T8 history check in data_parsing/kit_scenes.
-_FRAME_TIMESTAMP_TOLERANCE_US = 50_000
+MAP_POSE_SIGMA: Final = (1.0, 1.0, math.radians(1.0))
+"""Standard deviation (x, y in m, yaw in rad) given as the crop pose's covariance.
+
+The simulator pose is exact, so there is no estimate to describe. These are
+the nominal accuracies the training EKF assumes (``EKF_GNSS_SIGMA_M`` = 1 m,
+``EKF_INITIAL_YAW_SIGMA_DEG`` = 1 deg in ``training.localization_noise``), so
+map matching searches the same window as for a well-localized training sample.
+"""
+
+# Tolerance between the frames of one row and on the 500 ms spacing.
+_FRAME_TIMESTAMP_TOLERANCE_US: Final = 50_000
 
 
 @dataclass
 class ParsedObservation:
     """Model inputs for one prediction plus the frame they are expressed in."""
 
-    model_inputs: dict[str, Any]
+    model_inputs: dict[str, torch.Tensor]
     initial_speed_mps: float
     t0_us: int
     pose_local_to_rig_t0: Pose
@@ -94,14 +102,12 @@ def egomotion_from_poses(
 ) -> np.ndarray:
     """Return the ``(64, 4)`` egomotion history ending one step before ``t0``.
 
-    Mirrors ``poses_to_arrays`` / ``load_egomotion`` in
-    ``data_parsing/kit_scenes/egomotion.py``: speed is the ground-plane speed,
-    acceleration its time derivative, yaw rate the derivative of the unwrapped
-    yaw and curvature from the dataset's ``rule`` (``yaw_rate / max(speed,
-    0.1)`` for KITScenes), all by ``np.gradient`` on a 10 Hz grid. The rows are
-    the 64 samples before ``t0``, as in training.
+    Speed is the ground-plane speed, acceleration its time derivative, yaw
+    rate the derivative of the unwrapped yaw and curvature from the dataset's
+    ``rule``, all by ``np.gradient`` on a 10 Hz grid. The rows are the 64
+    samples before ``t0``, as in training.
     """
-    steps = np.arange(-(AUTO_E2E_TIMESTEPS + 1), 1)
+    steps = np.arange(-(EGOMOTION_ROWS + 1), 1)
     times_us = t0_us + (steps * EGOMOTION_DT_S * 1_000_000).astype(np.int64)
     positions = np.empty((len(times_us), 2), dtype=np.float64)
     yaws = np.empty(len(times_us), dtype=np.float64)
@@ -122,78 +128,55 @@ def egomotion_from_poses(
 
 def history_projections(
     cameras: tuple[CameraCalibration, ...],
+    frame_wh: list[tuple[int, int]],
     local_to_rig_t0: np.ndarray,
     local_to_rig_history: list[np.ndarray],
-    target_hw: tuple[int, int],
 ) -> np.ndarray:
-    """``(H, V, 3, 4)`` projections of current-ego points into history frames.
+    """``(H, V, 3, 4)`` projections of current-ego points into the past crops."""
+    return np.stack([
+        np.stack([
+            camera.projection(size, np.linalg.inv(local_to_rig_past) @ local_to_rig_t0)
+            for camera, size in zip(cameras, frame_wh)
+        ])
+        for local_to_rig_past in local_to_rig_history
+    ]).astype(np.float32)
 
-    Mirrors ``compute_temporal_camera_projection_matrices`` in
-    ``data_parsing/kit_scenes/camera.py``.
-    """
-    frames = []
-    for local_to_rig_past in local_to_rig_history:
-        past_from_current = np.linalg.inv(local_to_rig_past) @ local_to_rig_t0
-        frames.append(
-            np.stack(
-                [
-                    camera.scaled_intrinsic(target_hw)
-                    @ (camera.reference_to_camera() @ past_from_current)[:3, :]
-                    for camera in cameras
-                ]
-            )
-        )
-    return np.stack(frames).astype(np.float32)
+
+def _rgb(image: Any) -> Image.Image:
+    if isinstance(image, bytes):
+        image = Image.open(io.BytesIO(image))
+    elif isinstance(image, torch.Tensor):
+        image = Image.fromarray(image.cpu().numpy())
+    elif isinstance(image, np.ndarray):
+        image = Image.fromarray(image)
+    return image.convert("RGB")
 
 
 class AlpasimStreamParser:
     """Builds AutoE2E inputs from AlpaSim camera frames and ego poses."""
 
-    def __init__(
-        self,
-        profile: RigProfile,
-        camera_slots: list[str],
-        image_size: int,
-        front_image_size: int,
-    ) -> None:
+    def __init__(self, profile: RigProfile, camera_slots: tuple[str, ...]) -> None:
         self.profile = profile
-        self.cameras = profile.ordered_by_slots(camera_slots)
-        self.image_size = image_size
-        self.front_image_size = front_image_size
-        self.policy = training_policy_for_dataset(profile.dataset_name)
+        self.cameras = profile.ordered_by_slots(list(camera_slots))
         self.transform = transforms.Compose(
             [transforms.ToTensor(), transforms.Normalize(IMAGE_MEAN, IMAGE_STD)]
         )
-        tile_hw = (image_size, image_size)
-        self.projection = torch.from_numpy(
-            np.stack([camera.projection(tile_hw) for camera in self.cameras])
-        ).float()
-        self.front_projection = torch.from_numpy(
-            self.cameras[0].projection((front_image_size, front_image_size))[None]
-        ).float()
 
     @property
     def camera_ids(self) -> list[str]:
         return [camera.logical_id for camera in self.cameras]
 
-    def _tile(self, image: Any, size: int) -> torch.Tensor:
-        """Squash a frame to ``size x size`` and normalise it, as in training."""
-        if isinstance(image, bytes):
-            image = Image.open(io.BytesIO(image))
-        elif isinstance(image, torch.Tensor):
-            image = Image.fromarray(image.cpu().numpy())
-        elif isinstance(image, np.ndarray):
-            image = Image.fromarray(image)
-        image = image.convert("RGB")
-        if image.size != (size, size):
-            image = image.resize((size, size), resample=Image.Resampling.BILINEAR)
-        return self.transform(image)
+    def _crop(self, image: Image.Image) -> torch.Tensor:
+        """Scale to cover 1344x768, centre-crop and normalise, as the packers do."""
+        _, _, scaled_w, scaled_h, left, top = crop_params(*image.size)
+        image = image.resize((scaled_w, scaled_h), resample=Image.Resampling.BILINEAR)
+        return self.transform(image.crop((left, top, left + IMAGE_W, top + IMAGE_H)))
 
     def _frames_by_row(
         self, camera_images: dict[str, list[Any]]
-    ) -> tuple[list[int], list[list[Any]]]:
+    ) -> tuple[list[int], list[list[Image.Image]]]:
         """Return row timestamps and ``[row][view]`` images, oldest row first."""
-        rows: list[list[Any]] = [[] for _ in range(CONTEXT_FRAMES)]
+        rows: list[list[Image.Image]] = [[] for _ in range(CONTEXT_FRAMES)]
         row_times: list[int] = []
         for view, camera in enumerate(self.cameras):
             frames = camera_images.get(camera.logical_id)
@@ -217,16 +200,12 @@ class AlpasimStreamParser:
                         f"{int(timestamp_us) - row_times[row]} us away from the "
                         f"{self.cameras[0].logical_id} frame"
                     )
-                rows[row].append(image)
+                rows[row].append(_rgb(image))
         spacings = np.diff(row_times)
-        if np.any(
-            np.abs(spacings - REACTIVE_BEVFORMER_FRAME_INTERVAL_US)
-            > _FRAME_TIMESTAMP_TOLERANCE_US
-        ):
+        if np.any(np.abs(spacings - FRAME_INTERVAL_US) > _FRAME_TIMESTAMP_TOLERANCE_US):
             raise ModelInputValidationError(
-                "AutoE2E history frames must be "
-                f"{REACTIVE_BEVFORMER_FRAME_INTERVAL_US} us apart, got spacings "
-                f"{spacings.tolist()}; check frame_interval_us and "
+                f"AutoE2E history frames must be {FRAME_INTERVAL_US} us apart, got "
+                f"spacings {spacings.tolist()}; check frame_interval_us and "
                 "inference.subsample_factor"
             )
         return row_times, rows
@@ -254,60 +233,34 @@ class AlpasimStreamParser:
             np.asarray(trajectory.interpolate_pose(t).as_se3(), dtype=np.float64)
             for t in row_times[:-1]
         ]
-        tile_hw = (self.image_size, self.image_size)
-
-        visual_tiles = torch.stack(
-            [self._tile(image, self.image_size) for image in rows[-1]]
+        frame_wh = [image.size for image in rows[-1]]
+        projection = np.stack([
+            camera.projection(size, np.eye(4)) for camera, size in zip(self.cameras, frame_wh)
+        ]).astype(np.float32)
+        history_projection = history_projections(
+            self.cameras, frame_wh, local_to_rig_t0, local_to_rig_history
         )
-        front_camera_tile = None
-        if self.profile.native_front_camera_tile:
-            # pre_extracted.py keeps the native front tile and derives the base
-            # tile from it, so the two views of the front camera stay identical.
-            front_camera_tile = self._tile(rows[-1][0], self.front_image_size)
-            visual_tiles[0] = F.interpolate(
-                front_camera_tile.unsqueeze(0),
-                size=(self.image_size, self.image_size),
-                mode="bilinear",
-                align_corners=False,
-                antialias=True,
-            ).squeeze(0)
-        camera_history_tiles = torch.stack(
-            [
-                torch.stack([self._tile(image, self.image_size) for image in row])
-                for row in rows[:-1]
-            ]
-        )
-        camera_history_projection = torch.from_numpy(
-            history_projections(
-                self.cameras, local_to_rig_t0, local_to_rig_history, tile_hw
-            )
-        )
-
-        egomotion = torch.from_numpy(egomotion_from_poses(trajectory, t0_us, self.profile.egomotion))
-        egomotion_history = adapt_egomotion_history(
-            egomotion.reshape(1, AUTO_E2E_TIMESTEPS * EGOMOTION_SIGNALS), self.policy
+        egomotion = torch.from_numpy(
+            egomotion_from_poses(trajectory, t0_us, self.profile.egomotion)
         )
 
         height, width = AUTOE2E_NAVIGATION_GEOMETRY.height_px, AUTOE2E_NAVIGATION_GEOMETRY.width_px
-        model_inputs: dict[str, Any] = {
-            "camera_tiles": visual_tiles.unsqueeze(0),
-            "camera_projection_matrix": self.projection.unsqueeze(0),
-            "camera_history_tiles": camera_history_tiles.unsqueeze(0),
-            "camera_history_projection_matrix": camera_history_projection.unsqueeze(0),
-            "egomotion_history": egomotion_history,
-            "visual_history": torch.zeros(1, 896),
-            # No map or route reaches the driver through AlpaSim's model API, so
-            # the model runs on its camera-only track behind explicit validity
-            # gates (evaluated as "camera_only_missing_map_route").
+        model_inputs = {
+            "images": torch.stack([self._crop(image) for image in rows[-1]]).unsqueeze(0),
+            "history_images": torch.stack([
+                torch.stack([self._crop(image) for image in row]) for row in rows[:-1]
+            ]).unsqueeze(0),
+            "projection": torch.from_numpy(projection).unsqueeze(0),
+            "history_projection": torch.from_numpy(history_projection).unsqueeze(0),
+            "egomotion_history": egomotion.reshape(1, -1),
             "map_context": torch.zeros(1, MAP_CHANNEL_COUNT, height, width),
             "route_mask": torch.zeros(1, ROUTE_CHANNEL_COUNT, height, width),
             "map_valid": torch.zeros(1, dtype=torch.bool),
             "route_valid": torch.zeros(1, dtype=torch.bool),
+            "map_pose": torch.zeros(1, 3),
+            "map_pose_covariance": torch.diag(torch.tensor(MAP_POSE_SIGMA) ** 2).unsqueeze(0),
+            "map_matching": torch.ones(1, dtype=torch.bool),
         }
-        if front_camera_tile is not None:
-            model_inputs["front_camera_tile"] = front_camera_tile.unsqueeze(0)
-            model_inputs["front_camera_projection_matrix"] = self.front_projection.unsqueeze(0)
-
         return ParsedObservation(
             model_inputs=model_inputs,
             initial_speed_mps=float(egomotion[-1, 0]),
