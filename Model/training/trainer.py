@@ -233,6 +233,7 @@ def train_loop(config: dict[str, Any]) -> None:
         world=world, start_step=start,
     )
     running: dict[str, float] = {}
+    logged = 0
     for step in range(start, run.steps):
         schedule.apply(optimizer, step)
         batch = {key: value.to(device, non_blocking=True) if torch.is_tensor(value)
@@ -248,12 +249,13 @@ def train_loop(config: dict[str, Any]) -> None:
         optimizer.step()
         for name, value in terms.items():
             running[name] = running.get(name, 0.0) + float(value.detach())
+        logged += 1
         done = step + 1
         checkpointing = done % run.checkpoint_interval_steps == 0 or done == run.steps
         if done % LOG_EVERY_STEPS and not checkpointing:
             continue
-        report = {"step": done, **{f"train/{k}": v / LOG_EVERY_STEPS for k, v in running.items()}}
-        running = {}
+        report = {"step": done, **{f"train/{k}": v / logged for k, v in running.items()}}
+        running, logged = {}, 0
         if not checkpointing:
             ray_train.report(report)
             continue
