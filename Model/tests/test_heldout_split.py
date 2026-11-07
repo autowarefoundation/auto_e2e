@@ -30,6 +30,7 @@ from data_parsing.pre_extracted import (  # noqa: E402
     _SampleUidFilter,
     discover_split_inventory,
     discover_split_group_uids,
+    SPLIT_BUCKETS,
     _split_bucket,
     _split_keep,
 )
@@ -48,7 +49,7 @@ def test_split_is_deterministic():
     ks = [f"l2d-e{i:06d}" for i in range(200)]
     for k in ks[:50]:
         assert _split_bucket(k) == _split_bucket(k)
-    assert all(0 <= _split_bucket(k) < 10 for k in ks)
+    assert all(0 <= _split_bucket(k) < SPLIT_BUCKETS for k in ks)
 
 
 def test_frames_of_same_episode_never_straddle_train_val():
