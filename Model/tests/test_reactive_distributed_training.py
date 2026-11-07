@@ -122,6 +122,8 @@ from model_components.losses import (
     BEVSegmentationAuxiliaryLoss,
     RouteReconstructionLoss,
 )
+from data_processing.autobev_members import manifest_contract
+from model_components.autobev.geometry import IMAGE_H, IMAGE_W
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
 from reactive_training_contracts import (
     REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
@@ -133,6 +135,7 @@ from reactive_training_contracts import (
 from training.dataset_policy import (
     KITSCENES_DATASET_NAME,
     L2D_DATASET_NAME,
+    NUPLAN_DATASET_NAME,
 )
 from training.reactive_multitask import (
     ReactiveMultitaskObjective,
@@ -237,8 +240,21 @@ def _write_source(
         "source_revision": "test-revision",
         "total_samples": sum(shard_counts),
     }
-    # Every Reactive stage, L2D included, now packs T8 camera context.
-    if (
+    # Every Reactive stage, L2D included, now packs T8 camera context; nuPlan
+    # packs it as the AutoBEV members.
+    if dataset == NUPLAN_DATASET_NAME:
+        manifest.update({
+            **manifest_contract(),
+            "image_size": [IMAGE_W, IMAGE_H],
+            "sample_kind": "planner",
+            "temporal_frame_interval_us": (
+                REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+            ),
+            "temporal_frame_offsets": list(
+                REACTIVE_BEVFORMER_FRAME_OFFSETS
+            ),
+        })
+    elif (
         (include_bev or dataset == L2D_DATASET_NAME)
         if include_direct_camera_context is None
         else include_direct_camera_context
@@ -511,22 +527,40 @@ def test_stage_a_dataset_plan_rejects_previous_bev_taxonomy(tmp_path):
         )
 
 
-def test_dataset_plan_rejects_previous_camera_image_size(tmp_path):
-    source = tmp_path / "camera-256"
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (
+            {"autobev_geometry": {
+                **manifest_contract()["autobev_geometry"],
+                "pc_range": [-30.0, -40.0, -5.0, 80.0, 40.0, 3.0],
+            }},
+            "different AutoBEV geometry",
+        ),
+        ({"autobev_members_version": "autobev_members_v0"}, "member contract"),
+        ({"sample_kind": "autobev_only"}, "planner samples"),
+    ],
+)
+def test_nuplan_plan_refuses_another_autobev_contract(
+    tmp_path,
+    change,
+    message,
+):
+    source = tmp_path / "other-contract"
     manifest = _write_source(
         source,
-        dataset="nuplan/nuplan-v1.1",
+        dataset=NUPLAN_DATASET_NAME,
         shard_counts=[4],
         include_bev=True,
         num_views=6,
     )
-    manifest["image_size"] = 256
+    manifest.update(change)
     (source / "manifest.json").write_text(
         json.dumps(manifest, sort_keys=True),
         encoding="ascii",
     )
 
-    with pytest.raises(ValueError, match="camera image size"):
+    with pytest.raises(ValueError, match=message):
         build_reactive_dataset_plan(
             [str(source)],
             stage=ReactiveTrainingStage.NUPLAN_FULL,
@@ -2588,16 +2622,23 @@ def test_validate_stage_config_rejects_missing_worker_cpu_contract():
 
 
 @pytest.mark.parametrize(
-    ("stage", "expected_views", "expected_bev"),
+    ("stage", "expected_image_hw", "expected_front_hw", "expected_bev"),
     [
-        (ReactiveTrainingStage.NUPLAN_FULL, 6, True),
-        (ReactiveTrainingStage.L2D_CONTINUATION, 6, False),
+        # nuPlan packs the AutoBEV cameras and no front companion.
+        (ReactiveTrainingStage.NUPLAN_FULL, (IMAGE_H, IMAGE_W), None, True),
+        (
+            ReactiveTrainingStage.L2D_CONTINUATION,
+            (REACTIVE_CAMERA_IMAGE_SIZE, REACTIVE_CAMERA_IMAGE_SIZE),
+            (REACTIVE_FRONT_CAMERA_IMAGE_SIZE, REACTIVE_FRONT_CAMERA_IMAGE_SIZE),
+            False,
+        ),
     ],
 )
 def test_canary_dataset_uses_production_loader_contract(
     tmp_path,
     stage,
-    expected_views,
+    expected_image_hw,
+    expected_front_hw,
     expected_bev,
 ):
     dataset = tmp_path / stage.value
@@ -2636,23 +2677,21 @@ def test_canary_dataset_uses_production_loader_contract(
     assert len(train_batches) == 4
     assert len(validation_batches) == 2
     sample = train_batches[0]
-    assert sample["visual_tiles"].shape == (
+    assert sample["visual_tiles"].shape == (1, 6, 3, *expected_image_hw)
+    assert sample["camera_history_tiles"].shape == (
         1,
-        expected_views,
+        7,
+        6,
         3,
-        REACTIVE_CAMERA_IMAGE_SIZE,
-        REACTIVE_CAMERA_IMAGE_SIZE,
+        *expected_image_hw,
     )
     assert sample["map_context"].shape == (1, 14, 450, 300)
     assert sample["route_mask"].shape == (1, 2, 450, 300)
     assert bool(sample["bev_segmentation_available"][0]) is expected_bev
-    # Every stage, L2D included, carries the native front view and T8 history.
-    assert sample["front_camera_tile"].shape == (
-        1,
-        3,
-        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
-        REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
-    )
+    front = sample.get("front_camera_tile")
+    assert (
+        None if front is None else tuple(front.shape[-2:])
+    ) == expected_front_hw
     if stage is ReactiveTrainingStage.NUPLAN_FULL:
         statistics = discover_bev_training_statistics(
             [str(dataset)],
