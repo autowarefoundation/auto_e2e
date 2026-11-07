@@ -72,6 +72,13 @@ def match_pose(
     ``prior_pose`` [B, 3] the estimated crop pose and ``prior_covariance``
     [B, 3, 3] its EKF covariance (x, y in m, yaw in rad).
     """
+    with torch.autocast(bev_probability.device.type, enabled=False):
+        return _match_pose(bev_probability.float(), map_context.float(), prior_pose.float(),
+                           prior_covariance.float())
+
+
+def _match_pose(bev_probability, map_context, prior_pose, prior_covariance):
+    # Full precision: the correlation sums 35,200 cells per shift.
     device = bev_probability.device
     step = AUTOBEV_GEOMETRY.meters_per_pixel
     prediction = bev_probability[:, [index for index, _ in MATCH_CLASSES]].float()
