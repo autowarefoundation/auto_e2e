@@ -29,17 +29,17 @@ import hashlib
 from dataclasses import dataclass
 from typing import Final, Sequence
 
-# Split groups with this prefix fall in bucket 0, which every non-empty
-# validation split contains, so a geographic hold-out (nuPlan Pittsburgh)
-# never reaches training whatever the validation fraction.
-HELDOUT_SPLIT_GROUP_PREFIX: Final = "heldout-"
-
 from data_processing.contract_versions import (
     GEOMETRY_VERSION,
     PARSER_VERSION,
     SHARD_SCHEMA_VERSION,
     UID_SCHEMA_VERSION,
 )
+
+# Split groups with this prefix fall in bucket 0, which every non-empty
+# validation split contains, so a geographic hold-out (nuPlan Pittsburgh)
+# never reaches training whatever the validation fraction.
+HELDOUT_SPLIT_GROUP_PREFIX: Final = "heldout-"
 
 
 def group_metadata_digest(group_ids: Sequence[int | str]) -> str:
