@@ -44,25 +44,17 @@ def build_inputs(run: dict) -> tuple[str, dict]:
         return "Platform.pipelines.autoe2e_acquire.wf_acquire_raw_snapshot", inputs
     if run["workflow"] != "wf_autoe2e":
         raise ValueError(f"unknown workflow {run['workflow']!r}")
-    from Platform.pipelines.autoe2e import (
-        EvalSuite,
-        EvalTarget,
-        EvaluationSpec,
-        GpuProfile,
-        ModelRef,
-        RuntimeOptions,
-        TrainingSpec,
-    )
+    from Platform.pipelines.autoe2e import EvalSuite, EvalTarget, EvaluationSpec, ModelRef, RuntimeOptions
+    from Platform.pipelines.autoe2e_training import GpuProfile, TrainingSpec
 
     training = dict(run["training"])
-    training["gpu_profile"] = GpuProfile(training.get("gpu_profile", "ray_8"))
+    training["gpu_profile"] = GpuProfile(training.get("gpu_profile", GpuProfile.RAY_8.value))
     inputs = {
         "dataset": _dataset_spec(run["dataset"]),
+        "mix": [_dataset_spec(spec) for spec in run.get("mix", [])],
+        "early_mix": [_dataset_spec(spec) for spec in run.get("early_mix", [])],
         "training": TrainingSpec(**training),
-        "evaluation": EvaluationSpec(targets=[
-            EvalTarget(EvalSuite(t["suite"]), _dataset_spec(t["dataset"]) if t.get("dataset") else None)
-            for t in run.get("evaluation", [])
-        ]),
+        "evaluation": EvaluationSpec(targets=[EvalTarget(EvalSuite(suite)) for suite in run.get("evaluation", [])]),
         "runtime": RuntimeOptions(**run["runtime"]),
     }
     if run.get("parent"):
