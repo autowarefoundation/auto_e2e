@@ -88,11 +88,7 @@ def stage2_groups(model: nn.Module) -> list[Group]:
         for _, parameter in block:
             parameter.requires_grad_(True)
         groups += _split(f"vit{index}", block, VIT_LR_SCALE * VIT_LAYER_DECAY ** (top - index), True)
-    # The final norm sits above the last block and trains with it.
-    norm = list(vit.norm.named_parameters())
-    for _, parameter in norm:
-        parameter.requires_grad_(True)
-    groups += _split("vit_norm", norm, VIT_LR_SCALE, True)
+    # The readout takes block outputs before the final norm, which stays frozen.
     encoder = [(n, p) for n, p in reactive.AutoBEV.named_parameters() if not n.startswith("backbone.vit.")]
     groups += _split("bev_encoder", encoder, BEV_ENCODER_LR_SCALE, True)
     planner = [(n, p) for n, p in reactive.named_parameters() if not n.startswith("AutoBEV.")]
