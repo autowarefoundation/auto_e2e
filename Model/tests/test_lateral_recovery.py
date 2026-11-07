@@ -257,6 +257,10 @@ def test_inactive_samples_are_bitwise_unchanged(method):
         shift,
         method=method,
     )
+    boxes = batch.pop("autobev_boxes")
+    # An inactive sample's boxes go through the identity rotation: equal up to rounding.
+    assert torch.allclose(out["autobev_boxes"][1], boxes[1])
+    assert not torch.allclose(out["autobev_boxes"][0], boxes[0])
     for key, value in batch.items():
         assert torch.equal(out[key][1], value[1]), key
     changed = [
@@ -268,7 +272,6 @@ def test_inactive_samples_are_bitwise_unchanged(method):
         "trajectory_xy_m",
         "map_context",
         "route_mask",
-        "autobev_boxes",
     }
     if method == "projection":
         expected = common | {
