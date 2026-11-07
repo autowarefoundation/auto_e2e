@@ -1,16 +1,14 @@
 """AutoBEV losses: BEV segmentation, LiDAR depth, FCOS3D-style boxes, image-space map segmentation, centres.
 
 Ported from ``experiment/autobev/losses.py``. Image-space map segmentation
-(``pv_seg``) has two teachers:
+(``pv_seg``) is taught by:
 
 - the BEV map labels projected onto the ground seen by each stride-8 cell
   (``projected_map_targets``); cells whose LiDAR depth is clearly shorter than
   the ground hit are occluded by something above the road and are ignored, as
   in the perspective map supervision of MapTRv2 (Liao et al. 2023);
-- optional 2D pseudo labels (``pv_pseudo``), as in X-Align (Borse et al. 2023).
-  With pseudo labels the BEV prediction is also rendered into each image by the
-  same ground-plane lookup and compared with them (render loss, after Busch et
-  al., IV 2026), which supervises BEV cells the map labels leave invalid.
+- 2D pseudo labels and the BEV-to-image render loss of the experiment are not
+  ported yet: they need a pseudo-label layer in the data pipeline first.
 
 Every dataset's ego origin is on the road (``geometry.EGO_ORIGIN``), so the
 prior road height is 0 m; with LiDAR it is refined per sample.
@@ -53,22 +51,21 @@ OBJECT_CLASS_INDEX = [BEV_SEGMENTATION_CLASSES.index(name) for name in CENTER_GR
 BOX_RADIUS_CELLS = 1.5
 PV_CLASS_INDEX = [BEV_SEGMENTATION_CLASSES.index(name) for name in PV_SEG_CLASSES]
 PV_POS_WEIGHT = tuple(BEV_POS_WEIGHT[i] for i in PV_CLASS_INDEX)
-LOSS_TERMS = ("bev", "depth", "box", "pv_seg", "pseudo", "render", "object", "center")
+LOSS_TERMS = ("bev", "depth", "box", "pv_seg", "object", "center")
 # Stage 1 trains AutoBEV with every term. ``object`` adds a separate BCE+Dice
 # term on vehicle and vulnerable_road_user, so the map-side terms cannot crowd
 # out the object classes (BEVFusion reports that tasks sharing an encoder pull
 # each other down).
-STAGE1_WEIGHTS = {"bev": 1.0, "depth": 1.0, "box": 1.0, "pv_seg": 0.5, "pseudo": 0.5, "render": 0.25,
+STAGE1_WEIGHTS = {"bev": 1.0, "depth": 1.0, "box": 1.0, "pv_seg": 0.5,
                   "object": 0.5, "center": 1.0}
 # Stage 2 keeps segmentation, depth and centres as auxiliary terms; their sum
 # is scaled by the stage 2 schedule.
-STAGE2_AUX_WEIGHTS = {"bev": 1.0, "depth": 1.0, "box": 0.0, "pv_seg": 0.0, "pseudo": 0.0, "render": 0.0,
+STAGE2_AUX_WEIGHTS = {"bev": 1.0, "depth": 1.0, "box": 0.0, "pv_seg": 0.0,
                       "object": 0.0, "center": 1.0}
 # A LiDAR return blocks a cell's ground ray when it is this far above the
 # road and at least OCCLUSION_MARGIN_M nearer than the ground hit.
 OCCLUDER_HEIGHT_M, OCCLUSION_MARGIN_M = 0.25, 1.0
 GROUND_SEARCH_M = 1.0  # LiDAR returns within this of the prior road height estimate the road
-RENDER_SUBRAYS = 4  # per axis: the render loss averages 4x4 rays per stride-8 cell
 
 
 def _ground_rays(projection: torch.Tensor, ground_z: torch.Tensor, feature_hw, offsets=(0.0,)):
@@ -167,23 +164,6 @@ def projected_map_targets(batch: dict, feature_hw):
     target, valid = _sample_valid_target(batch["bev_segmentation_target"][:, PV_CLASS_INDEX],
                                          batch["bev_segmentation_valid"][:, PV_CLASS_INDEX], grid)
     return target, valid & mask[:, :, None], grid, mask, road
-
-
-def render_bev(bev_logits: torch.Tensor, batch: dict, feature_hw, road: torch.Tensor) -> torch.Tensor:
-    """BEV map probabilities averaged over RENDER_SUBRAYS^2 ground rays per stride-8 cell: [B, V, C, h, w].
-
-    A far cell's 8x8 pixels cover several metres of road in depth; averaging
-    rays matches the area-averaged pseudo label instead of one point sample.
-    """
-    offsets = tuple((i + 0.5) / RENDER_SUBRAYS - 0.5 for i in range(RENDER_SUBRAYS))
-    _, _, t, grid = _ground_rays(batch["camera_projection_matrix"], road, feature_hw, offsets)
-    batch_size, views, rays, height, width = t.shape
-    probability = bev_logits.float()[:, PV_CLASS_INDEX].sigmoid()
-    sampled = _sample_bev(probability, grid.permute(0, 1, 3, 2, 4, 5).reshape(batch_size, views, height, rays * width, 2),
-                          "bilinear")
-    sampled = sampled.view(batch_size, views, -1, height, rays, width)
-    ahead = (t > 0.5).permute(0, 1, 3, 2, 4)[:, :, None]  # rays above the horizon contribute nothing
-    return (sampled * ahead).sum(4) / ahead.sum(4).clamp(min=1)
 
 
 def masked_bce_dice(logits, target, valid, pos_weight=None, probabilities: bool = False) -> torch.Tensor:
@@ -368,32 +348,6 @@ class AutoBEVLoss(torch.nn.Module):
         feature_hw = pv_logits.shape[-2:]
         pv_target, pv_valid, grid, mask, road = projected_map_targets(batch, feature_hw)
         pv_loss = masked_bce_dice(pv_logits, pv_target.flatten(0, 1), pv_valid.flatten(0, 1), PV_POS_WEIGHT)
-        pseudo_loss = render_loss = pv_logits.sum() * 0.0
-        render_valid = fill = torch.zeros_like(pv_valid)
-        if "pv_pseudo" in batch and (self.weights["pseudo"] or self.weights["render"]):
-            # pv_pseudo [B, V, C, h, w] in PV_SEG_CLASSES order; pv_pseudo_valid
-            # marks confident cells of known classes whose top Vistas class is
-            # a ground surface, so cars and people are never road negatives.
-            pseudo = batch["pv_pseudo"].float()
-            pseudo_valid = batch["pv_pseudo_valid"]
-            if "autobev_image_valid" in batch:
-                pseudo_valid = pseudo_valid & batch["autobev_image_valid"][:, :, None]
-            # The map labels stay the teacher where they supervise the image
-            # head (their lane boundaries include unpainted edges, Vistas paint
-            # does not). Everywhere else the pseudo labels teach it: ground
-            # past the BEV grid, cells the occlusion test dropped, and classes
-            # a dataset's map lacks. The segmenter only marks visible ground,
-            # so it needs no occlusion test of its own.
-            fill = pseudo_valid & ~pv_valid
-            pseudo_loss = masked_bce_dice(pv_logits, pseudo.flatten(0, 1), fill.flatten(0, 1))
-            # The render loss reaches BEV cells, so it needs a visible ground
-            # hit inside the grid and only where the BEV labels are invalid.
-            map_valid = _sample_bev(batch["bev_segmentation_valid"][:, PV_CLASS_INDEX].float(), grid, "nearest") > 0.5
-            render_valid = pseudo_valid & mask[:, :, None] & ~map_valid
-            rendered = render_bev(outputs["bev_logits"], batch, feature_hw, road)
-            render_loss = masked_bce_dice(rendered.flatten(0, 1), pseudo.flatten(0, 1), render_valid.flatten(0, 1),
-                                          probabilities=True)
-
         cls_logits = outputs["box_cls"].float()
         reg = outputs["box_reg"].float()
         boxes = batch.get("autobev_image_boxes", batch["autobev_boxes"])
@@ -439,15 +393,13 @@ class AutoBEVLoss(torch.nn.Module):
             peak_mask = peak_t[:, None].expand_as(offset_t)
             offset_loss = (F.l1_loss(outputs["center_offset"].float()[peak_mask], offset_t[peak_mask])
                            if peak_mask.any() else heat_loss * 0.0)
-        terms = {"bev": bev, "depth": depth_loss, "box": box, "pv_seg": pv_loss, "pseudo": pseudo_loss,
-                 "render": render_loss, "object": object_loss, "center": heat_loss + offset_loss}
+        terms = {"bev": bev, "depth": depth_loss, "box": box, "pv_seg": pv_loss, "object": object_loss,
+                 "center": heat_loss + offset_loss}
         total = sum(self.weights[name] * terms[name] for name in LOSS_TERMS)
         return {"total": total, "bev": bev.detach(), "bev_bce": bev_parts["bce"].detach(),
                 "bev_dice": bev_parts["dice"].detach(), **per_class, "depth": depth_loss.detach(),
                 "box_cls": cls_loss.detach(), "box_center": center_loss.detach(), "box_center_kl": center_kl,
                 "box_reg": reg_loss.detach(), "box_positives": num_positive.detach(),
-                "pv_seg": pv_loss.detach(), "pv_pseudo": pseudo_loss.detach(), "render": render_loss.detach(),
+                "pv_seg": pv_loss.detach(),
                 "object": object_loss.detach(), "center_heat": heat_loss.detach(), "center_offset": offset_loss.detach(),
-                "pv_valid_frac": pv_valid.float().mean().detach(),
-                "render_valid_frac": render_valid.float().mean().detach(),
-                "pseudo_fill_frac": fill.float().mean().detach()}
+                "pv_valid_frac": pv_valid.float().mean().detach()}
