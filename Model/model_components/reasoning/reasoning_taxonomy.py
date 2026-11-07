@@ -1,9 +1,8 @@
 """Compositional, action-relevant reasoning taxonomy.
 
-Single source of truth for the reasoning label space, shared by the runtime
-student head (``model_components``) and the offline label-generation pipeline
-(``data_processing``). It carries no teacher dependency, so importing it never
-pulls in a VLM client.
+Single source of truth for the reasoning label space of the offline
+label-generation pipeline (``data_processing``). It carries no teacher
+dependency, so importing it never pulls in a VLM client.
 
 * The label space is not a flat scene-fact enum. It is a set of independent
   axes ("groups"), each answering a distinct question — what relates to ego,
