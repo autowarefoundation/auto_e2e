@@ -8,11 +8,13 @@ dataset; they ask the adapter.
 
 from __future__ import annotations
 
+import importlib
 import io
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Mapping
+from types import ModuleType
+from typing import Dict, Final, List, Mapping
 
 from Platform.pipelines.autoe2e_dataset import AutoE2EDataset, DatasetSpec
 from Platform.pipelines.autoe2e_snapshot import iter_units, parse_manifest
@@ -33,6 +35,36 @@ _NUPLAN_PACK_DEFAULTS = {
 # Must equal the cache_version of pack_nuplan_snapshot_reactive_dataset; a test
 # pins the two together so a nuPlan pack change always changes dataset_id.
 NUPLAN_PACK_TASK_VERSION = "nuplan-snapshot-pack-v13-manifest-v11"
+
+
+@dataclass(frozen=True)
+class AutoBEVSource:
+    """Where an AutoBEV-only dataset comes from and which packer reads it.
+
+    ``unit_partitions``: each partition packs one unit (an Argoverse 2 log);
+    otherwise every partition reads all units and packs every
+    ``PARTITIONS``-th scene or sequence of the packer.
+    """
+
+    upstream: str
+    packer: str
+    unit_partitions: bool = False
+
+
+AUTOBEV_SOURCES: Final = {
+    AutoE2EDataset.NUSCENES: AutoBEVSource("s3://motional-nuscenes/public/v1.0", "data_parsing.nuscenes.pack"),
+    AutoE2EDataset.ARGOVERSE2: AutoBEVSource(
+        "s3://argoverse/datasets/av2/sensor", "data_parsing.argoverse2.pack", unit_partitions=True,
+    ),
+    AutoE2EDataset.ONCE: AutoBEVSource("https://once-for-auto-driving.github.io", "data_parsing.once.pack"),
+    AutoE2EDataset.SIMBEV: AutoBEVSource(
+        "https://drive.google.com/drive/folders/14MytQeGmW80Btg_AGPNrE18ZLdLzyGx5", "data_parsing.simbev.pack",
+    ),
+}
+
+
+def autobev_packer(dataset: AutoE2EDataset) -> ModuleType:
+    return importlib.import_module(AUTOBEV_SOURCES[dataset].packer)
 
 
 def pack_contracts() -> dict[str, str]:
@@ -57,6 +89,10 @@ def current_pack_version(dataset: AutoE2EDataset) -> str:
         from data_parsing.l2d.navigation_contract import L2D_NAVIGATION_CONTRACT
 
         return f"{contracts}+{L2D_NAVIGATION_CONTRACT}"
+    if dataset in AUTOBEV_SOURCES:
+        from data_processing.autobev_members import AUTOBEV_MEMBERS_VERSION
+
+        return f"{contracts}+{AUTOBEV_MEMBERS_VERSION}+{autobev_packer(dataset).PACK_CONTRACT}"
     return contracts
 
 
@@ -284,6 +320,43 @@ def read_nuplan(spec: DatasetSpec, payload: bytes) -> SourcePlan:
     )
 
 
+def read_autobev(spec: DatasetSpec, payload: bytes) -> SourcePlan:
+    """Plan a nuScenes, Argoverse 2, ONCE or SimBEV build.
+
+    The packer's constants fix everything that decides the bytes, so
+    pack_params is empty; the four datasets differ only by ``AUTOBEV_SOURCES``.
+    """
+    from model_components.autobev.geometry import IMAGE_W
+
+    source = AUTOBEV_SOURCES[spec.dataset]
+    _check_pack_version(spec)
+    _reject_unknown(spec.pack_params, set())
+    if spec.reasoning is not None:
+        raise ValueError(f"{spec.dataset.value} has no reasoning labels")
+    # The AutoBEV contract fixes 1344x768 cameras; image_size names the width.
+    if spec.image_size != IMAGE_W:
+        raise ValueError(f"{spec.dataset.value} packs need image_size {IMAGE_W}")
+    if spec.unit_limit and not source.unit_partitions:
+        raise ValueError(f"{spec.dataset.value} partitions read every unit; unit_limit is not supported")
+    manifest, units = _unit_plan(spec, payload, upstream=source.upstream)
+    ids = [unit.unit_id for unit in units]
+    partitions = (
+        [[unit] for unit in ids] if source.unit_partitions
+        else [list(ids) for _ in range(autobev_packer(spec.dataset).PARTITIONS)]
+    )
+    return SourcePlan(
+        dataset=spec.dataset,
+        upstream=source.upstream,
+        revision=manifest["revision"],
+        split="train",
+        published_name=spec.dataset.value,
+        snapshot_manifest_sha256=spec.source_manifest.sha256,
+        units=units,
+        partitions=partitions,
+        shared_units=not source.unit_partitions,
+    )
+
+
 def nuplan_archive_digest(archive: Mapping) -> str:
     """The digest the nuPlan snapshot pins an archive by."""
     if archive.get("sha256"):
@@ -302,6 +375,10 @@ _READERS = {
     AutoE2EDataset.KITSCENES: read_kitscenes,
     AutoE2EDataset.L2D: read_l2d,
     AutoE2EDataset.NUPLAN: read_nuplan,
+    AutoE2EDataset.NUSCENES: read_autobev,
+    AutoE2EDataset.ARGOVERSE2: read_autobev,
+    AutoE2EDataset.ONCE: read_autobev,
+    AutoE2EDataset.SIMBEV: read_autobev,
 }
 
 
