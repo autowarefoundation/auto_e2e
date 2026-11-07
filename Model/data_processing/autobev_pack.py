@@ -230,7 +230,7 @@ def write_partition(
         "total_samples": sum(counts),
         "shards": len(names),
         "shard_names": names,
-        "shard_sample_counts": counts,
+        "shard_sample_counts": dict(zip(names, counts)),
         "shard_sha256": {name: hashlib.sha256((out / name).read_bytes()).hexdigest() for name in names},
         "camera_order": list(cameras),
         "bev_classes": list(BEV_SEGMENTATION_CLASSES),
