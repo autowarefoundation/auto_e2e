@@ -19,6 +19,8 @@ NUM_VIEWS: Final = 6
 HISTORY_FRAMES: Final = 7
 FRAME_INTERVAL_US: Final = 500_000
 EMBED_DIM: Final = 256
+# The perspective heads and image-space targets live on the stride-8 level.
+FEATURE_STRIDE: Final = 8
 BEV_H: Final = 220
 BEV_W: Final = 160
 # z spans -0.5 .. 3.5 m above the road, so the four pillar anchors sit at 0,
