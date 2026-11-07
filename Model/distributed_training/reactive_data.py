@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from data_parsing.camera_slots import CANONICAL_SIX_CAMERA_SLOTS
+from data_processing.autobev_members import check_manifest_contract
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_TAXONOMY_VERSION,
 )
@@ -253,15 +254,19 @@ def _validate_reactive_manifest(
         raise ValueError(
             "Reactive DDP requires the canonical six-camera slot contract"
         )
-    if int(manifest.get("image_size", 0)) != REACTIVE_CAMERA_IMAGE_SIZE:
-        raise ValueError(
-            "Reactive DDP camera image size differs from model contract"
-        )
-    if stage in {
-        ReactiveTrainingStage.NUPLAN_FULL,
-        ReactiveTrainingStage.KITSCENES_FINETUNE,
-        ReactiveTrainingStage.L2D_CONTINUATION,
-    }:
+    if stage is ReactiveTrainingStage.NUPLAN_FULL:
+        # nuPlan trains AutoBEV: its pack carries the AutoBEV members and
+        # supervises the planner too.
+        check_manifest_contract(manifest, source=source_uri)
+        if manifest.get("sample_kind") != "planner":
+            raise ValueError(
+                f"nuPlan training needs planner samples in {source_uri}"
+            )
+    else:
+        if int(manifest.get("image_size", 0)) != REACTIVE_CAMERA_IMAGE_SIZE:
+            raise ValueError(
+                "Reactive DDP camera image size differs from model contract"
+            )
         if (
             manifest.get("front_camera_index")
             != REACTIVE_FRONT_CAMERA_INDEX
@@ -271,15 +276,15 @@ def _validate_reactive_manifest(
             raise ValueError(
                 "Reactive front camera dimensions differ from model contract"
             )
-        if (
-            manifest.get("temporal_frame_offsets")
-            != list(REACTIVE_BEVFORMER_FRAME_OFFSETS)
-            or manifest.get("temporal_frame_interval_us")
-            != REACTIVE_BEVFORMER_FRAME_INTERVAL_US
-        ):
-            raise ValueError(
-                "Reactive temporal camera history differs from T8 contract"
-            )
+    if (
+        manifest.get("temporal_frame_offsets")
+        != list(REACTIVE_BEVFORMER_FRAME_OFFSETS)
+        or manifest.get("temporal_frame_interval_us")
+        != REACTIVE_BEVFORMER_FRAME_INTERVAL_US
+    ):
+        raise ValueError(
+            "Reactive temporal camera history differs from T8 contract"
+        )
     # Both read T8 history from the frame pool; a missing archive would fail
     # only in the loader, after GPUs are reserved.
     if stage in {
