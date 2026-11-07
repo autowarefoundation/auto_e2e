@@ -93,12 +93,17 @@ def camera_augment(batch: dict[str, Any], active: torch.Tensor, generator: torch
         return F.grid_sample(maps.float(), sampling, mode=mode, padding_mode="zeros", align_corners=False)
 
     full = grid(IMAGE_H, IMAGE_W)
+    # Unselected samples keep their exact pixels; an identity resample would
+    # still blur them by float rounding.
+    keep = (~active).to(device).view(b, 1, 1, 1, 1)
     out = dict(batch)
-    out["visual_tiles"] = warp(images.flatten(0, 1), full, "bilinear").view_as(images).to(images.dtype)
+    warped = warp(images.flatten(0, 1), full, "bilinear").view_as(images).to(images.dtype)
+    out["visual_tiles"] = torch.where(keep, images, warped)
     history = batch["camera_history_tiles"]
     frames = history.shape[1]
     warped = warp(history.transpose(1, 2).flatten(0, 2), full.repeat_interleave(frames, 0), "bilinear")
-    out["camera_history_tiles"] = warped.view(b, v, frames, *history.shape[-3:]).transpose(1, 2).to(history.dtype)
+    warped = warped.view(b, v, frames, *history.shape[-3:]).transpose(1, 2).to(history.dtype)
+    out["camera_history_tiles"] = torch.where(keep[:, None], history, warped)
     out["camera_projection_matrix"] = s_matrix @ batch["camera_projection_matrix"]
     out["camera_history_projection_matrix"] = s_matrix[:, None] @ batch["camera_history_projection_matrix"]
     depth = batch["autobev_depth"]
