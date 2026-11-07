@@ -1,4 +1,11 @@
-"""Raw nuPlan scenario packing for Reactive multi-task training."""
+"""Raw nuPlan scenario packing for Reactive multi-task training.
+
+Every sample carries the AutoBEV members of
+``data_processing.autobev_members`` (six undistorted cameras cropped to
+1344x768, seven history frames at the same size, current-ego projections, BEV
+labels on the AutoBEV grid, LiDAR depth, 3D boxes) next to the 0.4 m
+navigation raster, route, ego history, and trajectory members.
+"""
 
 from __future__ import annotations
 
@@ -17,13 +24,29 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import numpy as np
 from PIL import Image
 
 from data_parsing.camera_slots import CANONICAL_SIX_CAMERA_SLOTS
+from data_processing.autobev_members import (
+    BOXES_MEMBER,
+    DEPTH_MEMBER,
+    HISTORY_PROJECTION_MEMBER,
+    PROJECTION_MEMBER,
+    camera_member,
+    check_projections,
+    crop_projection,
+    encode_boxes,
+    encode_camera,
+    encode_depth,
+    encode_npy,
+    history_camera_member,
+    manifest_contract,
+)
 from data_processing.contract_versions import contract_versions
+from data_processing.dataset_snapshot import HELDOUT_SPLIT_GROUP_PREFIX
 from data_processing.geospatial import (
     EPISODE_PATH_SCHEMA_VERSION,
     GPS_SCHEMA_VERSION,
@@ -34,6 +57,11 @@ from data_processing.geospatial import (
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_TAXONOMY_VERSION,
 )
+from model_components.autobev.geometry import (
+    AUTOBEV_GEOMETRY,
+    IMAGE_H,
+    IMAGE_W,
+)
 from navigation.contracts import canonical_json_bytes
 from navigation.geometry import (
     AUTOE2E_NAVIGATION_GEOMETRY,
@@ -43,9 +71,6 @@ from reactive_training_contracts import (
     REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
     REACTIVE_BEVFORMER_FRAME_OFFSETS,
     REACTIVE_BEVFORMER_HISTORY_FRAMES,
-    REACTIVE_CAMERA_IMAGE_SIZE,
-    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
-    REACTIVE_FRONT_CAMERA_INDEX,
 )
 
 from .geospatial import (
@@ -56,7 +81,9 @@ from .geospatial import (
 )
 from .targets import (
     NuPlanReactiveTargets,
+    _pose_xy_heading,
     build_nuplan_reactive_targets,
+    nuplan_boxes,
     nuplan_reactive_target_members,
 )
 
@@ -78,8 +105,13 @@ NUPLAN_HISTORY_CAMERA_SPREAD_MAX_US = (
 )
 NUPLAN_CAMERA_VISIBILITY_HEIGHTS_M = (-4.0, -2.0, 0.0, 2.0)
 NUPLAN_RECTIFICATION_POLICY_VERSION = "nuplan_rectified_pinhole_v1"
-NUPLAN_PACK_MANIFEST_VERSION = "nuplan_reactive_manifest_v11"
+# v12: AutoBEV camera contract (1344x768 crops, no front companion), BEV
+# labels on the AutoBEV grid, depth and box members, Pittsburgh held out.
+NUPLAN_PACK_MANIFEST_VERSION = "nuplan_reactive_manifest_v12"
 NUPLAN_DATASET_ID = "nuplan/nuplan-v1.1"
+# Pittsburgh is the geographic validation set of AutoBEV, so its logs are
+# packed under held-out split groups that training never reads.
+NUPLAN_HELDOUT_MAP_NAMES: Final = ("us-pa-pittsburgh-hazelwood",)
 # nuPlan LiDAR point clouds arrive at 20 Hz; every second iteration gives the
 # 10 Hz cadence used by trajectory targets and Console playback.
 NUPLAN_SCENE_FRAME_STRIDE = 2
@@ -92,7 +124,10 @@ NUPLAN_SCENE_SET_SCHEMA_VERSION = "nuplan_scene_set_v1"
 NUPLAN_RIG_REFERENCE_FRAME = "nuplan_ego_rear_axle"
 NUPLAN_EGO_GROUND_Z_M = 0.0
 _NUPLAN_MANIFEST_INVARIANT_KEYS = (
+    "autobev_geometry",
+    "autobev_members_version",
     "bev_taxonomy_version",
+    "box_classes",
     "camera_order",
     "camera_slots",
     "camera_visibility_heights_m",
@@ -104,9 +139,6 @@ _NUPLAN_MANIFEST_INVARIANT_KEYS = (
     "has_reactive_navigation",
     "has_route_reconstruction",
     "has_trajectory_xy",
-    "front_camera_fpn_image_size",
-    "front_camera_image_size",
-    "front_camera_index",
     "history_fallback_max_offset_us",
     "history_camera_spread_max_us",
     "temporal_frame_interval_us",
@@ -118,6 +150,7 @@ _NUPLAN_MANIFEST_INVARIANT_KEYS = (
     "num_views",
     "projection_scope",
     "route_channels",
+    "sample_kind",
     "schema_version",
     "source_revision",
     "split_policy",
@@ -126,16 +159,19 @@ _NUPLAN_MANIFEST_INVARIANT_KEYS = (
 
 @dataclasses.dataclass(frozen=True)
 class NuPlanCameraBundle:
-    """Rectified camera pixels and reference-pose projection matrices."""
+    """Cropped camera JPEGs and current-ego projections of the T8 frames.
 
-    jpeg_by_channel: Mapping[str, bytes]
-    projection_matrices: np.ndarray
-    front_projection_matrix: np.ndarray
-    history_jpeg_by_frame: tuple[Mapping[str, bytes], ...]
-    history_projection_matrices: np.ndarray
-    camera_visibility: np.ndarray
+    ``projection`` [6, 3, 4] and ``history_projection`` [7, 6, 3, 4] map
+    current rear-axle ego points to the cropped pixels; ``camera_from_ego``
+    [6, 4, 4] gives the current cameras' depth for the LiDAR depth member.
+    """
+
+    jpegs: tuple[bytes, ...]
+    projection: np.ndarray
+    camera_from_ego: np.ndarray
+    history_jpegs: tuple[tuple[bytes, ...], ...]
+    history_projection: np.ndarray
     metadata: Mapping[str, object]
-    front_camera_fpn_jpeg: bytes = b""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -156,7 +192,6 @@ class _NuPlanPackWorkerConfig:
     output_directory: str
     source_revision: str
     map_version: str
-    image_size: int
     samples_per_shard: int
 
 
@@ -172,7 +207,6 @@ class _NuPlanSceneWorkerConfig:
     publication_version: str
     frames_per_scene: int
     preferred_scenario_types: tuple[str, ...]
-    image_size: int
     require_mission_goal: bool = True
 
 
@@ -255,7 +289,7 @@ def camera_visibility_from_projection_matrices(
     *,
     image_width: int,
     image_height: int,
-    geometry: NavigationRasterGeometry = AUTOE2E_NAVIGATION_GEOMETRY,
+    geometry: NavigationRasterGeometry,
 ) -> np.ndarray:
     """Return cells whose ground centers project into at least one camera."""
     matrices = np.asarray(projection_matrices, dtype=np.float64)
@@ -301,71 +335,6 @@ def camera_visibility_from_projection_matrices(
             & (row < image_height)
         ).any(axis=0)
     return visible.reshape(geometry.height_px, geometry.width_px)
-
-
-def lidar_observability_from_points(
-    points_ego_xyz: np.ndarray,
-    *,
-    geometry: NavigationRasterGeometry = AUTOE2E_NAVIGATION_GEOMETRY,
-    angular_bins: int = 1440,
-) -> np.ndarray:
-    """Approximate current LiDAR ray coverage on the common BEV grid."""
-    points = np.asarray(points_ego_xyz, dtype=np.float64)
-    if (
-        points.ndim != 2
-        or points.shape[1] < 2
-        or angular_bins <= 0
-    ):
-        raise ValueError("LiDAR points must have shape [N,>=2]")
-    finite = np.isfinite(points[:, :2]).all(axis=1)
-    points = points[finite]
-    if not len(points):
-        return np.zeros(
-            (geometry.height_px, geometry.width_px),
-            dtype=np.bool_,
-        )
-    point_ranges = np.linalg.norm(points[:, :2], axis=1)
-    point_angles = np.arctan2(points[:, 1], points[:, 0])
-    bins = np.floor(
-        (point_angles + math.pi) / (2.0 * math.pi) * angular_bins
-    ).astype(np.int64)
-    bins = np.clip(bins, 0, angular_bins - 1)
-    maximum_range: np.ndarray = np.zeros(
-        angular_bins,
-        dtype=np.float64,
-    )
-    np.maximum.at(maximum_range, bins, point_ranges)
-    expanded_range = maximum_range.copy()
-    bin_width = 2.0 * math.pi / angular_bins
-    for bin_index in np.flatnonzero(maximum_range > 0.0):
-        ray_range = maximum_range[bin_index]
-        angular_margin = math.ceil(
-            math.atan2(geometry.meters_per_pixel, max(
-                ray_range,
-                geometry.meters_per_pixel,
-            ))
-            / bin_width
-        )
-        angular_margin = min(angular_margin, angular_bins // 4)
-        for offset in range(-angular_margin, angular_margin + 1):
-            target_bin = (int(bin_index) + offset) % angular_bins
-            expanded_range[target_bin] = max(
-                expanded_range[target_bin],
-                ray_range,
-            )
-
-    x_grid, y_grid = geometry.pixel_center_grids()
-    cell_ranges = np.hypot(x_grid, y_grid)
-    cell_angles = np.arctan2(y_grid, x_grid)
-    cell_bins = np.floor(
-        (cell_angles + math.pi) / (2.0 * math.pi) * angular_bins
-    ).astype(np.int64)
-    cell_bins = np.clip(cell_bins, 0, angular_bins - 1)
-    return (
-        expanded_range[cell_bins] > 0.0
-    ) & (
-        cell_ranges <= expanded_range[cell_bins] + geometry.meters_per_pixel
-    )
 
 
 def _decode_pickle_vector(
@@ -507,15 +476,13 @@ def _rectify_camera_rows(
     sensor_root: str,
     reference_pose: np.ndarray,
     reference_timestamp: int,
-    image_size: int,
-    native_front: bool,
-) -> tuple[
-    dict[str, bytes],
-    bytes | None,
-    np.ndarray,
-    np.ndarray | None,
-    list[dict[str, object]],
-]:
+) -> tuple[list[bytes], np.ndarray, np.ndarray, list[dict[str, object]]]:
+    """Undistort, crop, and project one frame of the six cameras.
+
+    Returns the cropped JPEGs, the [6, 3, 4] projections from the reference
+    ego frame to the cropped pixels, the [6, 4, 4] camera-from-reference
+    transforms, and per-camera metadata.
+    """
     try:
         import cv2
     except ModuleNotFoundError as exc:
@@ -523,12 +490,11 @@ def _rectify_camera_rows(
             "nuPlan offline camera rectification requires OpenCV"
         ) from exc
 
-    jpegs: dict[str, bytes] = {}
-    front_camera_fpn_jpeg = None
+    jpegs: list[bytes] = []
     matrices = []
-    front_projection_matrix = None
+    camera_from_reference_transforms = []
     camera_metadata = []
-    for camera_index, channel in enumerate(NUPLAN_CAMERA_CHANNELS):
+    for channel in NUPLAN_CAMERA_CHANNELS:
         row = rows[channel]
         sensor_model = str(row["model"]).strip()
         if not sensor_model:
@@ -576,48 +542,12 @@ def _rectify_camera_rows(
             None,
             rectified_intrinsic,
         )
-        packed_image_size = (
-            REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-            if native_front
-            and camera_index == REACTIVE_FRONT_CAMERA_INDEX
-            else image_size
+        jpegs.append(encode_camera(rectified))
+        cropped_intrinsic = crop_projection(
+            rectified_intrinsic,
+            native_width,
+            native_height,
         )
-        resized = Image.fromarray(rectified).resize(
-            (packed_image_size, packed_image_size),
-            resample=Image.Resampling.BILINEAR,
-        )
-        output = io.BytesIO()
-        resized.save(
-            output,
-            format="JPEG",
-            quality=90,
-            optimize=False,
-            progressive=False,
-        )
-        jpegs[channel] = output.getvalue()
-        if (
-            native_front
-            and camera_index == REACTIVE_FRONT_CAMERA_INDEX
-        ):
-            base_output = io.BytesIO()
-            Image.fromarray(rectified).resize(
-                (image_size, image_size),
-                resample=Image.Resampling.BILINEAR,
-            ).save(
-                base_output,
-                format="JPEG",
-                quality=90,
-                optimize=False,
-                progressive=False,
-            )
-            front_camera_fpn_jpeg = base_output.getvalue()
-
-        base_scaled_intrinsic = rectified_intrinsic.copy()
-        base_scaled_intrinsic[0] *= image_size / native_width
-        base_scaled_intrinsic[1] *= image_size / native_height
-        packed_scaled_intrinsic = rectified_intrinsic.copy()
-        packed_scaled_intrinsic[0] *= packed_image_size / native_width
-        packed_scaled_intrinsic[1] *= packed_image_size / native_height
         ego_from_camera = _quaternion_transform(
             _decode_pickle_vector(
                 row["translation"],
@@ -637,44 +567,25 @@ def _rectify_camera_rows(
         camera_from_reference = np.linalg.inv(
             global_from_image_ego @ ego_from_camera
         ) @ reference_pose
-        matrices.append(
-            base_scaled_intrinsic @ camera_from_reference[:3]
-        )
-        if (
-            native_front
-            and camera_index == REACTIVE_FRONT_CAMERA_INDEX
-        ):
-            front_projection_matrix = (
-                packed_scaled_intrinsic @ camera_from_reference[:3]
-            )
+        matrices.append(cropped_intrinsic @ camera_from_reference[:3])
+        camera_from_reference_transforms.append(camera_from_reference)
         camera_metadata.append({
-            "base_scaled_rectified_intrinsic": (
-                base_scaled_intrinsic.tolist()
-            ),
             "channel": channel,
+            "cropped_intrinsic": cropped_intrinsic.tolist(),
             "distortion": distortion.tolist(),
             "image_time_offset_us": (
                 int(row["timestamp"]) - reference_timestamp
             ),
             "native_intrinsic": intrinsic.tolist(),
             "native_size_wh": [native_width, native_height],
-            "packed_size_wh": [packed_image_size, packed_image_size],
             "rectified_intrinsic": rectified_intrinsic.tolist(),
-            "scaled_rectified_intrinsic": (
-                packed_scaled_intrinsic.tolist()
-            ),
             "sensor_model": sensor_model,
             "sensor_to_ego": ego_from_camera.tolist(),
         })
     return (
         jpegs,
-        front_camera_fpn_jpeg,
         np.stack(matrices).astype(np.float32),
-        (
-            np.asarray(front_projection_matrix, dtype=np.float32)[None]
-            if front_projection_matrix is not None
-            else None
-        ),
+        np.stack(camera_from_reference_transforms),
         camera_metadata,
     )
 
@@ -683,14 +594,8 @@ def load_nuplan_camera_bundle(
     scenario: Any,
     *,
     iteration: int = 0,
-    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
-    geometry: NavigationRasterGeometry = AUTOE2E_NAVIGATION_GEOMETRY,
 ) -> NuPlanCameraBundle:
-    """Load and pose-compensate the canonical six nuPlan cameras."""
-    if image_size != REACTIVE_CAMERA_IMAGE_SIZE:
-        raise ValueError(
-            "nuPlan base camera image size differs from model contract"
-        )
+    """Load and pose-compensate the six nuPlan cameras of the T8 frames."""
     log_file = getattr(scenario, "_log_file", None)
     sensor_root = getattr(scenario, "_sensor_root", None)
     lidar_tokens = getattr(scenario, "_lidarpc_tokens", None)
@@ -713,79 +618,44 @@ def load_nuplan_camera_bundle(
             reference["qz"],
         ],
     )
-
     reference_timestamp = int(reference["timestamp"])
-    (
-        jpegs,
-        front_camera_fpn_jpeg,
-        projection_matrices,
-        front_projection_matrix,
-        camera_metadata,
-    ) = _rectify_camera_rows(
-        rows,
-        sensor_root=sensor_root,
-        reference_pose=reference_pose,
-        reference_timestamp=reference_timestamp,
-        image_size=image_size,
-        native_front=True,
+    jpegs, projection, camera_from_ego, camera_metadata = (
+        _rectify_camera_rows(
+            rows,
+            sensor_root=sensor_root,
+            reference_pose=reference_pose,
+            reference_timestamp=reference_timestamp,
+        )
     )
-    if front_projection_matrix is None:
-        raise RuntimeError("nuPlan front camera projection was not produced")
-    if front_camera_fpn_jpeg is None:
-        raise RuntimeError("nuPlan base-resolution front image was not produced")
     history_jpegs = []
     history_matrices = []
     history_timestamps = []
     for frame_rows in history_rows:
-        (
-            frame_jpegs,
-            _frame_front_camera_fpn_jpeg,
-            frame_matrices,
-            _front_matrix,
-            frame_metadata,
-        ) = _rectify_camera_rows(
-            frame_rows,
-            sensor_root=sensor_root,
-            reference_pose=reference_pose,
-            reference_timestamp=reference_timestamp,
-            image_size=image_size,
-            native_front=False,
+        frame_jpegs, frame_matrices, _, frame_metadata = (
+            _rectify_camera_rows(
+                frame_rows,
+                sensor_root=sensor_root,
+                reference_pose=reference_pose,
+                reference_timestamp=reference_timestamp,
+            )
         )
-        history_jpegs.append(frame_jpegs)
+        history_jpegs.append(tuple(frame_jpegs))
         history_matrices.append(frame_matrices)
         history_timestamps.append([
-            reference_timestamp + cast(
-                int,
-                camera["image_time_offset_us"],
-            )
+            reference_timestamp + cast(int, camera["image_time_offset_us"])
             for camera in frame_metadata
         ])
-    visibility = camera_visibility_from_projection_matrices(
-        projection_matrices,
-        image_width=image_size,
-        image_height=image_size,
-        geometry=geometry,
-    )
     return NuPlanCameraBundle(
-        jpeg_by_channel=jpegs,
-        front_camera_fpn_jpeg=front_camera_fpn_jpeg,
-        projection_matrices=projection_matrices,
-        front_projection_matrix=front_projection_matrix,
-        history_jpeg_by_frame=tuple(history_jpegs),
-        history_projection_matrices=np.stack(
-            history_matrices
-        ).astype(np.float32),
-        camera_visibility=visibility,
+        jpegs=tuple(jpegs),
+        projection=projection,
+        camera_from_ego=camera_from_ego,
+        history_jpegs=tuple(history_jpegs),
+        history_projection=np.stack(history_matrices).astype(np.float32),
         metadata={
             "camera_order": list(NUPLAN_CAMERA_CHANNELS),
             "camera_slots": list(NUPLAN_CAMERA_SLOTS),
             "cameras": camera_metadata,
-            "front_camera_image_size": (
-                REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-            ),
-            "front_camera_fpn_image_size": image_size,
-            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
-            "image_size": image_size,
+            "image_wh": [IMAGE_W, IMAGE_H],
             "rectification_policy": NUPLAN_RECTIFICATION_POLICY_VERSION,
             "reference_lidar_timestamp_us": reference_timestamp,
             "temporal_camera_timestamps_us": history_timestamps,
@@ -799,13 +669,12 @@ def load_nuplan_camera_bundle(
     )
 
 
-def load_nuplan_lidar_observability(
+def load_nuplan_lidar_points(
     scenario: Any,
     *,
     iteration: int = 0,
-    geometry: NavigationRasterGeometry = AUTOE2E_NAVIGATION_GEOMETRY,
 ) -> np.ndarray:
-    """Load the current merged point cloud and rasterize ray coverage."""
+    """Load the current merged point cloud in the rear-axle ego frame."""
     try:
         from nuplan.planning.simulation.observation.observation_type import (
             LidarChannel,
@@ -835,11 +704,7 @@ def load_nuplan_lidar_observability(
         points_xyz.T,
         np.ones(points_xyz.shape[0], dtype=np.float64),
     ])
-    points_ego = (lidar_from_ego @ homogeneous)[:3].T
-    return lidar_observability_from_points(
-        points_ego,
-        geometry=geometry,
-    )
+    return (lidar_from_ego @ homogeneous)[:3].T
 
 
 def _nuplan_point_cloud_xyz(points: Any) -> np.ndarray:
@@ -950,13 +815,32 @@ def _nuplan_ego_member(scenario: Any, *, iteration: int) -> bytes:
     ]).astype(np.float32).tobytes()
 
 
-def _nuplan_split_group_uid(log_name: str) -> str:
+def _nuplan_split_group_uid(log_name: str, map_name: str) -> str:
+    """Return the log-level split group; held-out maps never reach training."""
     if not log_name:
         raise ValueError("nuPlan log name must not be empty")
     log_digest = hashlib.sha256(
         log_name.encode("utf-8")
     ).hexdigest()[:20]
-    return f"nuplan-log-{log_digest}"
+    prefix = (
+        HELDOUT_SPLIT_GROUP_PREFIX
+        if map_name in NUPLAN_HELDOUT_MAP_NAMES
+        else ""
+    )
+    return f"{prefix}nuplan-log-{log_digest}"
+
+
+def _nuplan_db_split_group_uid(db_path: str | Path) -> str:
+    """Return the split group of one log DB from its stem and map name."""
+    resolved = Path(db_path).resolve()
+    connection = sqlite3.connect(f"{resolved.as_uri()}?mode=ro", uri=True)
+    try:
+        row = connection.execute("SELECT map_version FROM log").fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        raise ValueError(f"nuPlan DB has no log row: {resolved}")
+    return _nuplan_split_group_uid(resolved.stem, str(row[0]))
 
 
 def _sample_identity(
@@ -985,116 +869,66 @@ def _sample_identity(
     sample_digest = hashlib.sha256(
         identity.encode("utf-8")
     ).hexdigest()[:24]
-    return f"nuplan-{sample_digest}", _nuplan_split_group_uid(log_name)
+    return (
+        f"nuplan-{sample_digest}",
+        _nuplan_split_group_uid(log_name, str(scenario.map_api.map_name)),
+    )
 
 
 def nuplan_reactive_sample_members(
     scenario: Any,
     *,
     iteration: int = 0,
-    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     source_revision: str,
     camera_bundle: NuPlanCameraBundle | None = None,
-    lidar_observability: np.ndarray | None = None,
+    lidar_points_ego: np.ndarray | None = None,
     target_builder: Callable[..., NuPlanReactiveTargets] = (
         build_nuplan_reactive_targets
     ),
 ) -> tuple[str, str, dict[str, bytes]]:
-    """Convert one raw nuPlan scenario iteration to packed sample members."""
+    """Convert one raw nuPlan scenario iteration to packed sample members.
+
+    The sample carries the AutoBEV members (cropped cameras, projections,
+    BEV labels on the AutoBEV grid, LiDAR depth, boxes) next to the
+    navigation raster, route, ego history, and trajectory members.
+    """
     if not source_revision:
         raise ValueError("nuPlan source revision must not be empty")
     bundle = camera_bundle or load_nuplan_camera_bundle(
         scenario,
         iteration=iteration,
-        image_size=image_size,
     )
+    check_projections(bundle.projection, bundle.history_projection)
     if (
-        image_size != REACTIVE_CAMERA_IMAGE_SIZE
-        or bundle.metadata.get("image_size")
-        != REACTIVE_CAMERA_IMAGE_SIZE
-        or bundle.metadata.get("front_camera_index")
-        != REACTIVE_FRONT_CAMERA_INDEX
-        or bundle.metadata.get("front_camera_image_size")
-        != REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-        or bundle.metadata.get("front_camera_fpn_image_size")
-        != REACTIVE_CAMERA_IMAGE_SIZE
+        len(bundle.jpegs) != len(NUPLAN_CAMERA_CHANNELS)
+        or len(bundle.history_jpegs) != REACTIVE_BEVFORMER_HISTORY_FRAMES
+        or any(
+            len(frame) != len(NUPLAN_CAMERA_CHANNELS)
+            for frame in bundle.history_jpegs
+        )
+        or bundle.camera_from_ego.shape
+        != (len(NUPLAN_CAMERA_CHANNELS), 4, 4)
         or bundle.metadata.get("camera_order")
         != list(NUPLAN_CAMERA_CHANNELS)
-        or bundle.metadata.get("camera_slots")
-        != list(NUPLAN_CAMERA_SLOTS)
-    ):
-        raise ValueError(
-            "nuPlan camera bundle dimensions differ from pack contract"
-        )
-    history_projection_matrices = np.asarray(
-        bundle.history_projection_matrices,
-        dtype=np.float32,
-    )
-    if (
-        len(bundle.history_jpeg_by_frame)
-        != REACTIVE_BEVFORMER_HISTORY_FRAMES
-        or history_projection_matrices.shape != (
-            REACTIVE_BEVFORMER_HISTORY_FRAMES,
-            len(NUPLAN_CAMERA_CHANNELS),
-            3,
-            4,
-        )
-        or not np.isfinite(history_projection_matrices).all()
         or bundle.metadata.get("temporal_frame_offsets")
         != list(REACTIVE_BEVFORMER_FRAME_OFFSETS)
-        or bundle.metadata.get("temporal_frame_interval_us")
-        != REACTIVE_BEVFORMER_FRAME_INTERVAL_US
     ):
-        raise ValueError(
-            "nuPlan camera bundle temporal history differs from T8 contract"
-        )
-    expected_front_projection = np.asarray(
-        bundle.projection_matrices[REACTIVE_FRONT_CAMERA_INDEX:
-                                   REACTIVE_FRONT_CAMERA_INDEX + 1],
-        dtype=np.float32,
-    ).copy()
-    expected_front_projection[:, :2] *= (
-        REACTIVE_FRONT_CAMERA_IMAGE_SIZE / REACTIVE_CAMERA_IMAGE_SIZE
+        raise ValueError("nuPlan camera bundle differs from the T8 contract")
+    points_ego = (
+        np.asarray(lidar_points_ego, dtype=np.float64)
+        if lidar_points_ego is not None
+        else load_nuplan_lidar_points(scenario, iteration=iteration)
     )
-    actual_front_projection = np.asarray(
-        bundle.front_projection_matrix,
-        dtype=np.float32,
-    )
-    if (
-        actual_front_projection.shape != (1, 3, 4)
-        or not np.isfinite(actual_front_projection).all()
-        or not np.allclose(
-            actual_front_projection,
-            expected_front_projection,
-            rtol=1e-5,
-            atol=1e-5,
-        )
-    ):
-        raise ValueError(
-            "nuPlan front projection does not match the base camera frame"
-        )
-    lidar_mask = (
-        np.asarray(lidar_observability, dtype=np.bool_)
-        if lidar_observability is not None
-        else load_nuplan_lidar_observability(
-            scenario,
-            iteration=iteration,
-        )
-    )
-    expected_shape = (
-        AUTOE2E_NAVIGATION_GEOMETRY.height_px,
-        AUTOE2E_NAVIGATION_GEOMETRY.width_px,
-    )
-    if (
-        bundle.camera_visibility.shape != expected_shape
-        or lidar_mask.shape != expected_shape
-    ):
-        raise ValueError("nuPlan observability mask geometry mismatch")
     targets = target_builder(
         scenario,
         iteration=iteration,
-        camera_visibility=bundle.camera_visibility,
-        lidar_observability=lidar_mask,
+        camera_visibility=camera_visibility_from_projection_matrices(
+            bundle.projection,
+            image_width=IMAGE_W,
+            image_height=IMAGE_H,
+            geometry=AUTOBEV_GEOMETRY,
+        ),
+        lidar_points_ego=points_ego,
     )
     sample_uid, split_group_uid = _sample_identity(
         scenario,
@@ -1109,59 +943,34 @@ def nuplan_reactive_sample_members(
             "source_revision": source_revision,
         },
     )
-    for index, channel in enumerate(NUPLAN_CAMERA_CHANNELS):
-        try:
-            members[f"cam_{index}.jpg"] = bundle.jpeg_by_channel[channel]
-        except KeyError as exc:
-            raise ValueError(
-                f"nuPlan camera bundle lacks {channel}"
-            ) from exc
-    if not isinstance(bundle.front_camera_fpn_jpeg, bytes) or not (
-        bundle.front_camera_fpn_jpeg
-    ):
-        raise ValueError(
-            "nuPlan camera bundle lacks the base-resolution front image"
-        )
-    members["front_camera_fpn.jpg"] = bundle.front_camera_fpn_jpeg
-    for history_index, history_jpegs in enumerate(
-        bundle.history_jpeg_by_frame
-    ):
-        for camera_index, channel in enumerate(NUPLAN_CAMERA_CHANNELS):
-            try:
-                members[
-                    f"bev_hist_{history_index}_cam_{camera_index}.jpg"
-                ] = history_jpegs[channel]
-            except KeyError as exc:
-                raise ValueError(
-                    "nuPlan camera history lacks "
-                    f"frame {history_index} channel {channel}"
-                ) from exc
+    for view, jpeg in enumerate(bundle.jpegs):
+        members[camera_member(view)] = jpeg
+    for frame, jpegs in enumerate(bundle.history_jpegs):
+        for view, jpeg in enumerate(jpegs):
+            members[history_camera_member(frame, view)] = jpeg
+    members[PROJECTION_MEMBER] = encode_npy(bundle.projection)
+    members[HISTORY_PROJECTION_MEMBER] = encode_npy(
+        bundle.history_projection
+    )
+    members[DEPTH_MEMBER] = encode_depth(
+        points_ego,
+        bundle.projection,
+        bundle.camera_from_ego,
+    )
+    members[BOXES_MEMBER] = encode_boxes(*nuplan_boxes(
+        scenario.get_tracked_objects_at_iteration(iteration).tracked_objects,
+        _pose_xy_heading(scenario.get_ego_state_at_iteration(iteration)),
+    ))
     members["ego.npy"] = _nuplan_ego_member(
         scenario,
         iteration=iteration,
     )
-    members["calib.json"] = canonical_json_bytes({
-        "dataset": "nuplan/nuplan-v1.1",
-        "geometry_type": "rectified_pinhole",
-        "projection": {
-            "matrix": bundle.projection_matrices.tolist(),
-            "type": "rectified_pinhole",
-        },
-        "front_projection": {
-            "matrix": bundle.front_projection_matrix.tolist(),
-            "type": "rectified_pinhole",
-        },
-        "history_projection": {
-            "matrix": history_projection_matrices.tolist(),
-            "reference_frame": "current_ego",
-            "type": "rectified_pinhole",
-        },
-        **dict(bundle.metadata),
-    })
+    members["calib.json"] = canonical_json_bytes(dict(bundle.metadata))
     members["meta.json"] = canonical_json_bytes({
-        "dataset": "nuplan/nuplan-v1.1",
+        "dataset": NUPLAN_DATASET_ID,
         "frame_idx": iteration,
         "log_name": str(scenario.log_name),
+        "map_name": str(scenario.map_api.map_name),
         "sample_uid": sample_uid,
         "scenario_token": str(scenario.token),
         "source_revision": source_revision,
@@ -1482,7 +1291,6 @@ def _pack_nuplan_partition(
             source_revision=config.source_revision,
             map_version=config.map_version,
             limit_total_scenarios=config.partition.scenario_limit,
-            image_size=config.image_size,
             samples_per_shard=config.samples_per_shard,
             max_rejection_fraction=1.0,
             pack_workers=1,
@@ -2071,7 +1879,6 @@ def pack_nuplan_local_scenes(
     scene_count: int,
     frames_per_scene: int,
     preferred_scenario_types: Sequence[str] = (),
-    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     scene_workers: int = 1,
     require_mission_goal: bool = True,
 ) -> dict[str, object]:
@@ -2109,7 +1916,6 @@ def pack_nuplan_local_scenes(
             scene_count=scene_count,
             frames_per_scene=frames_per_scene,
             preferred_scenario_types=tuple(preferred_scenario_types),
-            image_size=image_size,
             scene_workers=scene_workers,
             require_mission_goal=require_mission_goal,
         )
@@ -2134,7 +1940,6 @@ def pack_nuplan_local_scenes(
         publication_version=publication_version,
         scene_count=scene_count,
         frames_per_scene=frames_per_scene,
-        image_size=image_size,
         candidate_issue=_nuplan_local_sensor_asset_issue,
         frame_geospatial=_nuplan_local_frame_geospatial(local_map),
     )
@@ -2157,7 +1962,6 @@ def _pack_nuplan_scene_log(
             scene_count=1,
             frames_per_scene=config.frames_per_scene,
             preferred_scenario_types=config.preferred_scenario_types,
-            image_size=config.image_size,
             require_mission_goal=config.require_mission_goal,
         )
     except ValueError as error:
@@ -2181,7 +1985,6 @@ def _pack_nuplan_local_scenes_parallel(
     scene_count: int,
     frames_per_scene: int,
     preferred_scenario_types: tuple[str, ...],
-    image_size: int,
     scene_workers: int,
     require_mission_goal: bool,
 ) -> dict[str, object]:
@@ -2219,7 +2022,6 @@ def _pack_nuplan_local_scenes_parallel(
                     publication_version=publication_version,
                     frames_per_scene=frames_per_scene,
                     preferred_scenario_types=preferred_scenario_types,
-                    image_size=image_size,
                     require_mission_goal=require_mission_goal,
                 )
                 for db_file in batch
@@ -2284,7 +2086,6 @@ def pack_nuplan_local_dataset(
     source_revision: str,
     map_version: str,
     limit_total_scenarios: int = 0,
-    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     samples_per_shard: int = 100,
     max_rejection_fraction: float = 0.0,
     pack_workers: int = 1,
@@ -2296,8 +2097,7 @@ def pack_nuplan_local_dataset(
     if limit_total_scenarios < 0:
         raise ValueError("limit_total_scenarios must be non-negative")
     if (
-        image_size != REACTIVE_CAMERA_IMAGE_SIZE
-        or samples_per_shard <= 0
+        samples_per_shard <= 0
         or not 0.0 <= max_rejection_fraction <= 1.0
     ):
         raise ValueError("nuPlan packing limits are invalid")
@@ -2343,7 +2143,6 @@ def pack_nuplan_local_dataset(
                 ),
                 source_revision=source_revision,
                 map_version=map_version,
-                image_size=image_size,
                 samples_per_shard=samples_per_shard,
             )
             for partition in partitions
@@ -2359,7 +2158,7 @@ def pack_nuplan_local_dataset(
                 configs,
             ))
         expected_split_groups = {
-            _nuplan_split_group_uid(Path(db_path).stem)
+            _nuplan_db_split_group_uid(db_path)
             for db_path, count in weighted_db_files
             if count > 0
         }
@@ -2389,7 +2188,6 @@ def pack_nuplan_local_dataset(
         output_directory,
         source_revision=source_revision,
         map_version=map_version,
-        image_size=image_size,
         samples_per_shard=samples_per_shard,
         max_rejection_fraction=max_rejection_fraction,
         require_accepted=require_accepted,
@@ -2404,7 +2202,6 @@ def pack_nuplan_reactive_scenarios(
     *,
     source_revision: str,
     map_version: str,
-    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     samples_per_shard: int = 100,
     max_rejection_fraction: float = 0.0,
     require_accepted: bool = True,
@@ -2418,8 +2215,7 @@ def pack_nuplan_reactive_scenarios(
     if not source_revision or not map_version:
         raise ValueError("nuPlan source and map revisions must be pinned")
     if (
-        image_size != REACTIVE_CAMERA_IMAGE_SIZE
-        or samples_per_shard <= 0
+        samples_per_shard <= 0
         or not 0.0 <= max_rejection_fraction <= 1.0
         or target_accepted_count < 0
     ):
@@ -2496,7 +2292,6 @@ def pack_nuplan_reactive_scenarios(
                 sample_uid, split_group_uid, members = sample_builder(
                     scenario,
                     iteration=0,
-                    image_size=image_size,
                     source_revision=source_revision,
                 )
                 (
@@ -2609,7 +2404,6 @@ def pack_nuplan_reactive_scenarios(
     })
     manifest: dict[str, object] = {
         **_nuplan_shard_contract_fields(
-            image_size=image_size,
             map_version=map_version,
             source_revision=source_revision,
         ),
@@ -2649,12 +2443,12 @@ def pack_nuplan_reactive_scenarios(
 
 def _nuplan_shard_contract_fields(
     *,
-    image_size: int,
     map_version: str,
     source_revision: str,
 ) -> dict[str, object]:
     """Return the sample-ABI contract shared by every nuPlan shard manifest."""
     return {
+        **manifest_contract(),
         "bev_taxonomy_version": BEV_SEGMENTATION_TAXONOMY_VERSION,
         "camera_order": list(NUPLAN_CAMERA_CHANNELS),
         "camera_slots": list(NUPLAN_CAMERA_SLOTS),
@@ -2669,16 +2463,13 @@ def _nuplan_shard_contract_fields(
         "has_reactive_navigation": True,
         "has_route_reconstruction": True,
         "has_trajectory_xy": True,
-        "front_camera_fpn_image_size": REACTIVE_CAMERA_IMAGE_SIZE,
-        "front_camera_image_size": REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
-        "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
         "history_fallback_max_offset_us": (
             NUPLAN_HISTORY_FALLBACK_MAX_OFFSET_US
         ),
         "history_camera_spread_max_us": (
             NUPLAN_HISTORY_CAMERA_SPREAD_MAX_US
         ),
-        "image_size": image_size,
+        "image_size": [IMAGE_W, IMAGE_H],
         "map_context_channels": 14,
         "map_version": map_version,
         "navigation_geometry": (
@@ -2687,6 +2478,7 @@ def _nuplan_shard_contract_fields(
         "num_views": len(NUPLAN_CAMERA_CHANNELS),
         "projection_scope": "per_sample",
         "route_channels": 2,
+        "sample_kind": "planner",
         "temporal_frame_interval_us": (
             REACTIVE_BEVFORMER_FRAME_INTERVAL_US
         ),
@@ -2796,13 +2588,12 @@ def nuplan_static_rig_projection(
         raise ValueError(
             "nuPlan calibration camera order differs from the rig contract"
         )
-    image_size = calib.get("image_size")
-    if image_size != REACTIVE_CAMERA_IMAGE_SIZE:
+    if calib.get("image_wh") != [IMAGE_W, IMAGE_H]:
         raise ValueError("nuPlan calibration image size differs from rig")
     matrices = []
     for camera in cameras:
         intrinsic = np.asarray(
-            camera.get("base_scaled_rectified_intrinsic"),
+            camera.get("cropped_intrinsic"),
             dtype=np.float64,
         )
         ego_from_camera = np.asarray(
@@ -2825,7 +2616,7 @@ def nuplan_static_rig_projection(
         "schema_version": "v1",
         "dataset": NUPLAN_DATASET_ID,
         "geometry_type": "rectified_pinhole",
-        "image_size": int(image_size),
+        "image_size": [IMAGE_W, IMAGE_H],
         "projection": {
             "type": "rectified_pinhole",
             "camera_order": list(NUPLAN_CAMERA_CHANNELS),
@@ -2847,7 +2638,6 @@ def _pack_nuplan_reactive_scene(
     publication_version: str,
     frames_per_scene: int,
     frame_stride: int,
-    image_size: int,
     sample_builder: Callable[..., tuple[str, str, dict[str, bytes]]],
     frame_geospatial: (
         Callable[[Any, int], tuple[dict[str, Any], Any]] | None
@@ -2897,7 +2687,6 @@ def _pack_nuplan_reactive_scene(
                 source_sample_uid, split_group_uid, members = sample_builder(
                     scenario,
                     iteration=iteration,
-                    image_size=image_size,
                     source_revision=source_revision,
                 )
                 sample_uid = nuplan_scene_sample_uid(
@@ -2969,7 +2758,6 @@ def _pack_nuplan_reactive_scene(
         )
         manifest: dict[str, object] = {
             **_nuplan_shard_contract_fields(
-                image_size=image_size,
                 map_version=map_version,
                 source_revision=source_revision,
             ),
@@ -3055,7 +2843,6 @@ def pack_nuplan_reactive_scene_partitions(
     scene_count: int,
     frames_per_scene: int,
     frame_stride: int = NUPLAN_SCENE_FRAME_STRIDE,
-    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     sample_builder: Callable[..., tuple[str, str, dict[str, bytes]]] = (
         nuplan_reactive_sample_members
     ),
@@ -3075,8 +2862,7 @@ def pack_nuplan_reactive_scene_partitions(
             "nuPlan source, map, and publication versions must be pinned"
         )
     if (
-        image_size != REACTIVE_CAMERA_IMAGE_SIZE
-        or scene_count <= 0
+        scene_count <= 0
         or frames_per_scene <= 0
         or frame_stride <= 0
     ):
@@ -3121,7 +2907,6 @@ def pack_nuplan_reactive_scene_partitions(
                     publication_version=publication_version,
                     frames_per_scene=frames_per_scene,
                     frame_stride=frame_stride,
-                    image_size=image_size,
                     sample_builder=sample_builder,
                     frame_geospatial=frame_geospatial,
                 )
