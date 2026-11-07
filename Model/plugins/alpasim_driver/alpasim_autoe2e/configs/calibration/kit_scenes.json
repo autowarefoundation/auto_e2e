@@ -2,7 +2,6 @@
   "dataset_name": "KIT-MRT/KITScenes-Multimodal",
   "source": "kitscenes SensorDataLoader calibration of scene c34c778f-ad8c-0aa9-7e1a-c86a73f887c7",
   "reference_frame": "KITScenes ego reference frame (the frame of poses.txt). The AlpaSim rig frame of the rendered world must match it.",
-  "native_front_camera_tile": true,
   "egomotion": {
     "curvature_speed_floor_mps": 0.1,
     "curvature_zero_below_mps": null,
