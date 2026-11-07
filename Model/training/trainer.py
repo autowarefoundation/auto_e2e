@@ -33,7 +33,6 @@ FEEDBACK_FILE: Final = "validation_feedback.json"
 GRADIENT_CLIP: Final = 1.0
 DDP_TIMEOUT_S: Final = 1800
 MAX_FAILURES: Final = 3
-WORKER_CPUS: Final = 20
 LOG_EVERY_STEPS: Final = 10
 
 
@@ -198,11 +197,11 @@ def train_loop(config: dict[str, Any]) -> None:
     import torch.distributed as dist
     from ray.train import Checkpoint
 
-    from data_parsing.pre_extracted import autobev_training_stream
+    from training.autobev_data import autobev_training_stream, to_device
     from training.objective import AutoBEVObjective, AutoE2EObjective
     from training.schedule import MAX_BACKOFFS, Schedule, optimizer as build_optimizer, stage1_groups, stage2_groups
 
-    run = TrainRun(**config)
+    run = TrainRun(**config["run"])
     rank, world = dist.get_rank(), dist.get_world_size()
     device = torch.device("cuda", torch.cuda.current_device())
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -230,16 +229,14 @@ def train_loop(config: dict[str, Any]) -> None:
     stream = autobev_training_stream(
         stage=run.stage, primary=run.primary_shards, mix=run.mix_shards, early=run.early_shards,
         early_until_step=run.steps // 2, batch_size=run.per_rank_batch_size, seed=run.seed, rank=rank,
-        world=world, start_step=start,
+        world=world, start_step=start, workers=max(1, int(config["cpus_per_rank"]) - 2),
+        root=Path(tempfile.gettempdir()) / "autobev-shards" / run.run_name / str(rank),
     )
     running: dict[str, float] = {}
     logged = 0
     for step in range(start, run.steps):
         schedule.apply(optimizer, step)
-        batch = {key: value.to(device, non_blocking=True) if torch.is_tensor(value)
-                 else [item.to(device) for item in value] if isinstance(value, list) and value
-                 and torch.is_tensor(value[0]) else value
-                 for key, value in next(stream).items()}
+        batch = to_device(next(stream), device)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             terms = (_stage1_terms(ddp, objective, batch, generator) if run.stage == 1
                      else _stage2_terms(ddp, objective, batch, generator, schedule, step))
@@ -288,12 +285,14 @@ def run_training(run: TrainRun) -> None:
 
     if not ray.is_initialized():
         ray.init(address="auto")
+    # The node's CPUs split evenly across the ranks, mostly for their loaders.
+    cpus = int(ray.cluster_resources()["CPU"]) // run.world_size
     trainer = TorchTrainer(
         train_loop_per_worker=train_loop,
-        train_loop_config=asdict(run),
+        train_loop_config={"run": asdict(run), "cpus_per_rank": cpus},
         torch_config=PreparedCudaTorchConfig(init_method="tcp", timeout_s=DDP_TIMEOUT_S),
         scaling_config=train.ScalingConfig(
-            num_workers=run.world_size, use_gpu=True, resources_per_worker={"CPU": WORKER_CPUS, "GPU": 1},
+            num_workers=run.world_size, use_gpu=True, resources_per_worker={"CPU": cpus, "GPU": 1},
             placement_strategy="PACK",
         ),
         run_config=train.RunConfig(
