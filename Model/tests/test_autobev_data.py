@@ -287,7 +287,7 @@ def test_loader_decodes_both_sample_kinds_into_one_layout(tmp_path):
     assert set(nuplan) == set(nuscenes)
     for batch, supervised in ((nuplan, True), (nuscenes, False)):
         assert batch["visual_tiles"].shape == (1, 6, 3, 768, 1344)
-        assert batch["visual_tiles"].dtype == torch.float32
+        assert batch["visual_tiles"].dtype == torch.uint8
         assert batch["camera_history_tiles"].shape == (1, 7, 6, 3, 768, 1344)
         assert batch["camera_projection_matrix"].shape == (1, 6, 3, 4)
         assert batch["camera_history_projection_matrix"].shape == (
