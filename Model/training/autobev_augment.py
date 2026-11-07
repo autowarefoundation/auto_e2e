@@ -115,3 +115,11 @@ def restrict_to_visible(batch: dict[str, Any]) -> dict[str, Any]:
     visible = torch.where(objects.view(1, -1, 1, 1), column[:, None], road[:, None])
     return {**batch, "bev_segmentation_valid": batch["bev_segmentation_valid"] & visible}
 
+
+def full_image_window(batch: dict[str, Any]) -> torch.Tensor:
+    """The [B, V, 4] content window of unzoomed cameras: the whole 1344x768 image."""
+    from model_components.autobev.geometry import IMAGE_H, IMAGE_W
+
+    projection = batch["camera_projection_matrix"]
+    window = torch.tensor([0.0, 0.0, IMAGE_W, IMAGE_H], device=projection.device)
+    return window.expand(*projection.shape[:2], 4).clone()
