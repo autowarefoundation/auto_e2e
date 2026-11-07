@@ -98,7 +98,17 @@ one rear ring camera per log by a hash of the log id, and ONCE uses cam01,
 cam06, cam07, cam05, cam09, cam08 and drops the telephoto cam03. ONCE's origin
 is moved 1.78 m down to the road when packing, not when loading.
 
-### 3.3 Mixing
+### 3.3 Splits and loading
+
+Split groups are hashed into 100 stable buckets. nuPlan Pittsburgh groups
+carry a `heldout-` prefix and are always validation; 2 % of the other groups
+(`CALIBRATION_FRACTION`) form the calibration split, which sets the per-class
+BEV thresholds and never trains; everything else trains. Each training rank
+copies every `world`-th shard of each dataset into one local directory per
+dataset (`training/autobev_data.py`). Images travel as uint8 and are
+normalized on the GPU, because a float T8 sample is about 0.6 GB.
+
+### 3.4 Mixing
 
 Stage 1 mixes all five datasets in proportion to their sample counts; SimBEV is
 used only in the first half of the steps. Stage 2 draws 15 % of its samples from
@@ -196,7 +206,12 @@ epochs, so the clean data is seen three times with different views.
   distortion and localization shares, and `bev_mix` (published datasets mixed
   as BEV-only samples). Defaults keep today's results.
 - Checkpoints are written about every 30 minutes of training
-  (`checkpoint_interval_steps`, set from the measured step time).
+  (`checkpoint_interval_steps`, set from the measured step time). Ray Train
+  stores them under the run prefix; resume reads the last one. Run files go
+  through `pyarrow.fs`, so a local directory and S3 take the same path.
+- A full-size step on one RTX PRO 6000 (g7e) took 4.97 s per sample and
+  15 GB in stage 1 (batch 1) and 6.73 s per sample and 28 GB in stage 2
+  (batch 2, with the clean teacher pass), both measured on the first step.
 - Lightweight validation runs asynchronously: a one-GPU task starts next to the
   training task, watches the run's checkpoint prefix, and evaluates each new
   checkpoint on a fixed held-out subset (ADE/FDE on nuPlan validation, BEV IoU
