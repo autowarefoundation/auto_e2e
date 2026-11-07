@@ -200,7 +200,7 @@ def train_loop(config: dict[str, Any]) -> None:
 
     from data_parsing.pre_extracted import autobev_training_stream
     from training.objective import AutoBEVObjective, AutoE2EObjective
-    from training.schedule import Schedule, optimizer as build_optimizer, stage1_groups, stage2_groups
+    from training.schedule import MAX_BACKOFFS, Schedule, optimizer as build_optimizer, stage1_groups, stage2_groups
 
     run = TrainRun(**config)
     rank, world = dist.get_rank(), dist.get_world_size()
@@ -260,8 +260,7 @@ def train_loop(config: dict[str, Any]) -> None:
         # Rank 0 reads the validation feedback, so every rank applies the same back-off.
         requested = torch.tensor(_feedback_backoffs(run.storage_uri, run.run_name), device=device)
         dist.broadcast(requested, 0)
-        while schedule.autobev_backoff < int(requested) and schedule.back_off():
-            pass
+        schedule.autobev_backoff = max(schedule.autobev_backoff, min(int(requested), MAX_BACKOFFS))
         generators = [torch.empty(0, dtype=torch.uint8) for _ in range(world)]
         dist.all_gather_object(generators, generator.get_state())
         with tempfile.TemporaryDirectory() as directory:
