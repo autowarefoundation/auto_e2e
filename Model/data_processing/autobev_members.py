@@ -24,7 +24,7 @@ reads at inference comes from it.
 from __future__ import annotations
 
 import io
-from typing import Final
+from typing import Final, Mapping
 
 import numpy as np
 
@@ -35,6 +35,7 @@ from model_components.autobev.geometry import (
     IMAGE_H,
     IMAGE_W,
     NUM_VIEWS,
+    check_autobev_contract,
 )
 
 AUTOBEV_MEMBERS_VERSION: Final = "autobev_members_v1"
@@ -48,6 +49,10 @@ MAX_DEPTH_M: Final = 120.0
 FEATURE_H: Final = IMAGE_H // FEATURE_STRIDE
 FEATURE_W: Final = IMAGE_W // FEATURE_STRIDE
 JPEG_QUALITY: Final = 90
+# Manifest ``sample_kind``: "planner" packs (nuPlan) also carry navigation,
+# ego and trajectory members; "autobev_only" packs carry only the members
+# above and train the BEV losses alone.
+SAMPLE_KINDS: Final = ("planner", "autobev_only")
 
 
 def camera_member(view: int) -> str:
@@ -65,6 +70,17 @@ def manifest_contract() -> dict[str, object]:
         "autobev_geometry": dict(AUTOBEV_CONTRACT),
         "box_classes": list(BOX_CLASSES),
     }
+
+
+def check_manifest_contract(manifest: Mapping[str, object], *, source: str) -> None:
+    """Raise unless ``manifest`` records ``manifest_contract()`` and a known ``sample_kind``."""
+    geometry = manifest.get("autobev_geometry")
+    check_autobev_contract(geometry if isinstance(geometry, Mapping) else None, source=source)
+    differing = sorted(key for key, value in manifest_contract().items() if manifest.get(key) != value)
+    if differing:
+        raise ValueError(f"{source} has a different AutoBEV member contract: {differing}")
+    if manifest.get("sample_kind") not in SAMPLE_KINDS:
+        raise ValueError(f"{source} has an unknown AutoBEV sample_kind {manifest.get('sample_kind')!r}")
 
 
 def crop_params(width: int, height: int) -> tuple[float, float, int, int, int, int]:
