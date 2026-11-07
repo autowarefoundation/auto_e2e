@@ -16,14 +16,17 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Annotated, Dict, List, Optional
 
 from flytekit import BatchSize, PodTemplate, Resources, Secret, current_context, dynamic, map_task, task
 from flytekit.types.directory import FlyteDirectory
 
 from Platform.pipelines.autoe2e_adapters import (
+    AUTOBEV_SOURCES,
     SourcePlan,
     UnitRef,
+    autobev_packer,
     extract_unit_tar,
     pack_contracts,
     read_source,
@@ -178,6 +181,59 @@ def materialize_units(s3, bucket: str, units: List[UnitRef], root: Path) -> None
             response["Body"].close()
         if stream.digest.hexdigest() != unit.tar_sha256:
             raise ValueError(f"{unit.unit_id}: snapshot tar differs from its manifest digest")
+
+
+class SnapshotMembers(Mapping):
+    """Members of snapshot units by upstream relative path, each read with one ranged GET.
+
+    The manifest pins every unit index and the index pins every member, so a
+    read is verified without downloading or extracting the unit tar.
+    """
+
+    def __init__(self, s3, bucket: str, units: List[UnitRef]):
+        from Platform.pipelines.autoe2e_snapshot import read_index
+
+        self._s3, self._bucket, self._members = s3, bucket, {}
+        for unit in units:
+            response = s3.get_object(Bucket=bucket, Key=unit.index_key)
+            payload = response["Body"].read()
+            if sha256_bytes(payload) != unit.index_sha256:
+                raise ValueError(f"{unit.unit_id}: snapshot index differs from its manifest digest")
+            for member in read_index(payload):
+                relative = member.name.removeprefix(f"{unit.unit_id}/")
+                if relative in self._members:
+                    raise ValueError(f"{relative!r} is in two snapshot units")
+                self._members[relative] = (unit.tar_key, member)
+
+    def __getitem__(self, name: str) -> bytes:
+        from Platform.pipelines.autoe2e_snapshot import read_member
+
+        tar_key, member = self._members[name]
+        return read_member(self._s3, self._bucket, tar_key, member)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._members
+
+    def __iter__(self):
+        return iter(self._members)
+
+    def __len__(self) -> int:
+        return len(self._members)
+
+
+def pack_autobev_partition(plan: SourcePlan, partition_index: int, files: Mapping) -> Path:
+    """Pack one AutoBEV-only partition from snapshot members into a local shard directory."""
+    from data_processing.autobev_pack import write_partition
+
+    packer = autobev_packer(plan.dataset)
+    part, parts = (partition_index, len(plan.partitions)) if plan.shared_units else (0, 1)
+    out = Path(tempfile.mkdtemp(prefix="autoe2e-autobev-"))
+    write_partition(
+        out, partition_id=f"{plan.published_name}-{partition_index:04d}", dataset=packer.DATASET,
+        pack_contract=packer.PACK_CONTRACT, cameras=packer.CAMERAS, never_labelled=packer.NEVER_LABELLED,
+        samples=packer.iter_samples(files, part, parts),
+    )
+    return out
 
 
 def download_prefix(s3, uri: str, root: Path) -> None:
@@ -454,10 +510,13 @@ def pack_partition(
             max_rejection_fraction=float(plan.pack_params["max_rejection_fraction"]),
             aws_region=AWS_REGION,
         )
+    by_id = {unit.unit_id: unit for unit in plan.units}
+    if spec.dataset in AUTOBEV_SOURCES:
+        files = SnapshotMembers(s3, datasets_bucket, [by_id[u] for u in unit_ids])
+        return FlyteDirectory(str(pack_autobev_partition(plan, partition_index, files)))
 
     from Platform.pipelines.workflows import Dataset, data_processing
 
-    by_id = {unit.unit_id: unit for unit in plan.units}
     raw_root = Path(tempfile.mkdtemp(prefix="autoe2e-raw-"))
     materialize_units(s3, datasets_bucket, [by_id[u] for u in unit_ids], raw_root)
     labels_dir = None
@@ -723,6 +782,13 @@ def build_dataset(
         packed = packed.with_overrides(
             requests=Resources(cpu="16", mem="64Gi", ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE),
             limits=Resources(cpu="16", mem="64Gi", ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE),
+        )
+    if plan.dataset in AUTOBEV_SOURCES:
+        # One process reads members by range and holds at most the nuScenes
+        # tables (about 8 GB parsed); shards stay on local disk until upload.
+        packed = packed.with_overrides(
+            requests=Resources(cpu="2", mem="16Gi", ephemeral_storage="40Gi"),
+            limits=Resources(cpu="2", mem="16Gi", ephemeral_storage="40Gi"),
         )
     views = map_task(
         functools.partial(

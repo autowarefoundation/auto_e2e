@@ -34,6 +34,11 @@ class AutoE2EDataset(enum.Enum):
     KITSCENES = "kitscenes"
     NUPLAN = "nuplan"
     L2D = "l2d"
+    # AutoBEV-only datasets: images, projections, BEV labels, depth and boxes.
+    NUSCENES = "nuscenes"
+    ARGOVERSE2 = "argoverse2"
+    ONCE = "once"
+    SIMBEV = "simbev"
 
 
 @dataclass(frozen=True)
