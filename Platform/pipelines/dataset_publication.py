@@ -374,7 +374,7 @@ def merge_partition_results(
         "version": version,
         "contracts": contracts,
         "hz": int(hz),
-        "image_size": int(image_size),
+        "image_size": image_size,
         "num_views": int(num_views),
         "geometry_type": geometry_type,
         "total_samples": sum(
