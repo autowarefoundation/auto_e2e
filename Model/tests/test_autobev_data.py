@@ -312,11 +312,8 @@ def test_loader_decodes_both_sample_kinds_into_one_layout(tmp_path):
         assert batch["planner_supervised"].tolist() == [supervised]
         assert "front_camera_tile" not in batch
         assert "front_camera_projection_matrix" not in batch
-    # ImageNet normalization of a mid-grey image.
-    assert nuplan["visual_tiles"][0, 0, 0].mean() == pytest.approx(
-        (128 / 255 - 0.485) / 0.229,
-        abs=0.05,
-    )
+    # The mid-grey image stays raw uint8; the trainer normalizes it on the GPU.
+    assert float(nuplan["visual_tiles"][0, 0, 0].float().mean()) == pytest.approx(128, abs=2)
     assert nuplan["map_valid"].tolist() == [True]
     assert nuplan["trajectory_valid"].all()
     assert nuplan["initial_speed_mps"].tolist() == [4.0]
