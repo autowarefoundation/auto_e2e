@@ -180,8 +180,8 @@ def validate_checkpoints(spec: TrainingSpec, data: TrainingData, run: TrainedRun
 
     results = watch(
         _run(spec, data, run, parent_uri, 1),
-        calibration=autobev_validation_batches(data.primary, split="calibration", limit=CALIBRATION_SAMPLES),
-        validation=autobev_validation_batches(data.primary, split="validation", limit=VALIDATION_SAMPLES),
+        calibration=lambda: autobev_validation_batches(data.primary, split="calibration", limit=CALIBRATION_SAMPLES),
+        validation=lambda: autobev_validation_batches(data.primary, split="validation", limit=VALIDATION_SAMPLES),
     )
     return len(results)
 
