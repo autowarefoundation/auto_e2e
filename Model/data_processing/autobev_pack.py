@@ -25,11 +25,8 @@ from typing import Final
 
 import numpy as np
 
-from data_parsing.nuplan.packing import (
-    camera_visibility_from_projection_matrices,
-    lidar_observability_from_points,
-)
-from data_parsing.nuplan.targets import _rasterize_polygons
+from data_parsing.nuplan.packing import camera_visibility_from_projection_matrices
+from data_parsing.nuplan.targets import _rasterize_polygons, lidar_observability_from_points
 from data_processing.autobev_members import (
     BOXES_MEMBER,
     DEPTH_MEMBER,
