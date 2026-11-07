@@ -70,6 +70,9 @@ AUTOBEV_BEV_ONLY_SHARE: Final = 0.15
 AUTOBEV_GEOMETRY_TYPE: Final = "rectified_pinhole"
 # Box counts differ per sample, so a batch keeps these as lists of tensors.
 AUTOBEV_VARIABLE_LENGTH_KEYS: Final = ("autobev_boxes", "autobev_box_labels")
+# Stable split buckets; 100 lets a 2 % calibration split exist without moving
+# a tenth of the training data out of training.
+SPLIT_BUCKETS: Final = 100
 
 _HISTORY_STEPS = 64
 _FUTURE_STEPS = 64
@@ -645,7 +648,7 @@ def _is_validation_group(group_uid: str, val_fraction: float) -> bool:
         raise ValueError("split_group_uid must not be empty")
     if not 0.0 < val_fraction < 1.0:
         raise ValueError("val_fraction must be between zero and one")
-    buckets = 10
+    buckets = SPLIT_BUCKETS
     scaled_fraction = val_fraction * buckets
     val_buckets = round(scaled_fraction)
     if not math.isclose(
@@ -655,7 +658,7 @@ def _is_validation_group(group_uid: str, val_fraction: float) -> bool:
         abs_tol=1e-12,
     ):
         raise ValueError(
-            "val_fraction must be representable by the ten-bucket split"
+            f"val_fraction must be a multiple of 1/{SPLIT_BUCKETS}"
         )
     val_buckets = max(1, min(buckets - 1, val_buckets))
     return _split_bucket(group_uid, buckets) < val_buckets
@@ -1355,6 +1358,12 @@ class BEVClassRepeatPolicy:
 def _decode_image(data) -> torch.Tensor:
     img = Image.open(io.BytesIO(data)) if isinstance(data, bytes) else data
     return _TRANSFORM(img)
+
+
+def _decode_image_uint8(data: bytes) -> torch.Tensor:
+    """[3, H, W] uint8 RGB, for AutoBEV samples normalized later on the GPU."""
+    with Image.open(io.BytesIO(data)) as image:
+        return torch.from_numpy(np.asarray(image.convert("RGB"), dtype=np.uint8).transpose(2, 0, 1).copy())
 
 
 class _PoolAccessor:
@@ -2340,13 +2349,14 @@ def _decode_autobev_sample(
             else -1,
             dtype=torch.int64,
         ),
+        # uint8 here, normalized on the GPU: a float sample would be 0.6 GB.
         "visual_tiles": torch.stack([
-            _decode_image(sample[camera_member(view)])
+            _decode_image_uint8(sample[camera_member(view)])
             for view in range(NUM_VIEWS)
         ]),
         "camera_history_tiles": torch.stack([
             torch.stack([
-                _decode_image(sample[history_camera_member(frame, view)])
+                _decode_image_uint8(sample[history_camera_member(frame, view)])
                 for view in range(NUM_VIEWS)
             ])
             for frame in range(HISTORY_FRAMES)
@@ -2595,7 +2605,7 @@ def projection_from_spec(spec):
     raise ValueError(f"Unknown projection type in spec: {kind!r}")
 
 
-def _split_bucket(key: str, buckets: int = 10) -> int:
+def _split_bucket(key: str, buckets: int = SPLIT_BUCKETS) -> int:
     """Deterministic bucket in [0, buckets) from a stable string.
 
     Uses a fixed hash rather than Python's per-process salted ``hash()`` so
@@ -2682,7 +2692,7 @@ def _split_keep(
 
     ``split="all"`` keeps everything. ``"train"`` / ``"val"`` partition by a
     stable hash of ``split_group_uid``: ``val`` is the first
-    ``round(val_fraction*10)`` of 10 buckets, ``train`` is the rest. A supplied
+    ``round(val_fraction * SPLIT_BUCKETS)`` buckets, ``train`` is the rest. A supplied
     ``validation_group_uids`` manifest replaces hash bucketing with exact
     membership and requires every sample to carry an explicit group UID.
     """
@@ -2707,7 +2717,7 @@ def _split_keep(
         )
     if val_fraction <= 0.0:
         return _KeepAllSplitFilter()
-    buckets = 10
+    buckets = SPLIT_BUCKETS
     val_buckets = max(1, min(buckets - 1, round(val_fraction * buckets)))
     return _HashSplitGroupFilter(
         buckets=buckets,
