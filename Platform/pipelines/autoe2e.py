@@ -529,7 +529,7 @@ def evaluate_geo_val(models: List[RegisteredModel], training: TrainingSpec, data
 
     import torch
 
-    from data_parsing.pre_extracted import autobev_validation_batches
+    from training.autobev_data import autobev_validation_batches
     from evaluation.checkpoint_validation import validate
     from model_components import AutoE2E
     from model_components.autobev import AutoBEV
