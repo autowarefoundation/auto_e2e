@@ -1,7 +1,6 @@
 """AutoBEV: BEVFormer v2 T8 on six 1344x768 cameras with perspective supervision.
 
-Ported from ``experiment/autobev/model.py``; module names are kept so the
-experiment checkpoints load unchanged. The encoder reads a DINOv2 ViT-B/14
+Ported from ``experiment/autobev/model.py``. The encoder reads a DINOv2 ViT-B/14
 with registers (Oquab et al. 2023; Darcet et al. 2024, Apache-2.0), whose
 stride-14 features are resampled to the stride 8, 16 and 32 levels of the
 BEVFormer pyramid, and lifts them into the 220x160 grid of
@@ -35,7 +34,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..auxiliary_heads import BEVSegmentationHead
-from ..feature_fusion import FeatureFusion
+from ..feature_pyramid import BEVFormerFeaturePyramid
+from ..view_fusion.bevformer_v2_t1 import BEVFormerV2T1ViewFusion
+from ..view_fusion.bevformer_v2_t8 import BEVFormerV2T8TemporalFusion
 from ..view_fusion.projection import ImageTransform, PinholeProjection
 from .geometry import BEV_H, BEV_W, EMBED_DIM, IMAGE_H, IMAGE_W, NUM_VIEWS, PC_RANGE
 
@@ -177,28 +178,12 @@ class AutoBEV(nn.Module):
     def __init__(self, pretrained_backbone: bool = True, activation_checkpointing: bool = True) -> None:
         super().__init__()
         self.backbone = DinoV2Backbone(pretrained=pretrained_backbone)
-        self.fusion = FeatureFusion(
-            num_views=NUM_VIEWS,
-            backbone_channels=self.backbone.feature_channels,
-            embed_dim=EMBED_DIM,
-            fusion_mode="bev",
-            view_fusion_kwargs={
-                "architecture": "bevformer_v2_t8",
-                "bev_h": BEV_H,
-                "bev_w": BEV_W,
-                "pc_range": PC_RANGE,
-                # The square sizes only satisfy the constructor; every call
-                # passes the real 1344x768 transform.
-                "image_size": IMAGE_H,
-                "front_image_size": IMAGE_H,
-            },
+        self.pyramid = BEVFormerFeaturePyramid(self.backbone.feature_channels, embed_dim=EMBED_DIM)
+        self.view_fusion = BEVFormerV2T1ViewFusion(
+            num_views=NUM_VIEWS, embed_dim=EMBED_DIM, bev_h=BEV_H, bev_w=BEV_W, pc_range=PC_RANGE,
+            activation_checkpointing=activation_checkpointing,
         )
-        view = self.fusion.view_fusion
-        # AutoBEV has no front companion: the regular front view at 1344x768
-        # is finer than the old 1024x1024 tile.
-        del view.front_cross_attention
-        del view.front_residual_gate
-        view.activation_checkpointing = activation_checkpointing
+        self.temporal_fusion = BEVFormerV2T8TemporalFusion(embed_dim=EMBED_DIM)
         self.image_transform = ImageTransform(model_input_size=(IMAGE_W, IMAGE_H))
         self.bev_head = BEVSegmentationHead(embed_dim=EMBED_DIM, num_classes=NUM_BEV_CLASSES)
         self.perspective = PerspectiveHeads()
@@ -213,7 +198,7 @@ class AutoBEV(nn.Module):
         trilinear 3D grid_sample over (log-depth bin, row, column); ``scale``
         [B, V] is F_REF / f, which maps metric depth to the predicted space.
         """
-        view = self.fusion.view_fusion
+        view = self.view_fusion
         batch, views = matrix.shape[:2]
         homo = view._ego_reference_homo(view.reference_points_3d).to(matrix.device, torch.float32)
         cam = torch.einsum("bvij,mj->bvmi", matrix.float(), homo)
@@ -243,10 +228,10 @@ class AutoBEV(nn.Module):
     def _frame_bev(self, images: torch.Tensor, matrix: torch.Tensor, scale: torch.Tensor):
         batch, views = images.shape[:2]
         features = self.backbone(images.flatten(0, 1))
-        pyramid = self.fusion.build_bevformer_pyramid(features)
+        pyramid = tuple(self.pyramid(features))
         perspective = self.perspective(pyramid[0])
         weight = self._depth_weight(perspective["depth_logits"], matrix, scale)
-        bev = self.fusion.view_fusion(
+        bev = self.view_fusion(
             pyramid, batch, views,
             projection=PinholeProjection(matrix, geometry_type="rectified_pinhole"),
             image_transform=self.image_transform,
@@ -291,5 +276,6 @@ class AutoBEV(nn.Module):
         # box heads) got no gradient. Drop the cache before the trained pass.
         torch.clear_autocast_cache()
         current, perspective = self._frame_bev(images, projection, scale)
-        fused = self.fusion.fuse_temporal_bevs([*history, current])
+        # Oldest first, current last, as in BEVFormer v2's ResNetFusion.
+        fused = self.temporal_fusion([*history, current])
         return {"bev": fused, "bev_logits": self.bev_head(fused), **self.center(fused), **perspective}
