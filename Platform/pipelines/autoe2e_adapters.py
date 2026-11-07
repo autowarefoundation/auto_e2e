@@ -32,7 +32,7 @@ _NUPLAN_PACK_DEFAULTS = {
 }
 # Must equal the cache_version of pack_nuplan_snapshot_reactive_dataset; a test
 # pins the two together so a nuPlan pack change always changes dataset_id.
-NUPLAN_PACK_TASK_VERSION = "nuplan-snapshot-pack-v13-manifest-v11"
+NUPLAN_PACK_TASK_VERSION = "nuplan-snapshot-pack-v14-manifest-v12"
 
 
 def pack_contracts() -> dict[str, str]:
