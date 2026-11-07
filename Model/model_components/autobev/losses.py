@@ -398,8 +398,8 @@ class AutoBEVLoss(torch.nn.Module):
         reg = outputs["box_reg"].float()
         boxes = batch.get("autobev_image_boxes", batch["autobev_boxes"])
         targets = [
-            box_targets(b, l, p, feature_hw, s)
-            for b, l, p, s in zip(boxes, batch["autobev_box_labels"], image_projection, scale)
+            box_targets(box, label, projection, feature_hw, factor)
+            for box, label, projection, factor in zip(boxes, batch["autobev_box_labels"], image_projection, scale)
         ]
         cls_t = torch.cat([t[0] for t in targets])
         center_t = torch.cat([t[1] for t in targets])
@@ -429,7 +429,8 @@ class AutoBEVLoss(torch.nn.Module):
                                           tuple(BEV_POS_WEIGHT[i] for i in OBJECT_CLASS_INDEX))
         if self.weights["center"]:
             height, width = outputs["center_logits"].shape[-2:]
-            targets_c = [center_targets(b, l, height, width) for b, l in zip(batch["autobev_boxes"], batch["autobev_box_labels"])]
+            targets_c = [center_targets(box, label, height, width)
+                         for box, label in zip(batch["autobev_boxes"], batch["autobev_box_labels"])]
             heat_t = torch.stack([t[0] for t in targets_c])
             offset_t = torch.stack([t[1] for t in targets_c])
             peak_t = torch.stack([t[2] for t in targets_c])
