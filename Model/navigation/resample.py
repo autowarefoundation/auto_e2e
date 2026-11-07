@@ -79,7 +79,8 @@ def sampling_grid(
 
 
 def _sample(raster: torch.Tensor, grid: torch.Tensor, mode: str) -> torch.Tensor:
-    return F.grid_sample(raster.float(), grid, mode=mode, padding_mode="zeros", align_corners=False)
+    with torch.autocast(raster.device.type, enabled=False):
+        return F.grid_sample(raster.float(), grid.float(), mode=mode, padding_mode="zeros", align_corners=False)
 
 
 def resample_map_context(map_context: torch.Tensor, pose: torch.Tensor, target: NavigationRasterGeometry,
