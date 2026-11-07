@@ -138,6 +138,13 @@ def test_depth_keeps_the_nearest_return_per_pixel_and_cell():
     assert depth.shape == (NUM_VIEWS, IMAGE_H // 8, IMAGE_W // 8)
     assert depth[0, 48, 84] == pytest.approx(10.0)
     assert np.count_nonzero(depth[0]) == 1
+    # A sweep that misses every camera gives all-zero depth.
+    empty = decode_stride_depth(encode_depth(
+        points[3:4],
+        _PROJECTION,
+        np.repeat(_CAMERA_FROM_EGO[None], NUM_VIEWS, axis=0),
+    ))
+    assert not empty.any()
 
 
 def test_boxes_round_trip_and_refuse_unknown_classes():
