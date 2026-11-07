@@ -63,7 +63,7 @@ def test_two_stage_training_and_validation(tmp_path):
         assert len(stage1_checkpoints) == 2
         stage2 = TrainRun(stage=2, run_name="stage2", storage_uri=storage, primary_shards=[planner],
                           mix_shards=[bev_only], steps=4, checkpoint_interval_steps=2, world_size=1,
-                          parent_checkpoint_uri=stage1_checkpoints[-1])
+                          parent_checkpoint_uri=f"{stage1_checkpoints[-1]}/checkpoint.pt")
         run_training(stage2)
     finally:
         ray.shutdown()
