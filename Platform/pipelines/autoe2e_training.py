@@ -174,7 +174,7 @@ TRAIN_TASKS = {GpuProfile.RAY_1: train_ray_1, GpuProfile.RAY_8: train_ray_8}
       limits=Resources(cpu="6", mem="48Gi", gpu="1", ephemeral_storage="400Gi"),
       environment=TRAIN_ENVIRONMENT, retries=2)
 def validate_checkpoints(spec: TrainingSpec, data: TrainingData, run: TrainedRun, parent_uri: str) -> int:
-    """Validate the run's checkpoints as they appear; returns how many it validated."""
+    """Validate the run's checkpoints as they appear; returns how many this attempt validated."""
     from training.autobev_data import autobev_validation_batches
     from evaluation.checkpoint_validation import CALIBRATION_SAMPLES, VALIDATION_SAMPLES, watch
 
@@ -202,8 +202,9 @@ class TrainedCheckpoints:
     final_metrics_json: str = "{}"
 
 
-# The stage 2 checkpoint with the lowest 6.4 s ADE, and the stage 1 checkpoint
-# with the best Pittsburgh drivable-area IoU over the forward bands, is "best".
+# On the calibration split (not the held-out Pittsburgh split the formal
+# evaluation reports): the stage 2 checkpoint with the lowest 6.4 s ADE, and the
+# stage 1 checkpoint with the best drivable-area IoU over the forward bands.
 SELECTION_METRIC = {2: ("ade/6.4s", min), 1: ("drivable", max)}
 
 
@@ -220,13 +221,14 @@ def select_checkpoints(spec: TrainingSpec, run: TrainedRun, validated: int) -> T
     from training.trainer import CHECKPOINT_FILE
 
     results = [read_json(f"{checkpoint}/{RESULT_FILE}") for checkpoint in list_checkpoints(run.run_uri)]
-    if len(results) != validated or not results:
-        raise RuntimeError(f"{run.run_uri} has {len(results)} validated checkpoints, expected {validated}")
-    for result in results:
-        result["metrics"]["drivable"] = drivable_score(result["metrics"])
-    name, choose = SELECTION_METRIC[spec.stage]
-    best = choose(results, key=lambda result: result["metrics"].get(name, float("nan")))
     final = max(results, key=lambda result: result["step"])
+    if final["step"] != spec.steps:
+        raise RuntimeError(f"{run.run_uri}: the last validated step is {final['step']}, not {spec.steps}")
+    for result in results:
+        result["calibration_metrics"]["drivable"] = drivable_score(result["calibration_metrics"])
+    name, choose = SELECTION_METRIC[spec.stage]
+    best = choose((r for r in results if name in r["calibration_metrics"]),
+                  key=lambda result: result["calibration_metrics"][name])
 
     client = MlflowClient(tracking_uri=MLFLOW_URI)
     experiment = client.get_experiment_by_name(os.environ.get("AUTO_E2E_MLFLOW_EXPERIMENT", "auto-e2e"))
