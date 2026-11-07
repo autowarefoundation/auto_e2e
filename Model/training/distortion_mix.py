@@ -62,7 +62,7 @@ def _draw(generator: torch.Generator, bounds: tuple[float, float], *shape: int) 
     return bounds[0] + torch.rand(shape, generator=generator) * (bounds[1] - bounds[0])
 
 
-def _camera_augment(batch: dict[str, Any], active: torch.Tensor, generator: torch.Generator) -> dict[str, Any]:
+def camera_augment(batch: dict[str, Any], active: torch.Tensor, generator: torch.Generator) -> dict[str, Any]:
     images = batch["visual_tiles"]
     b, v = images.shape[:2]
     device = images.device
@@ -106,10 +106,12 @@ def _camera_augment(batch: dict[str, Any], active: torch.Tensor, generator: torc
     # Stride-8 cells of a zoomed-out image that hold no camera content.
     ones = torch.ones(b * v, 1, *depth.shape[-2:], device=device)
     out["autobev_image_valid"] = (warp(ones, grid(*depth.shape[-2:]), "nearest") > 0.5).view_as(depth)
+    # Pixel rectangle [x0, y0, x1, y1] per camera that holds source content.
+    out["autobev_image_window"] = torch.cat([t.clamp(min=0), torch.minimum(zoom[..., None] * size + t, size)], -1)
     return out
 
 
-def _photometric(batch: dict[str, Any], active: torch.Tensor, generator: torch.Generator) -> dict[str, Any]:
+def photometric(batch: dict[str, Any], active: torch.Tensor, generator: torch.Generator) -> dict[str, Any]:
     images = batch["visual_tiles"]
     b, v = images.shape[:2]
     device = images.device
@@ -149,8 +151,8 @@ def apply_distortions(
         chosen = shift.active & (choice == DISTORTIONS.index(method)).to(shift.active.device)
         out = apply_lateral_recovery(out, LateralShift(chosen, shift.offset_m * chosen, shift.yaw_rad * chosen),
                                      method=method)
-    out = _camera_augment(out, choice == DISTORTIONS.index("camera_augment"), generator)
-    out = _photometric(out, choice == DISTORTIONS.index("photometric"), generator)
+    out = camera_augment(out, choice == DISTORTIONS.index("camera_augment"), generator)
+    out = photometric(out, choice == DISTORTIONS.index("photometric"), generator)
     applied = torch.where(
         (choice <= DISTORTIONS.index("image_warp")) & ~shift.active.cpu(), DISTORTIONS.index("none"), choice)
     return out, Distortion(applied.to(shift.active.device), shift)
