@@ -11,8 +11,8 @@ runtime:
     skip_driver_during_force_gt: true
     control_timestep_us: 100_000
 
-    # Rendered at the native aspect ratio; the plugin squashes each frame to
-    # the model's square tiles (front 1024 px, others 512 px) as in training.
+    # Rendered at the native aspect ratio; the plugin scales each frame to
+    # cover 1344x768 and centre-crops it, as the AutoBEV packs do.
     cameras:
       - logical_id: camera_base_front_center
         height: 1552
