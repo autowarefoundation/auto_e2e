@@ -103,9 +103,12 @@ def build_model(run: TrainRun) -> torch.nn.Module:
 
     if run.stage == 1:
         return AutoBEV(pretrained_backbone=True)
+    from training import storage
+
     model = AutoE2E(pretrained_backbone=False)
     with tempfile.TemporaryDirectory() as directory:
-        local = _download(f"{run.parent_checkpoint_uri.rstrip('/')}/{CHECKPOINT_FILE}", Path(directory))
+        local = storage.download(f"{run.parent_checkpoint_uri.rstrip('/')}/{CHECKPOINT_FILE}",
+                                 Path(directory) / CHECKPOINT_FILE)
         state = torch.load(local, map_location="cpu", weights_only=False)
     check_autobev_contract(state["metadata"].get("autobev_contract"), source=run.parent_checkpoint_uri)
     if state["metadata"]["stage"] != 1:
@@ -114,25 +117,12 @@ def build_model(run: TrainRun) -> torch.nn.Module:
     return model
 
 
-def _download(uri: str, directory: Path) -> Path:
-    target = directory / Path(uri).name
-    if uri.startswith("s3://"):
-        import boto3
-
-        bucket, key = uri[len("s3://"):].split("/", 1)
-        boto3.client("s3").download_file(bucket, key, str(target))
-        return target
-    return Path(uri)
-
-
 def _feedback_backoffs(storage_uri: str, run_name: str) -> int:
     """How many AutoBEV back-offs the validation task has asked for so far."""
+    from training import storage
+
     uri = f"{storage_uri.rstrip('/')}/{run_name}/{FEEDBACK_FILE}"
-    try:
-        with tempfile.TemporaryDirectory() as directory:
-            return int(json.loads(_download(uri, Path(directory)).read_text())["autobev_backoffs"])
-    except Exception:  # noqa: BLE001 - no feedback written yet
-        return 0
+    return int(json.loads(storage.read_bytes(uri))["autobev_backoffs"]) if storage.exists(uri) else 0
 
 
 def model_inputs(batch: dict[str, Any], localization) -> dict[str, torch.Tensor]:
