@@ -313,6 +313,7 @@ def register_models(
     dataset_spec: DatasetSpec,
     dataset: DatasetHandle,
     mix: List[DatasetHandle],
+    early_mix: List[DatasetHandle],
     training: TrainingSpec,
     parent: ParentHandle,
     trained: TrainedCheckpoints,
@@ -349,7 +350,7 @@ def register_models(
     if trained.final_sha256 != trained.best_sha256:
         roles.append(("final", trained.final_uri, trained.final_sha256, trained.final_step, trained.final_metrics_json))
     mixed = []
-    for handle in mix:
+    for handle in [*mix, *early_mix]:
         mix_lineage = read_dataset_lineage(
             s3, bucket=runtime.datasets_bucket, key=handle.lineage_key, sha256=handle.lineage_sha256)
         mix_units = mix_lineage["units"]["uri"].removeprefix(f"s3://{runtime.datasets_bucket}/")
@@ -370,6 +371,7 @@ def register_models(
             split={"policy": "pittsburgh_held_out"},
             training={"spec": _spec_dict(training), "flyte_execution_id": _execution_id(),
                       "mixed_dataset_ids": [handle.dataset_id for handle in mix],
+                      "early_mixed_dataset_ids": [handle.dataset_id for handle in early_mix],
                       "mlflow_run_id": trained.run_id, "image_digest": TRAINING_IMAGE,
                       "git_commit": os.environ.get("AUTO_E2E_GIT_COMMIT", "unknown")},
             selection={"metrics": json.loads(metrics_json)},
@@ -530,7 +532,7 @@ def evaluate_geo_val(models: List[RegisteredModel], training: TrainingSpec, data
     import torch
 
     from training.autobev_data import autobev_validation_batches
-    from evaluation.checkpoint_validation import validate
+    from evaluation.checkpoint_validation import load_checkpoint, validate
     from model_components import AutoE2E
     from model_components.autobev import AutoBEV
     from Platform.pipelines import autoe2e_mlflow as am
@@ -545,10 +547,9 @@ def evaluate_geo_val(models: List[RegisteredModel], training: TrainingSpec, data
         bucket, key = _split_s3_uri(model.checkpoint_uri)
         with tempfile.NamedTemporaryFile(suffix=".pt") as handle:
             s3.download_file(bucket, key, handle.name)
-            state = torch.load(handle.name, map_location="cpu", weights_only=False)
-        stage = int(state["metadata"]["stage"])
+            stage = int(torch.load(handle.name, map_location="cpu", weights_only=False)["metadata"]["stage"])
         network = (AutoBEV(pretrained_backbone=False) if stage == 1 else AutoE2E(pretrained_backbone=False))
-        network.load_state_dict(state["model"])
+        load_checkpoint(network, model.checkpoint_uri)
         result = validate(
             network.to(device), stage,
             calibration=autobev_validation_batches(dataset.partition_uris, split="calibration", limit=0),
@@ -625,7 +626,7 @@ def wf_autoe2e(
     parent_handle = resolve_parent(parent=parent)
     trained = train(spec=training, dataset=published, mix=mixed, early_mix=early, parent=parent_handle)
     models = register_models(
-        dataset_spec=dataset, dataset=published, mix=mixed, training=training,
+        dataset_spec=dataset, dataset=published, mix=mixed, early_mix=early, training=training,
         parent=parent_handle, trained=trained, runtime=runtime,
     )
     done = evaluate(models=models, evaluation=evaluation, training=training, dataset=published, runtime=runtime)
