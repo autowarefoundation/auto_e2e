@@ -1,25 +1,20 @@
 """Tests for the AutoE2E AlpaSim driver plugin.
 
 The unit tests check the rig profiles, the egomotion and projection math, the
-parsed model inputs and the call into AutoE2E against the release (BEVFormer
-T8) contract. The ``integration`` tests run a real model; the checkpoint and
-KITScenes parity tests also need local data:
+parsed model inputs and the call into ``AutoE2E.forward``. The ``integration``
+tests run a real model; the checkpoint test needs a stage 2 checkpoint:
 
     AUTOE2E_CHECKPOINT=/path/to/checkpoint.pt
-    KITSCENES_VAL_MIRROR=.../datasets/kitscenes-val/v3.5/shards
-    KITSCENES_RAW=/path/to/KITScenes/scenes   # one folder per scene id
 """
 
 from __future__ import annotations
 
 import dataclasses
-import glob
 import inspect
 import json
 import os
 import shutil
 import sys
-import tarfile
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +42,7 @@ from alpasim_autoe2e.config import (  # noqa: E402
 )
 from alpasim_autoe2e.parser import (  # noqa: E402
     CONTEXT_FRAMES,
+    MAP_POSE_SIGMA,
     egomotion_from_poses,
     history_projections,
     pose_trajectory,
@@ -56,7 +52,7 @@ from alpasim_autoe2e.plugin import (  # noqa: E402
     UNTRAINED_CHECKPOINT,
     AutoE2EDriver,
 )
-from model_components.view_fusion.projection import PinholeProjection  # noqa: E402
+from data_processing.autobev_members import crop_params  # noqa: E402
 from training.losses.control_rollout import integrate_controls_torch  # noqa: E402
 
 KIT_CAMERAS = [
@@ -133,22 +129,19 @@ def _prediction_input(
 
 
 class _ControlsModel(torch.nn.Module):
-    """Stands in for AutoE2E: checks the release call and returns fixed controls."""
+    """Stands in for AutoE2E: binds the call to ``ReactiveE2E.forward`` and returns fixed controls."""
 
     def __init__(self, acceleration: float = 0.0, curvature: float = 0.0) -> None:
         super().__init__()
-        from model_components.auto_e2e import AutoE2E
+        from model_components.reactive_e2e import ReactiveE2E
 
-        self.signature = inspect.signature(AutoE2E.forward)
+        self.signature = inspect.signature(ReactiveE2E.forward)
         self.controls = torch.tensor([acceleration, curvature]).repeat(64)
         self.calls: list[inspect.BoundArguments] = []
 
-    def reset_visual_history(self) -> None:
-        pass
-
-    def forward(self, *args, **kwargs) -> torch.Tensor:
-        self.calls.append(self.signature.bind(self, *args, **kwargs))
-        return self.controls.unsqueeze(0)
+    def forward(self, **inputs: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        self.calls.append(self.signature.bind(self, **inputs))
+        return self.controls.unsqueeze(0), {}
 
 
 @pytest.fixture
@@ -163,7 +156,6 @@ def test_kit_profile_is_selected_by_its_cameras() -> None:
     profile = find_rig_profile(list(reversed(KIT_CAMERAS)))
     assert profile.name == "kit_scenes"
     assert profile.dataset_name == "KIT-MRT/KITScenes-Multimodal"
-    assert profile.native_front_camera_tile
     assert [c.logical_id for c in profile.ordered_by_slots(KIT_SLOTS)] == KIT_CAMERAS
 
 
@@ -240,7 +232,7 @@ def test_nuplan_profile_export_rectifies_the_camera_table(tmp_path: Path, monkey
     monkeypatch.setenv("AUTOE2E_RIG_PROFILE", str(output))
     nuplan_driver = AutoE2EDriver(MOCK_CHECKPOINT, channels)
     inputs = nuplan_driver.parser.parse(_prediction_input(cameras=channels)).model_inputs
-    assert inputs["front_camera_tile"].shape == (1, 3, 1024, 1024)
+    assert inputs["images"].shape == (1, 6, 3, 768, 1344)
 
 
 def test_nuplan_curvature_rule_zeroes_and_clips() -> None:
@@ -255,15 +247,20 @@ def test_nuplan_curvature_rule_zeroes_and_clips() -> None:
     assert np.allclose(EgomotionRule().curvature(yaw_rate, speed), [0.5, 0.2, 2.0, 0.05])
 
 
-def test_projection_scales_intrinsics_per_axis() -> None:
+@pytest.mark.parametrize("frame_wh", [(876, 568), (438, 284)])
+def test_projection_maps_into_the_autobev_crop(frame_wh: tuple[int, int]) -> None:
     camera = load_rig_profile(CALIBRATION_DIR / "kit_scenes.json").cameras[1]
-    projection = camera.projection((512, 512))
+    projection = camera.projection(frame_wh, np.eye(4))
     width, height = camera.image_size_wh
+    sx, sy, _, _, left, top = crop_params(*frame_wh)
     center = camera.camera_to_reference[:, 3]
     assert np.allclose(projection @ center, 0.0, atol=1e-9)
     on_axis = camera.camera_to_reference @ np.array([0.0, 0.0, 10.0, 1.0])
     pixel = projection @ on_axis
-    expected = [camera.intrinsic[0, 2] * 512 / width, camera.intrinsic[1, 2] * 512 / height]
+    expected = [
+        camera.intrinsic[0, 2] * frame_wh[0] / width * sx - left,
+        camera.intrinsic[1, 2] * frame_wh[1] / height * sy - top,
+    ]
     assert np.allclose(pixel[:2] / pixel[2], expected)
 
 
@@ -297,21 +294,23 @@ def test_egomotion_rows_end_one_step_before_t0() -> None:
 
 def test_history_projection_of_a_stationary_ego_is_the_current_one() -> None:
     cameras = find_rig_profile(KIT_CAMERAS).ordered_by_slots(KIT_SLOTS)
+    frame_wh = [c.image_size_wh for c in cameras]
     pose = np.eye(4)
-    history = history_projections(cameras, pose, [pose] * 7, (512, 512))
-    current = np.stack([c.projection((512, 512)) for c in cameras])
+    history = history_projections(cameras, frame_wh, pose, [pose] * 7)
+    current = np.stack([c.projection(size, np.eye(4)) for c, size in zip(cameras, frame_wh)])
     assert history.shape == (7, 6, 3, 4)
     assert np.allclose(history, current[None], atol=1e-3)
 
 
 def test_history_projection_follows_ego_motion() -> None:
     cameras = find_rig_profile(KIT_CAMERAS).ordered_by_slots(KIT_SLOTS)
+    frame_wh = [c.image_size_wh for c in cameras]
     now, past = np.eye(4), np.eye(4)
     now[0, 3] = 5.0  # the ego moved 5 m forward since the past frame
-    history = history_projections(cameras, now, [past], (512, 512))
+    history = history_projections(cameras, frame_wh, now, [past])
     point_now = np.array([20.0, 1.0, 0.5, 1.0])
     point_past = point_now + np.array([5.0, 0.0, 0.0, 0.0])
-    expected = cameras[0].projection((512, 512)) @ point_past
+    expected = cameras[0].projection(frame_wh[0], np.eye(4)) @ point_past
     actual = history[0, 0] @ point_now
     assert np.allclose(actual[:2] / actual[2], expected[:2] / expected[2], atol=1e-3)
 
@@ -319,20 +318,21 @@ def test_history_projection_follows_ego_motion() -> None:
 # --- parsing ------------------------------------------------------------------
 
 
-def test_parse_builds_the_release_inputs(driver: AutoE2EDriver) -> None:
+def test_parse_builds_the_autoe2e_inputs(driver: AutoE2EDriver) -> None:
     parsed = driver.parser.parse(_prediction_input())
     inputs = parsed.model_inputs
-    assert inputs["camera_tiles"].shape == (1, 6, 3, 512, 512)
-    assert inputs["camera_history_tiles"].shape == (1, 7, 6, 3, 512, 512)
-    assert inputs["camera_projection_matrix"].shape == (1, 6, 3, 4)
-    assert inputs["camera_history_projection_matrix"].shape == (1, 7, 6, 3, 4)
-    assert inputs["front_camera_tile"].shape == (1, 3, 1024, 1024)
-    assert inputs["front_camera_projection_matrix"].shape == (1, 1, 3, 4)
+    assert inputs["images"].shape == (1, 6, 3, 768, 1344)
+    assert inputs["history_images"].shape == (1, 7, 6, 3, 768, 1344)
+    assert inputs["projection"].shape == (1, 6, 3, 4)
+    assert inputs["history_projection"].shape == (1, 7, 6, 3, 4)
     assert inputs["egomotion_history"].shape == (1, 256)
-    assert inputs["visual_history"].shape == (1, 896)
     assert inputs["map_context"].shape == (1, 14, 450, 300)
     assert inputs["route_mask"].shape == (1, 2, 450, 300)
     assert not inputs["map_valid"].any() and not inputs["route_valid"].any()
+    assert torch.equal(inputs["map_pose"], torch.zeros(1, 3))
+    expected = torch.diag(torch.tensor(MAP_POSE_SIGMA) ** 2)
+    assert torch.allclose(inputs["map_pose_covariance"][0], expected)
+    assert inputs["map_matching"].all()
     assert parsed.t0_us == T0_US
     assert parsed.initial_speed_mps == pytest.approx(8.0, abs=1e-3)
     assert np.allclose(parsed.pose_local_to_rig_t0.vec3[:2], [80.0, 0.0], atol=1e-3)
@@ -343,24 +343,29 @@ def test_parse_orders_cameras_by_model_slot(driver: AutoE2EDriver) -> None:
     shuffled = KIT_CAMERAS[3:] + KIT_CAMERAS[:3]
     inputs = driver.parser.parse(_prediction_input(cameras=shuffled, colors=colors)).model_inputs
     mean, std = torch.tensor([0.485, 0.456, 0.406]), torch.tensor([0.229, 0.224, 0.225])
-    red = inputs["camera_tiles"][0, :, 0].mean(dim=(1, 2)) * std[0] + mean[0]
+    red = inputs["images"][0, :, 0].mean(dim=(1, 2)) * std[0] + mean[0]
     assert torch.allclose(red * 255, torch.tensor([40.0 * i for i in range(6)]), atol=1.0)
 
 
-def test_front_base_tile_is_the_downsampled_native_tile(driver: AutoE2EDriver) -> None:
-    inputs = driver.parser.parse(_prediction_input()).model_inputs
-    expected = torch.nn.functional.interpolate(
-        inputs["front_camera_tile"], size=(512, 512), mode="bilinear", antialias=True
-    )
-    assert torch.allclose(inputs["camera_tiles"][:, 0], expected)
+def test_parse_centre_crops_after_scaling_to_cover(driver: AutoE2EDriver) -> None:
+    """A frame wider than 1344x768 keeps its centre columns and loses its sides."""
+    prediction_input = _prediction_input()
+    frame = np.zeros((768, 2000, 3), np.uint8)
+    frame[:, :328] = 255  # cut away: (2000 - 1344) / 2 = 328 columns per side
+    frame[:, 1000] = 255  # survives at column 1000 - 328
+    prediction_input.camera_images[KIT_CAMERAS[0]][-1] = (T0_US, frame)
+    image = driver.parser.parse(prediction_input).model_inputs["images"][0, 0, 0]
+    mean, std = 0.485, 0.229
+    column = (image * std + mean).mean(dim=0)
+    assert torch.allclose(column[:300], torch.zeros(300), atol=1e-3)
+    assert column[1000 - 328] > 0.9
 
 
-def test_kitscenes_policy_masks_the_latest_acceleration(driver: AutoE2EDriver) -> None:
+def test_parse_passes_the_raw_egomotion(driver: AutoE2EDriver) -> None:
     poses = _unicycle_poses(speed=1.0, acceleration=0.5)
     history = driver.parser.parse(_prediction_input(poses)).model_inputs["egomotion_history"]
-    history = history.reshape(64, 4)
-    assert history[-1, 1] == 0.0
-    assert history[-2, 1] == pytest.approx(0.5, abs=1e-2)
+    expected = egomotion_from_poses(pose_trajectory(poses), T0_US)
+    assert torch.equal(history.reshape(64, 4), torch.from_numpy(expected))
 
 
 def test_parse_rejects_wrong_frame_spacing(driver: AutoE2EDriver) -> None:
@@ -405,18 +410,14 @@ def test_mock_mode_drives_straight(driver: AutoE2EDriver) -> None:
     assert prediction.selected_positions[-1, 0] == pytest.approx(8.0 * 6.4)
 
 
-def test_predict_calls_autoe2e_with_the_release_contract(driver: AutoE2EDriver) -> None:
+def test_predict_calls_autoe2e_forward_by_name(driver: AutoE2EDriver) -> None:
     driver.model = _ControlsModel()
     prediction = driver.predict(_prediction_input())
 
     call = driver.model.calls[0].arguments
-    assert isinstance(call["projection"], PinholeProjection)
-    assert len(call["history_projections"]) == 7
-    assert all(isinstance(p, PinholeProjection) for p in call["history_projections"])
-    assert isinstance(call["front_projection"], PinholeProjection)
-    assert call["camera_history_tiles"].shape == (1, 7, 6, 3, 512, 512)
-    assert call["front_camera_tile"].shape == (1, 3, 1024, 1024)
-    assert call["geometry_type"] == "pinhole"
+    assert set(call) == set(driver.model.signature.parameters) - {"image_projection"}
+    assert call["history_images"].shape == (1, 7, 6, 3, 768, 1344)
+    assert call["history_projection"].shape == (1, 7, 6, 3, 4)
 
     # Zero controls keep the initial speed: 0.8 m per 100 ms step.
     assert np.allclose(prediction.selected_positions[:, 0], 0.8 * np.arange(1, 65), atol=1e-3)
@@ -484,14 +485,8 @@ def test_nuplan_extra_cameras_match_the_profile() -> None:
 # --- integration --------------------------------------------------------------
 
 
-def _read_member(tar: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
-    stream = tar.extractfile(member)
-    assert stream is not None
-    return stream.read()
-
-
 @pytest.mark.integration
-def test_untrained_release_model_predicts() -> None:
+def test_untrained_model_predicts() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     driver = AutoE2EDriver(UNTRAINED_CHECKPOINT, KIT_CAMERAS, device=device)
     prediction = driver.predict(_prediction_input())
@@ -509,66 +504,3 @@ def test_checkpoint_predicts(cameras: list[str]) -> None:
     prediction = driver.predict(_prediction_input(cameras=cameras))
     assert np.isfinite(prediction.selected_positions).all()
 
-
-@pytest.mark.integration
-@pytest.mark.skipif(
-    not {"KITSCENES_VAL_MIRROR", "KITSCENES_RAW"} <= set(os.environ),
-    reason="needs KITSCENES_VAL_MIRROR and KITSCENES_RAW",
-)
-def test_projections_and_egomotion_match_packed_kitscenes_samples(driver) -> None:
-    """Rebuild packed calib.json / ego.npy contents from raw poses.txt."""
-    from training.dataset_policy import adapt_egomotion_history
-
-    raw_root = Path(os.environ["KITSCENES_RAW"])
-    cameras = driver.parser.cameras
-    checked = 0
-    for shard in sorted(glob.glob(os.path.join(os.environ["KITSCENES_VAL_MIRROR"], "*.tar")))[:10]:
-        with tarfile.open(shard) as tar:
-            members = {m.name: m for m in tar.getmembers()}
-            keys = sorted(n.rsplit(".", 2)[0] for n in members if n.endswith(".calib.json"))
-            for key in keys[::5]:
-                scene = key.split("-v1-")[1].rsplit("-f", 1)[0]
-                frame = int(key.rsplit("-f", 1)[1])
-                if frame < 66 or not (raw_root / scene / "poses.txt").is_file():
-                    continue
-                calib = json.loads(_read_member(tar, members[key + ".calib.json"]))
-                current = np.stack([c.projection((512, 512)) for c in cameras])
-                if not np.allclose(current, calib["projection"]["matrix"], atol=1e-3):
-                    continue  # scene recorded with another calibration revision
-                data = np.loadtxt(raw_root / scene / "poses.txt")
-                poses = []
-                for row in data:
-                    pose = common_pb2.PoseAtTime(timestamp_us=int(round(row[0] * 1e6)))
-                    pose.pose.vec.x, pose.pose.vec.y, pose.pose.vec.z = row[1:4]
-                    q = row[4:8] / np.linalg.norm(row[4:8])
-                    pose.pose.quat.x, pose.pose.quat.y, pose.pose.quat.z, pose.pose.quat.w = q
-                    poses.append(pose)
-                trajectory = pose_trajectory(poses)
-                t0 = int(round(data[frame, 0] * 1e6))
-                rows = [frame + 5 * offset for offset in range(-7, 0)]
-                history = history_projections(
-                    cameras,
-                    np.asarray(trajectory.interpolate_pose(t0).as_se3(), dtype=np.float64),
-                    [
-                        np.asarray(
-                            trajectory.interpolate_pose(int(round(data[r, 0] * 1e6))).as_se3(),
-                            dtype=np.float64,
-                        )
-                        for r in rows
-                    ],
-                    (512, 512),
-                )
-                packed_history = np.asarray(calib["history_projection"]["matrix"])
-                assert np.abs(history - packed_history).max() < 1e-4 * np.abs(packed_history).max()
-
-                ego = np.frombuffer(_read_member(tar, members[key + ".ego.npy"]), np.float32)
-                policy = driver.parser.policy
-                packed = adapt_egomotion_history(torch.from_numpy(ego[:256].copy())[None], policy)
-                ours = adapt_egomotion_history(
-                    torch.from_numpy(egomotion_from_poses(trajectory, t0)).reshape(1, 256), policy
-                )
-                # The validation mirror keeps 40 real rows (benchmark protocol).
-                diff = (ours - packed).reshape(64, 4)[24:].abs().amax(dim=0)
-                assert (diff <= torch.tensor([5e-3, 5e-2, 1e-4, 1e-3])).all(), diff
-                checked += 1
-    assert checked > 0
