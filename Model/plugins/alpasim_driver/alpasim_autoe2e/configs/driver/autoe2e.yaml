@@ -11,9 +11,9 @@ log_level: ${wizard.log_level}
 
 model:
   model_type: autoe2e  # Entry-point name in the alpasim.models registry
-  # AutoE2E training checkpoint (config + model_state_dict), e.g.
+  # Stage 2 AutoE2E checkpoint written by training.trainer, e.g.
   # /mnt/drivers/autoe2e/checkpoint.pt. "MOCK" drives straight without a model;
-  # "UNTRAINED" builds the release architecture with random weights.
+  # "UNTRAINED" builds AutoE2E with random weights.
   checkpoint_path: ???
   device: "cuda"
 
@@ -23,7 +23,7 @@ port: ???
 inference:
   # One camera per AutoE2E slot. The cameras select the rig calibration
   # profile (alpasim_autoe2e/configs/calibration) and are reordered to the
-  # checkpoint's camera_slots.
+  # canonical slots (front, front_left, front_right, rear_left, rear, rear_right).
   use_cameras:
     - camera_base_front_center
     - camera_ring_front_left
