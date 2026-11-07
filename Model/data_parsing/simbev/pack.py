@@ -108,8 +108,9 @@ def load_detections(payload: bytes) -> list[dict]:
     from numpy.lib import format as npy_format
 
     stream = io.BytesIO(payload)
-    version = npy_format.read_magic(stream)
-    npy_format._read_array_header(stream, version)
+    major, _ = npy_format.read_magic(stream)
+    # GT_DET files are .npy object arrays; the header is skipped and the pickle loaded safely.
+    (npy_format.read_array_header_1_0 if major == 1 else npy_format.read_array_header_2_0)(stream)
     return list(_ArrayUnpickler(stream).load())
 
 
