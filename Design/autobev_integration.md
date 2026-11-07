@@ -87,6 +87,17 @@ from the experiment packers. They carry only the AutoBEV members (images,
 projections, BEV labels, depth, boxes) and have no trajectory or navigation
 members. Classes a dataset cannot provide are invalid, not negative.
 
+As built, one table-driven adapter (`read_autobev`, `AUTOBEV_SOURCES`) serves
+the four datasets, and their packs read single members of the snapshot units by
+range (`SnapshotMembers`) instead of extracting whole unit tars, because a
+nuScenes, ONCE or SimBEV partition needs a few files of 5 to 10 GB units. Every
+partition of those three reads all units and packs every N-th scene or sequence
+(N fixed per packer); an Argoverse 2 partition is one log. Camera views follow
+the experiment packers: nuScenes and SimBEV map one to one, Argoverse 2 drops
+one rear ring camera per log by a hash of the log id, and ONCE uses cam01,
+cam06, cam07, cam05, cam09, cam08 and drops the telephoto cam03. ONCE's origin
+is moved 1.78 m down to the road when packing, not when loading.
+
 ### 3.3 Mixing
 
 Stage 1 mixes all five datasets in proportion to their sample counts; SimBEV is
