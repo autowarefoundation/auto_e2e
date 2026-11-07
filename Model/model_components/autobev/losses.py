@@ -33,13 +33,12 @@ from data_processing.reactive_training_artifacts import BEV_SEGMENTATION_CLASSES
 from ..losses.bev_segmentation_loss import BEVSegmentationAuxiliaryLoss
 from .encoder import (
     CENTER_GROUPS,
-    FEATURE_STRIDE,
     NUM_BOX_CLASSES,
     PV_SEG_CLASSES,
     depth_to_bin,
     focal_scale,
 )
-from .geometry import IMAGE_H, IMAGE_W, PC_RANGE
+from .geometry import FEATURE_STRIDE, IMAGE_H, IMAGE_W, PC_RANGE
 
 # Per-class positive weights measured on the nuPlan pack for ft5
 # (history.json bev_pos_weight_*), reused until the subset has its own.
