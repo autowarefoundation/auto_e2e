@@ -60,6 +60,8 @@ AUTOBEV_CONTRACT: Final[dict[str, Any]] = {
     "num_views": NUM_VIEWS,
     "history_frames": HISTORY_FRAMES,
     "frame_interval_us": FRAME_INTERVAL_US,
+    "frame": AUTOBEV_GEOMETRY.frame,
+    "pixel_convention": AUTOBEV_GEOMETRY.pixel_convention,
 }
 
 
