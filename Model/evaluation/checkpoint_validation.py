@@ -53,6 +53,7 @@ def _sum(totals: dict[str, torch.Tensor], counts: Mapping[str, torch.Tensor]) ->
 @torch.no_grad()
 def _bev_and_trajectory(model, stage: int, batches: Iterable[dict[str, Any]], device):
     from model_components.losses import TrajectoryXYImitationLoss
+    from training.autobev_data import to_device
     from training.localization_noise import simulate_localization
 
     totals: dict[str, torch.Tensor] = {}
@@ -61,7 +62,7 @@ def _bev_and_trajectory(model, stage: int, batches: Iterable[dict[str, Any]], de
     generator = torch.Generator().manual_seed(SEED)
     integrate = TrajectoryXYImitationLoss().predicted_xy
     for raw in batches:
-        batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in raw.items()}
+        batch = to_device(raw, device)
         sample_ids += list(batch["sample_uid"])
         with torch.autocast("cuda", dtype=torch.bfloat16):
             if stage == 1:
