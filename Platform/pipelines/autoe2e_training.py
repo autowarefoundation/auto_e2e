@@ -211,16 +211,15 @@ SELECTION_METRIC = {2: ("ade/6.4s", min), 1: ("drivable", max)}
       retries=2)
 def select_checkpoints(spec: TrainingSpec, run: TrainedRun, validated: int) -> TrainedCheckpoints:
     """Pick the best and the final checkpoint from the validation results and open the run's MLflow run."""
-    import hashlib
     import json
 
-    import boto3
     from mlflow import MlflowClient
 
-    from evaluation.checkpoint_validation import RESULT_FILE, _checkpoints, _read_json, drivable_score
+    from evaluation.checkpoint_validation import RESULT_FILE, list_checkpoints, read_json, drivable_score
+    from training.storage import sha256
     from training.trainer import CHECKPOINT_FILE
 
-    results = [_read_json(f"{checkpoint}/{RESULT_FILE}") for checkpoint in _checkpoints(run.run_uri)]
+    results = [read_json(f"{checkpoint}/{RESULT_FILE}") for checkpoint in list_checkpoints(run.run_uri)]
     if len(results) != validated or not results:
         raise RuntimeError(f"{run.run_uri} has {len(results)} validated checkpoints, expected {validated}")
     for result in results:
@@ -228,15 +227,6 @@ def select_checkpoints(spec: TrainingSpec, run: TrainedRun, validated: int) -> T
     name, choose = SELECTION_METRIC[spec.stage]
     best = choose(results, key=lambda result: result["metrics"].get(name, float("nan")))
     final = max(results, key=lambda result: result["step"])
-    s3 = boto3.client("s3")
-
-    def sha256(uri: str) -> str:
-        bucket, key = uri.removeprefix("s3://").split("/", 1)
-        digest = hashlib.sha256()
-        body = s3.get_object(Bucket=bucket, Key=key)["Body"]
-        for chunk in iter(lambda: body.read(8 * 1024**2), b""):
-            digest.update(chunk)
-        return digest.hexdigest()
 
     client = MlflowClient(tracking_uri=MLFLOW_URI)
     experiment = client.get_experiment_by_name(os.environ.get("AUTO_E2E_MLFLOW_EXPERIMENT", "auto-e2e"))
