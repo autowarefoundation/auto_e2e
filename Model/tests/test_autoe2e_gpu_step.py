@@ -70,13 +70,15 @@ class _Wrapped(nn.Module):
         return self.module(*args, **kwargs)
 
 
-def _timed_step(run_step) -> tuple[dict, float, float]:
-    torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()
-    started = time.perf_counter()
-    terms = run_step()
-    terms["total"].backward()
-    torch.cuda.synchronize()
+def _timed_step(run_step, steps: int = 3) -> tuple[dict, float, float]:
+    """Run ``steps`` forward-backward passes; time the last, after warm-up."""
+    for _ in range(steps):
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        started = time.perf_counter()
+        terms = run_step()
+        terms["total"].backward()
+        torch.cuda.synchronize()
     return terms, time.perf_counter() - started, torch.cuda.max_memory_allocated() / 2**30
 
 
