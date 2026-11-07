@@ -499,6 +499,9 @@ class _Scenario:
             _EgoState(float(index), 0.0)
             for index in range(65)
         ]
+        self.log_name = "log-a.db"
+        self.token = "token-a"
+        self.map_version = "nuplan-maps-v1.0"
         self.map_api = types.SimpleNamespace(map_name="us-nv-las-vegas-strip")
         self._detections = types.SimpleNamespace(
             tracked_objects=[_tracked_vehicle()]
@@ -506,6 +509,9 @@ class _Scenario:
 
     def get_ego_state_at_iteration(self, iteration):
         return self.states[iteration]
+
+    def get_ego_past_trajectory(self, iteration, *, time_horizon, num_samples):
+        return iter([_EgoState(float(index - 64), 0.0) for index in range(64)])
 
     def get_ego_future_trajectory(
         self,
@@ -851,15 +857,7 @@ def _camera_bundle() -> NuPlanCameraBundle:
 
 def _packing_scenario(map_name: str = "us-nv-las-vegas-strip") -> _Scenario:
     scenario = _Scenario()
-    scenario.log_name = "log-a.db"
-    scenario.token = "token-a"
-    scenario.map_version = "nuplan-maps-v1.0"
     scenario.map_api = types.SimpleNamespace(map_name=map_name)
-    scenario.get_ego_past_trajectory = (
-        lambda _iteration, *, time_horizon, num_samples: iter(
-            [_EgoState(float(index - 64), 0.0) for index in range(64)]
-        )
-    )
     return scenario
 
 
