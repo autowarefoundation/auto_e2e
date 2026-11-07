@@ -72,7 +72,7 @@ def match_pose(
     ``prior_pose`` [B, 3] the estimated crop pose and ``prior_covariance``
     [B, 3, 3] its EKF covariance (x, y in m, yaw in rad).
     """
-    with torch.autocast(bev_probability.device.type, enabled=False):
+    with torch.autocast(bev_probability.device.type, enabled=False), torch.backends.cudnn.flags(allow_tf32=False):
         return _match_pose(bev_probability.float(), map_context.float(), prior_pose.float(),
                            prior_covariance.float())
 
