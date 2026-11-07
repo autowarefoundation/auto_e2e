@@ -123,7 +123,7 @@ from model_components.losses import (
     RouteReconstructionLoss,
 )
 from data_processing.autobev_members import manifest_contract
-from model_components.autobev.geometry import IMAGE_H, IMAGE_W
+from model_components.autobev.geometry import AUTOBEV_CONTRACT, IMAGE_H, IMAGE_W
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
 from reactive_training_contracts import (
     REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
@@ -532,7 +532,7 @@ def test_stage_a_dataset_plan_rejects_previous_bev_taxonomy(tmp_path):
     [
         (
             {"autobev_geometry": {
-                **manifest_contract()["autobev_geometry"],
+                **AUTOBEV_CONTRACT,
                 "pc_range": [-30.0, -40.0, -5.0, 80.0, 40.0, 3.0],
             }},
             "different AutoBEV geometry",
