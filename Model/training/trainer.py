@@ -36,7 +36,7 @@ MAX_FAILURES: Final = 3
 LOG_EVERY_STEPS: Final = 10
 
 
-def AUTOCAST():  # noqa: N802 - reads like the context manager it returns
+def bf16_autocast():
     """bf16 autocast for network forwards."""
     return torch.autocast("cuda", dtype=torch.bfloat16)
 
@@ -170,11 +170,11 @@ def _stage2_terms(model, objective, batch, generator, schedule, step):
     # after the student's forward would invalidate its saved tensors.
     if bool(distortion.distorted.any()):
         network = model.module
-        with torch.no_grad(), preserved_batch_norm_statistics(network), AUTOCAST():
+        with torch.no_grad(), preserved_batch_norm_statistics(network), bf16_autocast():
             _, clean = network(**model_inputs(batch, localization))
         teacher, teacher_mask = aligned_teacher_bev(clean["planner_bev"], distortion)
         del clean
-    with AUTOCAST():
+    with bf16_autocast():
         controls, auxiliary = model(**model_inputs(distorted, localization))
     return objective(
         controls, auxiliary, distorted, auxiliary_weight=schedule.auxiliary_weight(step),
@@ -191,7 +191,7 @@ def _stage1_terms(model, objective, batch, generator):
     batch = restrict_to_visible(bev_augment(photometric(camera_augment(batch, every, generator), every, generator),
                                             generator))
     batch["autobev_dense_supervised"] = every.to(batch["visual_tiles"].device)
-    with AUTOCAST():
+    with bf16_autocast():
         outputs = model(batch["visual_tiles"], batch["camera_history_tiles"], batch["camera_projection_matrix"],
                         batch["camera_history_projection_matrix"], batch["autobev_image_projection"])
     return objective(outputs, batch)
