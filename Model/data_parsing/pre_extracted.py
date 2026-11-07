@@ -66,8 +66,6 @@ from torchvision import transforms
 # Stage 2 draws this share of its samples from the BEV-only packs so the
 # encoder keeps what it learned on the other rigs (autobev_integration 3.3).
 AUTOBEV_BEV_ONLY_SHARE: Final = 0.15
-# nuPlan packs supervise the planner; BEV-only packs carry only AutoBEV members.
-AUTOBEV_SAMPLE_KINDS: Final = ("planner", "autobev_only")
 # Every AutoBEV projection is a pinhole [3, 4] matrix to the cropped pixels.
 AUTOBEV_GEOMETRY_TYPE: Final = "rectified_pinhole"
 # Box counts differ per sample, so a batch keeps these as lists of tensors.
@@ -2246,12 +2244,11 @@ def _decode_sample(
 def read_autobev_manifest(shard_dir: str | Path) -> Mapping[str, object] | None:
     """Return the manifest of a pack with AutoBEV members, or None for others.
 
-    A pack that records ``autobev_members_version`` must match
-    ``manifest_contract()`` in every field and name a known ``sample_kind``;
-    any difference is refused rather than read with the wrong geometry.
+    A pack that records ``autobev_members_version`` must match the AutoBEV
+    member contract in every field; any difference is refused rather than
+    read with the wrong geometry.
     """
-    from data_processing.autobev_members import manifest_contract
-    from model_components.autobev.geometry import check_autobev_contract
+    from data_processing.autobev_members import check_manifest_contract
 
     path = Path(shard_dir) / "manifest.json"
     if not path.is_file():
@@ -2259,21 +2256,7 @@ def read_autobev_manifest(shard_dir: str | Path) -> Mapping[str, object] | None:
     manifest = json.loads(path.read_text())
     if "autobev_members_version" not in manifest:
         return None
-    check_autobev_contract(manifest.get("autobev_geometry"), source=str(path))
-    differing = sorted(
-        key
-        for key, value in manifest_contract().items()
-        if manifest.get(key) != value
-    )
-    if differing:
-        raise ValueError(
-            f"{path} has a different AutoBEV member contract: {differing}"
-        )
-    if manifest.get("sample_kind") not in AUTOBEV_SAMPLE_KINDS:
-        raise ValueError(
-            f"{path} has an unknown AutoBEV sample_kind "
-            f"{manifest.get('sample_kind')!r}"
-        )
+    check_manifest_contract(manifest, source=str(path))
     return manifest
 
 
