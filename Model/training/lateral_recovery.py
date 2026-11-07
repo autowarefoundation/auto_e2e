@@ -28,7 +28,9 @@ from typing import Any, Iterator, Mapping
 import torch
 import torch.nn.functional as F
 
+from model_components.autobev.geometry import AUTOBEV_GEOMETRY
 from navigation.geometry import (
+    AUTOE2E_NAVIGATION_GEOMETRY,
     MAP_CHANNEL_COUNT,
     MapChannel,
     NavigationRasterGeometry,
@@ -277,21 +279,22 @@ def recovery_trajectory(
 
 def sample_lateral_shift(
     batch: Mapping[str, Any],
-    probability: float,
+    chosen: torch.Tensor,
+    generator: torch.Generator,
 ) -> LateralShift:
-    """Draw a shift per sample from the CPU generator seeded by the trainer.
+    """Draw a shift for the ``chosen`` [B] samples from the trainer's CPU generator.
 
-    A sample is only shifted when its future moves at least
+    A chosen sample is only shifted when its future moves at least
     ``MIN_RECOVERY_PATH_M`` within a valid recovery window and its past moves
     at least ``MIN_HISTORY_PATH_M`` within the history blend window.
     """
     xy = batch["trajectory_xy_m"]
     device = xy.device
     batch_size = int(xy.shape[0])
-    draws = torch.rand(3, batch_size)
-    chosen = (draws[0] < probability).to(device)
-    offset = ((2.0 * draws[1] - 1.0) * MAX_OFFSET_M).to(device)
-    yaw = ((2.0 * draws[2] - 1.0) * MAX_YAW_RAD).to(device)
+    draws = torch.rand(2, batch_size, generator=generator)
+    chosen = chosen.to(device=device, dtype=torch.bool)
+    offset = ((2.0 * draws[0] - 1.0) * MAX_OFFSET_M).to(device)
+    yaw = ((2.0 * draws[1] - 1.0) * MAX_YAW_RAD).to(device)
     points = torch.cat(
         [xy.new_zeros(batch_size, 1, 2), xy.float()],
         dim=1,
@@ -531,122 +534,85 @@ def _history_camera_targets(
     return (past + past @ correction[:, :, None]).to(history.dtype)
 
 
+def _shift_boxes(boxes: torch.Tensor, offset_m: torch.Tensor, yaw_rad: torch.Tensor) -> torch.Tensor:
+    """Move [N, 9] ego-frame boxes (x, y, z, l, w, h, yaw, vx, vy) into ``E'``."""
+    cos, sin = torch.cos(yaw_rad), torch.sin(yaw_rad)
+    x, y = boxes[:, 0], boxes[:, 1] - offset_m
+    vx, vy = boxes[:, 7], boxes[:, 8]
+    moved = boxes.clone()
+    moved[:, 0], moved[:, 1] = cos * x + sin * y, -sin * x + cos * y
+    moved[:, 6] = torch.remainder(boxes[:, 6] - yaw_rad + math.pi, 2.0 * math.pi) - math.pi
+    moved[:, 7], moved[:, 8] = cos * vx + sin * vy, -sin * vx + cos * vy
+    return moved
+
+
 def apply_lateral_recovery(
     batch: Mapping[str, Any],
     shift: LateralShift,
     *,
     method: str,
-    geometry: NavigationRasterGeometry,
 ) -> dict[str, Any]:
-    """Return a copy of ``batch`` with the active samples moved to ``E'``."""
-    if method not in LATERAL_RECOVERY_METHODS:
-        raise ValueError(f"unknown lateral recovery method {method!r}")
-    for key in ("camera_projection_matrix", "camera_history_projection_matrix"):
-        if not torch.is_tensor(batch.get(key)):
-            raise ValueError(f"lateral recovery requires packed {key}")
+    """Return a copy of ``batch`` with the active samples moved to ``E'``.
+
+    The navigation rasters move on their 0.4 m grid and the BEV labels and
+    boxes on the AutoBEV grid. ``image_warp`` changes what each camera sees,
+    so the LiDAR depth of those samples no longer matches and is dropped.
+    """
     out = dict(batch)
     active = shift.active
-    egomotion, lateral, heading = shift_egomotion_history(
-        batch["egomotion_history"],
-        shift,
-    )
+    egomotion, lateral, heading = shift_egomotion_history(batch["egomotion_history"], shift)
     out["egomotion_history"] = egomotion
-    out["initial_speed_mps"] = _history_signals(egomotion)[:, -1, 0].to(
-        batch["initial_speed_mps"].dtype
-    )
+    out["initial_speed_mps"] = _history_signals(egomotion)[:, -1, 0].to(batch["initial_speed_mps"].dtype)
     out["trajectory_xy_m"] = recovery_trajectory(
-        batch["trajectory_xy_m"],
-        shift,
-        current_curvature(batch["egomotion_history"]),
+        batch["trajectory_xy_m"], shift, current_curvature(batch["egomotion_history"]),
     )
+    out["map_context"] = _shift_map_context(batch["map_context"], shift, AUTOE2E_NAVIGATION_GEOMETRY)
+    out["route_mask"] = _resample(batch["route_mask"], shift, AUTOE2E_NAVIGATION_GEOMETRY, "nearest")
+    for key in ("bev_segmentation_target", "bev_segmentation_valid"):
+        out[key] = _resample(batch[key], shift, AUTOBEV_GEOMETRY, "nearest")
+    out["autobev_boxes"] = [
+        _shift_boxes(boxes, offset, yaw)
+        for boxes, offset, yaw in zip(batch["autobev_boxes"], shift.offset_m.float(), shift.yaw_rad.float())
+    ]
 
-    out["map_context"] = _shift_map_context(batch["map_context"], shift, geometry)
-    for key in ("route_mask", "bev_segmentation_target", "bev_segmentation_valid"):
-        if torch.is_tensor(batch.get(key)) and batch[key].ndim == 4:
-            out[key] = _resample(batch[key], shift, geometry, "nearest")
-
-    to_original = ego_shift_transform(
-        shift.offset_m.float(),
-        shift.yaw_rad.float(),
-    )
+    to_original = ego_shift_transform(shift.offset_m.float(), shift.yaw_rad.float())
     current = batch["camera_projection_matrix"]
     history = batch["camera_history_projection_matrix"]
-    front = batch.get("front_camera_projection_matrix")
     if method == "projection":
-        out["camera_projection_matrix"] = (
-            current.float() @ to_original[:, None]
-        ).to(current.dtype)
+        out["camera_projection_matrix"] = (current.float() @ to_original[:, None]).to(current.dtype)
         out["camera_history_projection_matrix"] = (
             history.float() @ to_original[:, None, None]
         ).to(history.dtype)
-        if torch.is_tensor(front):
-            out["front_camera_projection_matrix"] = (
-                front.float() @ to_original[:, None]
-            ).to(front.dtype)
         return out
 
     to_shifted = torch.linalg.inv(to_original)
-    out["visual_tiles"] = _warp_views(
-        batch["visual_tiles"],
-        current,
-        current.float() @ to_shifted[:, None],
-        active,
-    )
-    if torch.is_tensor(front) and torch.is_tensor(batch.get("front_camera_tile")):
-        out["front_camera_tile"] = _warp_views(
-            batch["front_camera_tile"][:, None],
-            front,
-            front.float() @ to_shifted[:, None],
-            active,
-        )[:, 0]
-    displaced = _history_camera_targets(
-        history,
-        _history_signals(batch["egomotion_history"]),
-        lateral,
-        heading,
-    )
+    out["visual_tiles"] = _warp_views(batch["visual_tiles"], current, current.float() @ to_shifted[:, None], active)
+    displaced = _history_camera_targets(history, _history_signals(batch["egomotion_history"]), lateral, heading)
     history_tiles = batch["camera_history_tiles"].clone()
     for frame in range(history.shape[1]):
         row = _HISTORY_IMAGE_ROWS[frame]
-        moved = active & (
-            (lateral[:, row] != 0.0) | (heading[:, row] != 0.0)
-        )
-        history_tiles[:, frame] = _warp_views(
-            history_tiles[:, frame],
-            history[:, frame],
-            displaced[:, frame],
-            moved,
-        )
+        moved = active & ((lateral[:, row] != 0.0) | (heading[:, row] != 0.0))
+        history_tiles[:, frame] = _warp_views(history_tiles[:, frame], history[:, frame], displaced[:, frame], moved)
     out["camera_history_tiles"] = history_tiles
-    out["camera_history_projection_matrix"] = (
-        displaced.float() @ to_original[:, None, None]
-    ).to(history.dtype)
+    out["camera_history_projection_matrix"] = (displaced.float() @ to_original[:, None, None]).to(history.dtype)
+    out["autobev_depth"] = batch["autobev_depth"] * (~active).reshape(-1, 1, 1, 1).to(batch["autobev_depth"].dtype)
     return out
 
 
 def aligned_clean_planner_bev(
     clean_planner_bev: torch.Tensor,
     shift: LateralShift,
-    geometry: NavigationRasterGeometry,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Resample the clean planner BEV into ``E'`` for the consistency loss.
+    """Resample the clean planner BEV (AutoBEV grid) into ``E'`` for the consistency loss.
 
-    Returns the aligned feature and a ``[B,H,W]`` mask of active samples' cells
-    that exist in both frames.
+    Returns the aligned feature and a ``[B,H,W]`` mask of the cells that exist
+    in both frames.
     """
-    grid, inside = shifted_raster_grid(
-        shift,
-        geometry,
-        *clean_planner_bev.shape[-2:],
-    )
+    grid, inside = shifted_raster_grid(shift, AUTOBEV_GEOMETRY, *clean_planner_bev.shape[-2:])
     aligned = F.grid_sample(
-        clean_planner_bev.detach().float(),
-        grid,
-        mode="bilinear",
-        padding_mode="zeros",
-        align_corners=False,
+        clean_planner_bev.detach().float(), grid, mode="bilinear", padding_mode="zeros", align_corners=False,
     )
-    return aligned, inside & shift.active[:, None, None]
+    return aligned, inside
 
 
 @contextlib.contextmanager
@@ -681,8 +647,3 @@ def feature_consistency_kl(
     per_cell = (log_clean.exp() * (log_clean - log_shifted)).sum(dim=1)
     weight = mask.to(per_cell.dtype)
     return (per_cell * weight).sum() / weight.sum().clamp_min(1.0)
-
-
-def feature_bottleneck_kl(planner_bev: torch.Tensor) -> torch.Tensor:
-    """Mean ``KL(N(mu, 1) || N(0, 1)) = 0.5 mu^2`` over the planner BEV."""
-    return 0.5 * planner_bev.float().pow(2).mean()
