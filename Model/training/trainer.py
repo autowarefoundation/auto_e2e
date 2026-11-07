@@ -154,6 +154,7 @@ def model_inputs(batch: dict[str, Any], localization) -> dict[str, torch.Tensor]
 
 def _stage2_terms(model, objective, batch, generator, schedule, step):
     """One stage 2 forward: localization noise, a distortion per sample, the clean teacher and the losses."""
+    from model_components.autobev.geometry import BEV_H, BEV_W, EMBED_DIM
     from training.autobev_augment import restrict_to_visible
     from training.distortion_mix import aligned_teacher_bev, apply_distortions
     from training.lateral_recovery import preserved_batch_norm_statistics
@@ -163,15 +164,20 @@ def _stage2_terms(model, objective, batch, generator, schedule, step):
     distorted, distortion = apply_distortions(batch, generator)
     distorted = restrict_to_visible(distorted)
     distorted["autobev_dense_supervised"] = distorted["planner_supervised"]
-    controls, auxiliary = model(**model_inputs(distorted, localization))
-    teacher = torch.zeros_like(auxiliary["planner_bev"])
-    teacher_mask = torch.zeros_like(teacher[:, 0], dtype=torch.bool)
-    # The clean teacher pass is only needed when some sample was distorted.
+    size = batch["visual_tiles"].shape[0]
+    device = batch["visual_tiles"].device
+    teacher = torch.zeros(size, EMBED_DIM, BEV_H, BEV_W, device=device)
+    teacher_mask = torch.zeros(size, BEV_H, BEV_W, dtype=torch.bool, device=device)
+    # The clean teacher pass is only needed when some sample was distorted. It
+    # runs before the student: restoring the BatchNorm statistics in place
+    # after the student's forward would invalidate its saved tensors.
     if bool(distortion.distorted.any()):
         network = model.module
         with torch.no_grad(), preserved_batch_norm_statistics(network):
             _, clean = network(**model_inputs(batch, localization))
         teacher, teacher_mask = aligned_teacher_bev(clean["planner_bev"], distortion)
+        del clean
+    controls, auxiliary = model(**model_inputs(distorted, localization))
     return objective(
         controls, auxiliary, distorted, auxiliary_weight=schedule.auxiliary_weight(step),
         teacher_bev=teacher, teacher_mask=teacher_mask,
