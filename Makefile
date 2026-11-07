@@ -52,11 +52,6 @@ test-local: test-local-$(SUITE) ## local tests (make test-local SUITE=all|map|in
 
 ci: lint typecheck test ## exactly what CI runs
 
-# --- Run ---------------------------------------------------------------------
-
-benchmark: ## speed benchmark
-	cd Model/speed_benchmark && python speed_benchmark.py
-
 help: ## list available targets
 	@echo "Getting started (activate your virtualenv first — targets use the active python/pip):"
 	@echo "  make setup-local                  install everything for local dev (CPU torch wheels)"
@@ -70,4 +65,4 @@ help: ## list available targets
 	@echo ""
 	@echo "Defaults: TORCH_CHANNEL=$(TORCH_CHANNEL) (cpu | cu118 | cu126 | cu128 | ...), SUITE=$(SUITE) (all | map | integration), PYTEST='$(PYTEST)'"
 
-.PHONY: setup setup-map setup-local deps deps-map lint typecheck test test-local test-local-all test-local-map test-local-integration ci benchmark help
+.PHONY: setup setup-map setup-local deps deps-map lint typecheck test test-local test-local-all test-local-map test-local-integration ci help
