@@ -27,7 +27,12 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Final, Sequence
+
+# Split groups with this prefix fall in bucket 0, which every non-empty
+# validation split contains, so a geographic hold-out (nuPlan Pittsburgh)
+# never reaches training whatever the validation fraction.
+HELDOUT_SPLIT_GROUP_PREFIX: Final = "heldout-"
 
 from data_processing.contract_versions import (
     GEOMETRY_VERSION,
@@ -64,6 +69,8 @@ def split_bucket(split_group_uid: str, buckets: int = 10) -> int:
         raise ValueError("split_group_uid must not be empty")
     if buckets < 2:
         raise ValueError("buckets must be at least 2")
+    if split_group_uid.startswith(HELDOUT_SPLIT_GROUP_PREFIX):
+        return 0
     digest = hashlib.blake2b(
         split_group_uid.encode("utf-8"), digest_size=8
     ).digest()
