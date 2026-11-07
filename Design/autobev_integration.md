@@ -209,9 +209,9 @@ epochs, so the clean data is seen three times with different views.
   (`checkpoint_interval_steps`, set from the measured step time). Ray Train
   stores them under the run prefix; resume reads the last one. Run files go
   through `pyarrow.fs`, so a local directory and S3 take the same path.
-- A full-size step on one RTX PRO 6000 (g7e) took 4.97 s per sample and
-  15 GB in stage 1 (batch 1) and 6.73 s per sample and 28 GB in stage 2
-  (batch 2, with the clean teacher pass), both measured on the first step.
+- A full-size step on one RTX PRO 6000 (g7e), timed on the third step, takes
+  4.0 s per sample and 16 GB in stage 1 (batch 1) and 6.3 s per sample and
+  29 GB in stage 2 (batch 2, with the clean teacher pass).
 - Lightweight validation runs asynchronously: a one-GPU task starts next to the
   training task, watches the run's checkpoint prefix, and evaluates each new
   checkpoint on a fixed held-out subset (ADE/FDE on nuPlan validation, BEV IoU
