@@ -449,7 +449,6 @@ def pack_partition(
             datasets_bucket=datasets_bucket,
             archive_ids=list(unit_ids),
             limit_total_scenarios=int(plan.partition_limits[partition_index]),
-            image_size=spec.image_size,
             samples_per_shard=int(plan.pack_params["samples_per_shard"]),
             max_rejection_fraction=float(plan.pack_params["max_rejection_fraction"]),
             aws_region=AWS_REGION,
