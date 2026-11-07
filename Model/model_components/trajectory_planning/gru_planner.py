@@ -40,6 +40,10 @@ class GRUPlanner(nn.Module):
         self.output_proj = nn.Linear(embed_dim, embed_dim)
         self.gru = nn.GRU(embed_dim, embed_dim)
         self.control_head = nn.Linear(embed_dim, num_signals)
+        # Zero controls integrate to constant speed straight ahead, a sane first
+        # plan; random ones curve off and make the first updates erratic.
+        nn.init.zeros_(self.control_head.weight)
+        nn.init.zeros_(self.control_head.bias)
 
     def _cross_attend(self, query: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
         batch_size = query.shape[0]
