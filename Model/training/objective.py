@@ -71,7 +71,7 @@ class AutoE2EObjective(nn.Module):
     ) -> dict[str, torch.Tensor]:
         supervised = batch["planner_supervised"].bool()
         trajectory = self.trajectory(
-            controls, batch["trajectory_xy_m"], batch["trajectory_valid"].bool() & supervised[:, None],
+            controls.float(), batch["trajectory_xy_m"], batch["trajectory_valid"].bool() & supervised[:, None],
             batch["initial_speed_mps"],
         )
         route = self.route(
