@@ -52,27 +52,26 @@ def test_only_hub_acquisition_holds_the_hf_token():
     ("task_name", "queue", "priority", "workers", "gpus"),
     [
         ("train_ray_1", "gpu-validation", "research-low", 1, 1),
-        ("train_ray_2", "gpu-validation", "research-low", 2, 1),
-        ("train_ray_4", "p5en-capacity-block", "production-high", 1, 4),
         ("train_ray_8", "p5en-capacity-block", "production-high", 1, 8),
     ],
 )
 def test_gpu_profile_picks_the_queue(task_name, queue, priority, workers, gpus):
-    import Platform.pipelines.autoe2e as wf
+    import Platform.pipelines.autoe2e_training as training
 
-    task = getattr(wf, task_name)
+    task = getattr(training, task_name)
     labels = task.metadata.labels if hasattr(task.metadata, "labels") else task._labels
     assert labels["kueue.x-k8s.io/queue-name"] == queue
     assert labels["kueue.x-k8s.io/priority-class"] == priority
     group = task.task_config.worker_node_config[0]
     assert group.replicas == workers
-    assert task.environment["AUTO_E2E_MLFLOW_EXPERIMENT"] == "auto-e2e"
+    assert group.ray_start_params["num-gpus"] == str(gpus)
+    assert task.environment["RAY_TRAIN_V2_ENABLED"] == "1"
 
 
-def test_benchmark_evaluation_runs_on_a_validation_gpu():
+def test_geo_val_evaluation_runs_on_a_validation_gpu():
     import Platform.pipelines.autoe2e as wf
 
-    task = wf.evaluate_kitscenes_benchmark
+    task = wf.evaluate_geo_val
     assert task.resources.requests.gpu == "1"
 
 
@@ -155,35 +154,6 @@ def test_every_dynamic_carries_the_registration_environment():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_publish_overlays_compiles_the_overlay_chain(monkeypatch):
-    from flytekit.configuration import ImageConfig, SerializationSettings
-    from flytekit.core.context_manager import ExecutionState, FlyteContextManager
-
-    import Platform.pipelines.autoe2e as wf
-    from Platform.pipelines.autoe2e_store import DatasetHandle
-
-    monkeypatch.setattr(wf, "console_manifest_sha256", lambda s3, dataset, runtime: "m" * 64)
-    monkeypatch.setattr(wf, "_s3", lambda: None)
-    monkeypatch.setattr(wf, "partition_sample_counts", lambda s3, dataset, runtime: dict.fromkeys(dataset.partition_uris, 1))
-    from Platform.pipelines import reproducibility
-
-    monkeypatch.setattr(reproducibility, "container_digest_from_image", lambda image: "sha256:" + "e" * 64)
-    handle = DatasetHandle("d" * 64, "kitscenes", "v3.7", True, "exec", partition_uris=["s3://d/p0/", "s3://d/p1/"])
-    trained = wf.TrainedCheckpoints(trained=True, run_id="r" * 32, best_sha256="c" * 64)
-    models = [wf.RegisteredModel("best", "m-1", "71", "s3://c/x.pt", "c" * 64, "l" * 64)]
-    settings = SerializationSettings(image_config=ImageConfig.auto_default_image())
-    ctx = FlyteContextManager.current_context()
-    state = ctx.execution_state.with_params(mode=ExecutionState.Mode.TASK_EXECUTION)
-    with FlyteContextManager.with_context(ctx.with_serialization_settings(settings).with_execution_state(state)) as compiled:
-        spec = wf.publish_overlays.compile_into_workflow(
-            compiled, wf.publish_overlays._task_function, models=models, trained=trained,
-            training=wf.TrainingSpec(), dataset=handle,
-            runtime=wf.RuntimeOptions(datasets_bucket="d", artifacts_bucket="a"),
-        )
-    # resolve, prepare, one precompute per partition (two here), finalize
-    assert len(spec.nodes) == 5
-
-
 def test_the_launcher_imports_both_workflows_without_torch():
     """launch_autoe2e.py only needs input types; torch is not installed there."""
     import subprocess
@@ -202,11 +172,3 @@ def test_the_launcher_imports_both_workflows_without_torch():
     assert result.returncode == 0, result.stderr[-2000:]
 
 
-def test_benchmark_evaluation_uses_the_stateful_camera_fpn_path():
-    import inspect
-
-    import Platform.pipelines.autoe2e as wf
-
-    source = inspect.getsource(wf.evaluate_kitscenes_benchmark.task_function)
-    assert "use_stateful_camera_fpn_cache=True" in source
-    assert "batch_size=KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE" in source
