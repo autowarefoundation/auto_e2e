@@ -41,6 +41,7 @@ from data_processing.reactive_training_artifacts import (
     encode_trajectory_xy,
 )
 from model_components.autobev.geometry import (
+    AUTOBEV_CONTRACT,
     BEV_H,
     BEV_W,
     HISTORY_FRAMES,
@@ -153,7 +154,7 @@ def test_boxes_round_trip_and_refuse_unknown_classes():
         [6.0, 3.0, 0.9, 0.6, 0.6, 1.8, 0.0, 0.0, 1.0],
     ])
 
-    decoded, labels = decode_boxes(encode_boxes(boxes, [0, 1]))
+    decoded, labels = decode_boxes(encode_boxes(boxes, np.asarray([0, 1])))
 
     np.testing.assert_allclose(decoded, boxes, rtol=1e-6)
     assert labels.tolist() == [0, 1]
@@ -161,7 +162,7 @@ def test_boxes_round_trip_and_refuse_unknown_classes():
     assert empty.shape == (0, len(BOX_COLUMNS))
     assert empty_labels.shape == (0,)
     with pytest.raises(ValueError, match="BOX_CLASSES"):
-        encode_boxes(boxes, [0, 4])
+        encode_boxes(boxes, np.asarray([0, 4]))
 
 
 def _bev_members() -> dict[str, bytes]:
@@ -187,7 +188,7 @@ def _bev_members() -> dict[str, bytes]:
         ),
         "boxes.npz": encode_boxes(
             np.asarray([[10.0, 0.0, 0.8, 4.5, 1.9, 1.6, 0.0, 0.0, 0.0]]),
-            [0],
+            np.asarray([0]),
         ),
     })
     return members
@@ -350,7 +351,7 @@ def test_collate_keeps_variable_box_counts_as_lists():
     [
         (
             {"autobev_geometry": {
-                **manifest_contract()["autobev_geometry"],
+                **AUTOBEV_CONTRACT,
                 "pc_range": [-30.0, -40.0, -5.0, 80.0, 40.0, 3.0],
             }},
             "different AutoBEV geometry",
