@@ -425,9 +425,12 @@ class MultiScaleSpatialCrossAttention(nn.Module):
         """Sample camera features at projected pillar points.
 
         ``reference_depth_weight`` ([B, V, N, Z], optional) scales the
-        attention weight of every sampling point by how likely its pillar
-        point's depth is under the camera's predicted depth distribution
-        (depth-aware lifting as in DFA3D). None keeps the original behavior.
+        attention weight of every sampling point by how likely its anchor
+        pillar point's depth is under the camera's predicted depth
+        distribution (depth-aware lifting as in DFA3D), then renormalizes
+        per query and head. Sampling points are offset from their anchor in
+        the image plane, so the anchor depth is an approximation for them.
+        None keeps the original behavior.
         """
         batch_size, query_count, channels = query.shape
         if channels != self.embed_dim or len(features) != self.num_levels:
@@ -506,6 +509,13 @@ class MultiScaleSpatialCrossAttention(nn.Module):
                     weights = weights * depth_weight[:, :, None, None, :].to(
                         weights.dtype
                     )
+                    # Renormalize over levels and points so the depth weight
+                    # redistributes attention within a view instead of
+                    # shrinking the view's contribution to the camera mean.
+                    weights = weights / weights.sum(
+                        dim=(-2, -1),
+                        keepdim=True,
+                    ).clamp_min(1e-6)
                 attended = chunk_query.new_zeros(
                     batch_size,
                     chunk_size,
