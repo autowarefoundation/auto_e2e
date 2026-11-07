@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import tempfile
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Final
 
@@ -154,19 +154,22 @@ def _load(model, checkpoint_dir: str) -> dict:
     return state["metadata"]
 
 
-def watch(run: TrainRun, calibration: Iterable, validation: Iterable) -> list[dict]:
-    """Validate every checkpoint of ``run`` until its last step; returns the results in order."""
+def watch(run: TrainRun, calibration: Callable[[], Iterable], validation: Callable[[], Iterable]) -> list[dict]:
+    """Validate every checkpoint of ``run`` until its last step; returns the results in order.
+
+    ``calibration`` and ``validation`` make a fresh pass over their split each
+    time: holding 512 full T8 samples in memory would take about 75 GB.
+    """
     from model_components import AutoE2E
     from model_components.autobev import AutoBEV
 
     device = torch.device("cuda")
     run_uri = f"{run.storage_uri.rstrip('/')}/{run.run_name}"
-    calibration, validation = list(calibration), list(validation)
     model = (AutoBEV(pretrained_backbone=False) if run.stage == 1 else AutoE2E(pretrained_backbone=False)).to(device)
     baseline = None
     if run.stage == 2:
         _load(model.Reactive_E2E.AutoBEV, run.parent_checkpoint_uri.rstrip("/"))
-        baseline = validate(model, run.stage, calibration, validation, device)
+        baseline = validate(model, run.stage, calibration(), validation(), device)
         _write_json(f"{run_uri}/parent_{RESULT_FILE}", baseline)
     results, backoffs = [], 0
     while True:
@@ -180,7 +183,7 @@ def watch(run: TrainRun, calibration: Iterable, validation: Iterable) -> list[di
         for checkpoint in pending:
             metadata = _load(model, checkpoint)
             result = {"step": metadata["step"], "checkpoint": checkpoint,
-                      **validate(model, run.stage, calibration, validation, device)}
+                      **validate(model, run.stage, calibration(), validation(), device)}
             _write_json(f"{checkpoint}/{RESULT_FILE}", result)
             results.append(result)
             if baseline is not None and drivable_score(result["metrics"]) < (1 - BACKOFF_DROP) * drivable_score(
