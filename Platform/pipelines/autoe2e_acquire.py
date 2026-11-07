@@ -1,12 +1,14 @@
 """wf_acquire_raw_snapshot: copy upstream data into an S3 raw snapshot once.
 
-This is the only code that may reach Hugging Face or OpenStreetMap. Two
-byte sources exist:
+This is the only code that may reach Hugging Face, OpenStreetMap or the
+AutoBEV-only upstreams. Three byte sources exist:
 
 - ``hf``: download a unit at a pinned revision (holds the ``hf-token`` secret);
   an L2D snapshot also downloads one OSM extract as its ``osm`` unit;
 - ``recovery``: re-tar unit prefixes that an earlier Flyte run already
-  downloaded, listed in a frozen recovery manifest. No Hub access.
+  downloaded, listed in a frozen recovery manifest. No Hub access;
+- ``upstream``: nuScenes and Argoverse 2 from public S3 buckets, ONCE and
+  SimBEV from Google Drive (``autobev_sources``). No secret.
 
 nuPlan keeps its existing receipt-based acquisition and manifest schema.
 """
@@ -26,6 +28,7 @@ from typing import List, Optional
 from flytekit import PodTemplate, Resources, Secret, dynamic, map_task, task, workflow
 from flytekit.types.file import FlyteFile
 
+from Platform.pipelines.autoe2e_adapters import AUTOBEV_SOURCES
 from Platform.pipelines.autoe2e_dataset import AutoE2EDataset, ManifestRef, ReasoningSpec
 from Platform.pipelines.autoe2e_env import PIPELINE_ENV
 from Platform.pipelines.autoe2e_snapshot import (
@@ -51,6 +54,7 @@ AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
 UPSTREAM = {
     AutoE2EDataset.KITSCENES: "KIT-MRT/KITScenes-Multimodal",
     AutoE2EDataset.L2D: "yaak-ai/L2D",
+    **{dataset: source.upstream for dataset, source in AUTOBEV_SOURCES.items()},
 }
 RECOVERY_SCHEMA = "kitscenes_recovery_manifest_v1"
 # Karpenter consolidation evicted the first acquisition's download pods as
@@ -227,6 +231,15 @@ def plan_acquisition(
         return AcquisitionPlan(prefix, sources, json.dumps(provenance, sort_keys=True))
     if dataset is AutoE2EDataset.L2D:
         return _plan_l2d(prefix, revision, split, units, osm_extract_url, osm_extract_sha256, provenance)
+    if dataset in AUTOBEV_SOURCES:
+        from Platform.pipelines.autobev_sources import plan_units
+
+        # These snapshots hold every training unit of the upstream release;
+        # a smaller build uses DatasetSpec.unit_limit instead.
+        if units or split != "train":
+            raise ValueError(f"{dataset.value} acquisition takes no units and only the train split")
+        unit_ids, upstream_provenance = plan_units(dataset)
+        return AcquisitionPlan(prefix, [UnitSource(u) for u in unit_ids], json.dumps(upstream_provenance, sort_keys=True))
     if dataset is not AutoE2EDataset.KITSCENES:
         raise NotImplementedError(f"Hub acquisition is not implemented for {dataset.value}")
     if not units:
@@ -425,6 +438,35 @@ def acquire_unit_from_hub(
 
 @task(
     container_image=DATA_PREP_IMAGE,
+    pod_template=_DO_NOT_DISRUPT,
+    # The largest unit, ONCE's 10.4 GB LiDAR tar, exists as download, tree
+    # and unit tar at once.
+    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="80Gi"),
+    limits=Resources(cpu="4", mem="16Gi", ephemeral_storage="80Gi"),
+    retries=2,
+    # Drive quota back-off can take hours; a stalled transfer still fails.
+    timeout=timedelta(hours=8),
+)
+def acquire_unit_from_upstream(
+    dataset: AutoE2EDataset,
+    plan: AcquisitionPlan,
+    source: UnitSource,
+    datasets_bucket: str,
+) -> UnitEntry:
+    """Fetch one nuScenes, Argoverse 2, ONCE or SimBEV unit as the plan says, then tar it."""
+    from Platform.pipelines.autobev_sources import fetch_unit
+
+    work = Path(tempfile.mkdtemp(prefix="autoe2e-acquire-"))
+    root = work / "tree"
+    fetch_unit(dataset, source.unit_id, json.loads(plan.provenance_json), root, work)
+    tar_path = work / "unit.tar"
+    members = tar_tree(root, source.unit_id, tar_path)
+    shutil.rmtree(root)
+    return upload_unit(_s3(), bucket=datasets_bucket, prefix=plan.prefix, unit_id=source.unit_id, tar_path=tar_path, members=members)
+
+
+@task(
+    container_image=DATA_PREP_IMAGE,
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="1", mem="2Gi"),
     retries=2,
@@ -588,6 +630,11 @@ def _acquire(
                 ),
                 concurrency=concurrency,
             )(source=plan.sources)
+    elif dataset in AUTOBEV_SOURCES:
+        entries = map_task(
+            functools.partial(acquire_unit_from_upstream, dataset=dataset, plan=plan, datasets_bucket=datasets_bucket),
+            concurrency=concurrency,
+        )(source=plan.sources)
     else:
         entries = map_task(
             functools.partial(
