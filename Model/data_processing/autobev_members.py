@@ -154,7 +154,7 @@ def encode_depth(
         u, v, d = u[inside].astype(np.int32), v[inside].astype(np.int32), d[inside]
         order = np.lexsort((d, v * IMAGE_W + u))
         flat = (v * IMAGE_W + u)[order]
-        first = np.concatenate([[True], flat[1:] != flat[:-1]])
+        first = np.concatenate([[True], flat[1:] != flat[:-1]])[: len(flat)]
         arrays[f"uv_{view}"] = np.stack([u[order][first], v[order][first]], 1).astype(np.uint16)
         arrays[f"depth_{view}"] = d[order][first].astype(np.float16)
     output = io.BytesIO()
