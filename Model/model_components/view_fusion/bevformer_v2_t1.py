@@ -59,6 +59,7 @@ def _checkpoint_encoder_layer(
     reference_mask: torch.Tensor,
     level_embeddings: torch.Tensor,
     camera_embeddings: torch.Tensor,
+    reference_depth_weight: torch.Tensor | None,
     *features: torch.Tensor,
 ) -> torch.Tensor:
     return layer(
@@ -72,6 +73,7 @@ def _checkpoint_encoder_layer(
         num_views=num_views,
         level_embeddings=level_embeddings,
         camera_embeddings=camera_embeddings,
+        reference_depth_weight=reference_depth_weight,
     )
 
 
@@ -418,7 +420,15 @@ class MultiScaleSpatialCrossAttention(nn.Module):
         level_embeddings: torch.Tensor,
         camera_embeddings: torch.Tensor,
         content_delta_only: bool = False,
+        reference_depth_weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Sample camera features at projected pillar points.
+
+        ``reference_depth_weight`` ([B, V, N, Z], optional) scales the
+        attention weight of every sampling point by how likely its pillar
+        point's depth is under the camera's predicted depth distribution
+        (depth-aware lifting as in DFA3D). None keeps the original behavior.
+        """
         batch_size, query_count, channels = query.shape
         if channels != self.embed_dim or len(features) != self.num_levels:
             raise ValueError("spatial cross-attention input differs from contract")
@@ -487,6 +497,15 @@ class MultiScaleSpatialCrossAttention(nn.Module):
                 weights = weights.flatten(-2).softmax(dim=-1).reshape_as(
                     weights
                 )
+                if reference_depth_weight is not None:
+                    depth_weight = reference_depth_weight[
+                        :,
+                        view_index,
+                        start:stop,
+                    ][..., anchor_indices]
+                    weights = weights * depth_weight[:, :, None, None, :].to(
+                        weights.dtype
+                    )
                 attended = chunk_query.new_zeros(
                     batch_size,
                     chunk_size,
@@ -633,6 +652,7 @@ class BEVFormerV2T1EncoderLayer(nn.Module):
         num_views: int,
         level_embeddings: torch.Tensor,
         camera_embeddings: torch.Tensor,
+        reference_depth_weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
         query = self.norms[0](
             self.self_attention(
@@ -651,6 +671,7 @@ class BEVFormerV2T1EncoderLayer(nn.Module):
                 num_views=num_views,
                 level_embeddings=level_embeddings,
                 camera_embeddings=camera_embeddings,
+                reference_depth_weight=reference_depth_weight,
             )
         )
         return self.norms[2](query + self.ffn(query))
@@ -955,6 +976,7 @@ class BEVFormerV2T1ViewFusion(nn.Module):
         projection=None,
         geometry_type=None,
         image_transform=None,
+        reference_depth_weight=None,
     ) -> torch.Tensor:
         if len(multi_scale_features) != self.num_levels:
             raise ValueError(
@@ -1003,6 +1025,7 @@ class BEVFormerV2T1ViewFusion(nn.Module):
                     reference_mask,
                     self.level_embeddings,
                     self.camera_embeddings,
+                    reference_depth_weight,
                     *multi_scale_features,
                     use_reentrant=True,
                 )
@@ -1018,6 +1041,7 @@ class BEVFormerV2T1ViewFusion(nn.Module):
                     num_views=num_views,
                     level_embeddings=self.level_embeddings,
                     camera_embeddings=self.camera_embeddings,
+                    reference_depth_weight=reference_depth_weight,
                 )
         observed = reference_mask.any(dim=3).any(dim=1)
         if observed.shape[0] == 1 and batch_size > 1:
