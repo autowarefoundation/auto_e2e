@@ -40,14 +40,15 @@ from data_parsing.nuplan.packing import (
     pack_nuplan_reactive_scenarios,
 )
 from navigation.contracts import canonical_json_bytes
+from model_components.autobev.geometry import IMAGE_H, IMAGE_W
 from reactive_training_contracts import (
     REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
     REACTIVE_BEVFORMER_FRAME_OFFSETS,
     REACTIVE_BEVFORMER_HISTORY_FRAMES,
-    REACTIVE_CAMERA_IMAGE_SIZE,
-    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
-    REACTIVE_FRONT_CAMERA_INDEX,
 )
+
+
+_TEST_MAP_NAME = "us-nv-las-vegas-strip"
 
 
 def _scenario(
@@ -468,11 +469,12 @@ def test_nuplan_partition_merge_preserves_current_manifest(
         for key in _NUPLAN_MANIFEST_INVARIANT_KEYS
     )
     assert merged["schema_version"] == NUPLAN_PACK_MANIFEST_VERSION
-    assert merged["image_size"] == REACTIVE_CAMERA_IMAGE_SIZE
+    assert merged["image_size"] == [IMAGE_W, IMAGE_H]
+    assert merged["sample_kind"] == "planner"
     assert merged["camera_visibility_heights_m"] == list(
         NUPLAN_CAMERA_VISIBILITY_HEIGHTS_M
     )
-    assert merged["front_camera_index"] == REACTIVE_FRONT_CAMERA_INDEX
+    assert "front_camera_index" not in merged
     assert merged["max_camera_time_offset_us"] == (
         NUPLAN_CAMERA_SYNC_TOLERANCE_US
     )
@@ -484,14 +486,6 @@ def test_nuplan_partition_merge_preserves_current_manifest(
     assert (
         merged["distinct_history_frame_count"]
         == REACTIVE_BEVFORMER_HISTORY_FRAMES
-    )
-    assert (
-        merged["front_camera_image_size"]
-        == REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-    )
-    assert (
-        merged["front_camera_fpn_image_size"]
-        == REACTIVE_CAMERA_IMAGE_SIZE
     )
     assert merged["packing_workers"] == 2
     assert merged["total_samples"] == 4
@@ -979,7 +973,6 @@ def _worker_config(tmp_path: Path) -> _NuPlanPackWorkerConfig:
         output_directory=str(tmp_path / "output"),
         source_revision="nuplan-v1.1-complete",
         map_version="nuplan-maps-v1.0",
-        image_size=REACTIVE_CAMERA_IMAGE_SIZE,
         samples_per_shard=100,
     )
 
@@ -1067,6 +1060,11 @@ def _create_tagged_db(path: Path, scenario_count: int) -> None:
             "INSERT INTO scenario_tag VALUES (?)",
             [(f"token-{index}",) for index in range(scenario_count)],
         )
+        connection.execute("CREATE TABLE log (map_version TEXT)")
+        connection.execute(
+            "INSERT INTO log VALUES (?)",
+            (_TEST_MAP_NAME,),
+        )
         connection.commit()
     finally:
         connection.close()
@@ -1115,7 +1113,7 @@ def test_nuplan_local_parallel_path_builds_spawned_worker_configs(
             [
                 _scenario(
                     f"sample-{config.partition.index}-{sample_index}",
-                    _nuplan_split_group_uid(log_name),
+                    _nuplan_split_group_uid(log_name, _TEST_MAP_NAME),
                 )
                 for sample_index in range(
                     config.partition.scenario_limit

@@ -16,6 +16,19 @@ from data_parsing.camera_slots import CANONICAL_SIX_CAMERA_SLOTS
 from data_parsing.l2d.calibration import l2d_projection_spec
 from data_parsing.l2d.camera import CAMERA_NAMES as L2D_CAMERA_NAMES
 from data_parsing.nuplan.packing import NUPLAN_CAMERA_CHANNELS
+from data_processing.autobev_members import (
+    BOXES_MEMBER,
+    DEPTH_MEMBER,
+    HISTORY_PROJECTION_MEMBER,
+    PROJECTION_MEMBER,
+    camera_member,
+    encode_boxes,
+    encode_camera,
+    encode_depth,
+    encode_npy,
+    history_camera_member,
+    manifest_contract,
+)
 from data_processing.dataset_snapshot import split_bucket
 from data_processing.contract_versions import contract_versions
 from data_processing.reactive_training_artifacts import (
@@ -26,6 +39,14 @@ from data_processing.reactive_training_artifacts import (
     encode_bev_segmentation_stats,
     encode_reactive_navigation,
     encode_trajectory_xy,
+)
+from model_components.autobev.geometry import (
+    BEV_H,
+    BEV_W,
+    HISTORY_FRAMES,
+    IMAGE_H,
+    IMAGE_W,
+    NUM_VIEWS,
 )
 from navigation.contracts import canonical_json_bytes
 from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
@@ -44,7 +65,7 @@ from training.dataset_policy import (
 from training.reactive_multitask import ReactiveTrainingStage
 
 
-REACTIVE_CANARY_SCHEMA_VERSION = "reactive_ddp_canary_v8"
+REACTIVE_CANARY_SCHEMA_VERSION = "reactive_ddp_canary_v9"
 
 
 def _jpeg_bytes(
@@ -152,6 +173,8 @@ def _sample_members(
             np.ones(64, dtype=np.bool_),
         ),
     }
+    if stage is ReactiveTrainingStage.NUPLAN_FULL:
+        return {**members, **_autobev_members(color, sample_index)}
     for view in range(num_views):
         image_size = (
             REACTIVE_FRONT_CAMERA_IMAGE_SIZE
@@ -163,11 +186,7 @@ def _sample_members(
             image_size=image_size,
         )
     # Every stage packs the T8 camera context its frozen BEVFormer needs.
-    camera_geometry = (
-        "rectified_pinhole"
-        if stage is ReactiveTrainingStage.NUPLAN_FULL
-        else "pinhole"
-    )
+    camera_geometry = "pinhole"
     projection = np.zeros((num_views, 3, 4), dtype=np.float32)
     projection[:, 0, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
     projection[:, 1, 3] = REACTIVE_CAMERA_IMAGE_SIZE / 2
@@ -196,11 +215,7 @@ def _sample_members(
                 image_size=REACTIVE_CAMERA_IMAGE_SIZE,
             )
     members["calib.json"] = canonical_json_bytes({
-        "camera_order": (
-            list(NUPLAN_CAMERA_CHANNELS)
-            if stage is ReactiveTrainingStage.NUPLAN_FULL
-            else list(L2D_CAMERA_NAMES)
-        ),
+        "camera_order": list(L2D_CAMERA_NAMES),
         "camera_slots": list(CANONICAL_SIX_CAMERA_SLOTS),
         "dataset": dataset,
         "front_camera_image_size": (
@@ -229,27 +244,48 @@ def _sample_members(
             REACTIVE_BEVFORMER_FRAME_OFFSETS
         ),
     })
-    if stage is ReactiveTrainingStage.NUPLAN_FULL:
-        bev = np.zeros((8, height, width), dtype=np.float32)
-        bev[0] = map_context[0]
-        bev[1, 100:350:20, 110:190] = 1.0
-        bev[2, 180:260, 110:190] = 1.0
-        bev[3, 240:260, 125:175] = 1.0
-        bev[4, 278:282, 110:190] = 1.0
-        bev[5, 210:230, 140:160] = 1.0
-        bev[6, 190:198, 130:138] = 1.0
-        bev[7, 165:177, 158:170] = 1.0
-        valid = np.ones_like(bev, dtype=np.bool_)
-        members[BEV_SEGMENTATION_MEMBER] = encode_bev_segmentation(
-            bev,
-            valid,
-        )
-        members[BEV_SEGMENTATION_STATS_MEMBER] = (
-            encode_bev_segmentation_stats(
-                bev,
-                valid,
-            )
-        )
+    return members
+
+
+def _autobev_members(
+    color: tuple[int, int, int],
+    sample_index: int,
+) -> dict[str, bytes]:
+    """AutoBEV camera, projection, label, depth and box members of a nuPlan canary."""
+    image = np.full((IMAGE_H, IMAGE_W, 3), color, dtype=np.uint8)
+    jpeg = encode_camera(image)
+    members = {camera_member(view): jpeg for view in range(NUM_VIEWS)}
+    for frame in range(HISTORY_FRAMES):
+        for view in range(NUM_VIEWS):
+            members[history_camera_member(frame, view)] = jpeg
+    projection = np.zeros((NUM_VIEWS, 3, 4), dtype=np.float32)
+    projection[:, 0, 3] = IMAGE_W / 2
+    projection[:, 1, 3] = IMAGE_H / 2
+    projection[:, 2, 3] = 1.0
+    members[PROJECTION_MEMBER] = encode_npy(projection)
+    members[HISTORY_PROJECTION_MEMBER] = encode_npy(
+        np.repeat(projection[None], HISTORY_FRAMES, axis=0)
+    )
+    # One class per band of rows, so every class has positives on the grid.
+    bev = np.zeros((8, BEV_H, BEV_W), dtype=np.float32)
+    for class_index in range(8):
+        bev[class_index, 20 * class_index:20 * class_index + 10, 60:100] = 1.0
+    valid = np.ones_like(bev, dtype=np.bool_)
+    members[BEV_SEGMENTATION_MEMBER] = encode_bev_segmentation(bev, valid)
+    members[BEV_SEGMENTATION_STATS_MEMBER] = encode_bev_segmentation_stats(
+        bev,
+        valid,
+    )
+    camera_from_ego = np.repeat(np.eye(4)[None], NUM_VIEWS, axis=0)
+    members[DEPTH_MEMBER] = encode_depth(
+        np.asarray([[0.0, 0.0, 10.0 + sample_index]]),
+        projection,
+        camera_from_ego,
+    )
+    members[BOXES_MEMBER] = encode_boxes(
+        np.asarray([[10.0, 0.0, 0.8, 4.5, 1.9, 1.6, 0.0, 0.0, 0.0]]),
+        np.asarray([0]),
+    )
     return members
 
 
@@ -365,10 +401,6 @@ def write_reactive_canary_dataset(
         "total_samples": sample_index,
     }
     manifest.update({
-        "front_camera_image_size": (
-            REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-        ),
-        "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
         "temporal_frame_interval_us": (
             REACTIVE_BEVFORMER_FRAME_INTERVAL_US
         ),
@@ -376,11 +408,22 @@ def write_reactive_canary_dataset(
             REACTIVE_BEVFORMER_FRAME_OFFSETS
         ),
     })
-    if stage is not ReactiveTrainingStage.NUPLAN_FULL:
-        manifest["projection"] = l2d_projection_spec(
-            REACTIVE_CAMERA_IMAGE_SIZE
-        )
-    if stage is not ReactiveTrainingStage.NUPLAN_FULL:
+    if stage is ReactiveTrainingStage.NUPLAN_FULL:
+        manifest.update({
+            **manifest_contract(),
+            "image_size": [IMAGE_W, IMAGE_H],
+            "sample_kind": "planner",
+        })
+    else:
+        manifest.update({
+            "front_camera_image_size": (
+                REACTIVE_FRONT_CAMERA_IMAGE_SIZE
+            ),
+            "front_camera_index": REACTIVE_FRONT_CAMERA_INDEX,
+            "projection": l2d_projection_spec(
+                REACTIVE_CAMERA_IMAGE_SIZE
+            ),
+        })
         # The L2D stage requires the frame-pool archive its packs carry; the
         # canary keeps its history as direct members, so one placeholder
         # frame satisfies the manifest contract.

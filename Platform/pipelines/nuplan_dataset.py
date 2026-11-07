@@ -19,6 +19,7 @@ from flytekit.types.directory import FlyteDirectory
 from flytekit.types.file import FlyteFile
 from navigation.contracts import canonical_json_bytes
 
+from data_processing.autobev_members import manifest_contract
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_TAXONOMY_VERSION,
 )
@@ -32,9 +33,6 @@ from reactive_training_contracts import (
     REACTIVE_BEVFORMER_FRAME_INTERVAL_US,
     REACTIVE_BEVFORMER_FRAME_OFFSETS,
     REACTIVE_BEVFORMER_HISTORY_FRAMES,
-    REACTIVE_CAMERA_IMAGE_SIZE,
-    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
-    REACTIVE_FRONT_CAMERA_INDEX,
 )
 
 
@@ -533,15 +531,12 @@ def _validate_nuplan_pack_contract(packed: Mapping[str, Any]) -> None:
             "nuPlan packer did not emit manifest schema "
             f"{NUPLAN_PACK_MANIFEST_VERSION}"
         )
-    if (
-        packed.get("front_camera_index") != REACTIVE_FRONT_CAMERA_INDEX
-        or packed.get("front_camera_image_size")
-        != REACTIVE_FRONT_CAMERA_IMAGE_SIZE
-        or packed.get("front_camera_fpn_image_size")
-        != REACTIVE_CAMERA_IMAGE_SIZE
+    if any(
+        packed.get(key) != value
+        for key, value in manifest_contract().items()
     ):
         raise ValueError(
-            "nuPlan packer did not emit the front camera contract"
+            "nuPlan packer did not emit the AutoBEV member contract"
         )
     if (
         packed.get("temporal_frame_offsets")
@@ -1212,7 +1207,7 @@ def _acquire_nuplan_raw_snapshot(
         ephemeral_storage="500Gi",
     ),
     cache=True,
-    cache_version="nuplan-snapshot-pack-v13-manifest-v11",
+    cache_version="nuplan-snapshot-pack-v14-manifest-v12",
     retries=1,
 )
 def pack_nuplan_snapshot_reactive_dataset(
@@ -1220,7 +1215,6 @@ def pack_nuplan_snapshot_reactive_dataset(
     datasets_bucket: str,
     archive_ids: Optional[List[str]] = None,
     limit_total_scenarios: int = 0,
-    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     samples_per_shard: int = 100,
     max_rejection_fraction: float = 0.0,
     aws_region: str = "us-west-2",
@@ -1233,14 +1227,8 @@ def pack_nuplan_snapshot_reactive_dataset(
     _validate_datasets_bucket(datasets_bucket)
     if limit_total_scenarios < 0:
         raise ValueError("limit_total_scenarios must be non-negative")
-    if (
-        image_size != REACTIVE_CAMERA_IMAGE_SIZE
-        or samples_per_shard <= 0
-    ):
-        raise ValueError(
-            "image_size must match the camera contract and "
-            "samples_per_shard must be positive"
-        )
+    if samples_per_shard <= 0:
+        raise ValueError("samples_per_shard must be positive")
     if not 0.0 <= max_rejection_fraction < 1.0:
         raise ValueError("max_rejection_fraction must be in [0, 1)")
 
@@ -1270,7 +1258,6 @@ def pack_nuplan_snapshot_reactive_dataset(
         source_revision=str(manifest["dataset_revision"]),
         map_version=materialized.map_version,
         limit_total_scenarios=limit_total_scenarios,
-        image_size=image_size,
         samples_per_shard=samples_per_shard,
         max_rejection_fraction=max_rejection_fraction,
         pack_workers=pack_workers,
@@ -1317,7 +1304,6 @@ def _pack_nuplan_snapshot_reactive_dataset_sharded(
     snapshot_manifest: FlyteFile,
     datasets_bucket: str,
     total_scenario_limit: int,
-    image_size: int,
     samples_per_shard: int,
     max_rejection_fraction: float,
     aws_region: str,
@@ -1372,7 +1358,6 @@ def _pack_nuplan_snapshot_reactive_dataset_sharded(
             pack_nuplan_snapshot_reactive_dataset,
             snapshot_manifest=snapshot_manifest,
             datasets_bucket=datasets_bucket,
-            image_size=image_size,
             samples_per_shard=samples_per_shard,
             max_rejection_fraction=max_rejection_fraction,
             aws_region=aws_region,
@@ -1411,7 +1396,7 @@ def _pack_nuplan_snapshot_reactive_dataset_sharded(
         ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE,
     ),
     cache=True,
-    cache_version="nuplan-scene-pack-v3-manifest-v11",
+    cache_version="nuplan-scene-pack-v4-manifest-v12",
     retries=1,
 )
 def pack_nuplan_snapshot_scene_partitions(
@@ -1422,7 +1407,6 @@ def pack_nuplan_snapshot_scene_partitions(
     frames_per_scene: int = NUPLAN_SCENE_FRAMES,
     publication_version: str = NUPLAN_SCENE_PUBLICATION_VERSION,
     preferred_scenario_types: List[str] = NUPLAN_SCENE_PREFERRED_TYPES,
-    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
     scene_workers: int = NUPLAN_SCENE_WORKERS,
     require_mission_goal: bool = False,
     aws_region: str = "us-west-2",
@@ -1441,7 +1425,6 @@ def pack_nuplan_snapshot_scene_partitions(
         scene_count <= 0
         or frames_per_scene <= 0
         or scene_workers <= 0
-        or image_size != REACTIVE_CAMERA_IMAGE_SIZE
     ):
         raise ValueError("nuPlan scene pack limits are invalid")
     if not archive_ids:
@@ -1466,7 +1449,6 @@ def pack_nuplan_snapshot_scene_partitions(
         scene_count=scene_count,
         frames_per_scene=frames_per_scene,
         preferred_scenario_types=preferred_scenario_types,
-        image_size=image_size,
         scene_workers=scene_workers,
         require_mission_goal=require_mission_goal,
     )
@@ -1545,7 +1527,6 @@ def _pack_nuplan_snapshot_scene_dataset(
     frames_per_scene: int,
     publication_version: str,
     preferred_scenario_types: List[str],
-    image_size: int,
     scene_workers: int,
     require_mission_goal: bool,
     aws_region: str,
@@ -1613,7 +1594,6 @@ def _pack_nuplan_snapshot_scene_dataset(
             frames_per_scene=frames_per_scene,
             publication_version=publication_version,
             preferred_scenario_types=preferred_scenario_types,
-            image_size=image_size,
             scene_workers=scene_workers,
             require_mission_goal=require_mission_goal,
             aws_region=aws_region,

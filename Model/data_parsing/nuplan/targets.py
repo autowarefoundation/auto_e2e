@@ -5,11 +5,12 @@ from __future__ import annotations
 import dataclasses
 import math
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import Any, Final
 
 import numpy as np
 from PIL import Image, ImageDraw
 
+from data_processing.autobev_members import BOX_CLASSES, BOX_COLUMNS
 from data_processing.reactive_training_artifacts import (
     BEV_SEGMENTATION_MEMBER,
     BEV_SEGMENTATION_STATS_MEMBER,
@@ -20,12 +21,19 @@ from data_processing.reactive_training_artifacts import (
     encode_reactive_navigation,
     encode_trajectory_xy,
 )
+from model_components.autobev.geometry import AUTOBEV_GEOMETRY
 from navigation.geometry import (
     AUTOE2E_NAVIGATION_GEOMETRY,
     MAP_CHANNEL_COUNT,
     MapChannel,
     NavigationRasterGeometry,
 )
+
+# The road lies about 0.3 m below the nuPlan rear-axle origin, so returns
+# under -0.1 m are road surface and do not show that a tracked box was seen.
+UNOBSERVED_OBJECT_MIN_POINT_Z_M: Final = -0.1
+# Returns up to this far above a box top still count as hitting the box.
+UNOBSERVED_OBJECT_TOP_MARGIN_M: Final = 0.2
 
 
 @dataclasses.dataclass(frozen=True)
@@ -540,15 +548,176 @@ def _destination_heatmap(
     return heatmap, True
 
 
+def lidar_observability_from_points(
+    points_ego_xyz: np.ndarray,
+    *,
+    geometry: NavigationRasterGeometry,
+    angular_bins: int = 1440,
+) -> np.ndarray:
+    """Approximate current LiDAR ray coverage on a BEV grid."""
+    points = np.asarray(points_ego_xyz, dtype=np.float64)
+    if (
+        points.ndim != 2
+        or points.shape[1] < 2
+        or angular_bins <= 0
+    ):
+        raise ValueError("LiDAR points must have shape [N,>=2]")
+    finite = np.isfinite(points[:, :2]).all(axis=1)
+    points = points[finite]
+    if not len(points):
+        return np.zeros(
+            (geometry.height_px, geometry.width_px),
+            dtype=np.bool_,
+        )
+    point_ranges = np.linalg.norm(points[:, :2], axis=1)
+    point_angles = np.arctan2(points[:, 1], points[:, 0])
+    bins = np.floor(
+        (point_angles + math.pi) / (2.0 * math.pi) * angular_bins
+    ).astype(np.int64)
+    bins = np.clip(bins, 0, angular_bins - 1)
+    maximum_range: np.ndarray = np.zeros(
+        angular_bins,
+        dtype=np.float64,
+    )
+    np.maximum.at(maximum_range, bins, point_ranges)
+    expanded_range = maximum_range.copy()
+    bin_width = 2.0 * math.pi / angular_bins
+    for bin_index in np.flatnonzero(maximum_range > 0.0):
+        ray_range = maximum_range[bin_index]
+        angular_margin = math.ceil(
+            math.atan2(geometry.meters_per_pixel, max(
+                ray_range,
+                geometry.meters_per_pixel,
+            ))
+            / bin_width
+        )
+        angular_margin = min(angular_margin, angular_bins // 4)
+        for offset in range(-angular_margin, angular_margin + 1):
+            target_bin = (int(bin_index) + offset) % angular_bins
+            expanded_range[target_bin] = max(
+                expanded_range[target_bin],
+                ray_range,
+            )
+
+    x_grid, y_grid = geometry.pixel_center_grids()
+    cell_ranges = np.hypot(x_grid, y_grid)
+    cell_angles = np.arctan2(y_grid, x_grid)
+    cell_bins = np.floor(
+        (cell_angles + math.pi) / (2.0 * math.pi) * angular_bins
+    ).astype(np.int64)
+    cell_bins = np.clip(cell_bins, 0, angular_bins - 1)
+    return (
+        expanded_range[cell_bins] > 0.0
+    ) & (
+        cell_ranges <= expanded_range[cell_bins] + geometry.meters_per_pixel
+    )
+
+
+def unobserved_object_footprints(
+    tracked_objects: Iterable[Any],
+    reference_pose: tuple[float, float, float],
+    points_ego_xyz: np.ndarray,
+) -> list[np.ndarray]:
+    """Ego-frame footprints of tracked boxes with no LiDAR return inside.
+
+    The tracker keeps boxes through occlusion; like the nuScenes and AV2
+    point counts, a box no sensor saw is unknown for the object classes, not
+    a positive.
+    """
+    _, _, ego_heading = reference_pose
+    points = np.asarray(points_ego_xyz, dtype=np.float64)
+    above = points[points[:, 2] > UNOBSERVED_OBJECT_MIN_POINT_Z_M]
+    footprints = []
+    for tracked in tracked_objects:
+        box = tracked.box
+        center = _global_to_ego(
+            np.asarray([[box.center.x, box.center.y]], dtype=np.float64),
+            reference_pose,
+        )[0]
+        yaw = box.center.heading - ego_heading
+        cosine, sine = math.cos(yaw), math.sin(yaw)
+        local = above[:, :2] - center
+        along = local[:, 0] * cosine + local[:, 1] * sine
+        across = -local[:, 0] * sine + local[:, 1] * cosine
+        inside = (
+            (np.abs(along) <= box.length / 2)
+            & (np.abs(across) <= box.width / 2)
+            & (above[:, 2] < box.height + UNOBSERVED_OBJECT_TOP_MARGIN_M)
+        )
+        if not inside.any():
+            corners = np.asarray(
+                [[1.0, 1.0], [1.0, -1.0], [-1.0, -1.0], [-1.0, 1.0]]
+            ) * [box.length / 2, box.width / 2]
+            rotation = np.asarray([[cosine, sine], [-sine, cosine]])
+            footprints.append(corners @ rotation + center)
+    return footprints
+
+
+def nuplan_boxes(
+    tracked_objects: Iterable[Any],
+    reference_pose: tuple[float, float, float],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Tracked 3D boxes in the current rear-axle frame and their class indices.
+
+    Rows follow ``autobev_members.BOX_COLUMNS``; the box centre sits half its
+    height above the road plane z = 0, and types outside ``BOX_CLASSES`` are
+    ``OTHER``.
+    """
+    _, _, ego_heading = reference_pose
+    cosine, sine = math.cos(ego_heading), math.sin(ego_heading)
+    rows, labels = [], []
+    for tracked in tracked_objects:
+        box = tracked.box
+        center = _global_to_ego(
+            np.asarray([[box.center.x, box.center.y]], dtype=np.float64),
+            reference_pose,
+        )[0]
+        velocity = getattr(tracked, "velocity", None)
+        vx, vy = (
+            (float(velocity.x), float(velocity.y))
+            if velocity is not None
+            else (0.0, 0.0)
+        )
+        rows.append([
+            center[0],
+            center[1],
+            box.height / 2.0,
+            box.length,
+            box.width,
+            box.height,
+            math.remainder(box.center.heading - ego_heading, math.tau),
+            cosine * vx + sine * vy,
+            -sine * vx + cosine * vy,
+        ])
+        name = tracked.tracked_object_type.name
+        labels.append(
+            BOX_CLASSES.index(name)
+            if name in BOX_CLASSES
+            else BOX_CLASSES.index("OTHER")
+        )
+    return (
+        np.asarray(rows, dtype=np.float32).reshape(-1, len(BOX_COLUMNS)),
+        np.asarray(labels, dtype=np.int64),
+    )
+
+
 def build_nuplan_reactive_targets(
     scenario: Any,
     *,
     iteration: int = 0,
+    camera_visibility: np.ndarray,
+    lidar_points_ego: np.ndarray,
     geometry: NavigationRasterGeometry = AUTOE2E_NAVIGATION_GEOMETRY,
-    camera_visibility: np.ndarray | None = None,
-    lidar_observability: np.ndarray | None = None,
+    bev_geometry: NavigationRasterGeometry = AUTOBEV_GEOMETRY,
 ) -> NuPlanReactiveTargets:
-    """Build trajectory, BEV semantics, and route targets for one scenario.
+    """Build trajectory, navigation, and BEV label targets for one scenario.
+
+    The navigation map and route live on ``geometry``. The BEV labels, and
+    the ``camera_visibility`` mask that bounds them, live on ``bev_geometry``,
+    which lies inside the navigation grid, so one map query over the
+    navigation extent serves both. Object classes are valid where the current
+    LiDAR sweep (``lidar_points_ego``, rear-axle frame) reaches, except inside
+    tracked boxes that no return hit.
 
     The navigation map retains one-cell lane-connector boundaries as topology
     context. The camera-supervised target uses only physical lane boundaries
@@ -562,15 +731,26 @@ def build_nuplan_reactive_targets(
         iteration=iteration,
     )
     shape = (geometry.height_px, geometry.width_px)
-    if camera_visibility is None or lidar_observability is None:
-        raise ValueError(
-            "nuPlan BEV targets require explicit camera and lidar "
-            "observability masks"
-        )
+    bev_shape = (bev_geometry.height_px, bev_geometry.width_px)
     camera_valid = np.asarray(camera_visibility, dtype=np.bool_)
-    lidar_valid = np.asarray(lidar_observability, dtype=np.bool_)
-    if camera_valid.shape != shape or lidar_valid.shape != shape:
-        raise ValueError("observability masks must match the BEV geometry")
+    if camera_valid.shape != bev_shape:
+        raise ValueError("camera visibility must match the BEV label geometry")
+    tracked_objects = list(
+        scenario.get_tracked_objects_at_iteration(iteration).tracked_objects
+    )
+    unobserved = _rasterize_polygons(
+        unobserved_object_footprints(
+            tracked_objects,
+            reference_pose,
+            lidar_points_ego,
+        ),
+        (0.0, 0.0, 0.0),
+        bev_geometry,
+    ) > 0.0
+    object_valid = camera_valid & ~unobserved & lidar_observability_from_points(
+        lidar_points_ego,
+        geometry=bev_geometry,
+    )
 
     map_polygons, map_available = _map_layer_polygons(
         scenario,
@@ -583,14 +763,11 @@ def build_nuplan_reactive_targets(
         reference_pose,
         geometry,
     )
-    detections = scenario.get_tracked_objects_at_iteration(iteration)
-    dynamic_polygons = _tracked_object_polygons(
-        detections.tracked_objects
-    )
+    dynamic_polygons = _tracked_object_polygons(tracked_objects)
     _, physical_lane_boundaries = _lane_features(
         scenario,
         reference_pose,
-        geometry,
+        bev_geometry,
         include_connectors=False,
     )
     sources = {
@@ -598,7 +775,7 @@ def build_nuplan_reactive_targets(
         **dynamic_polygons,
     }
     semantic = np.zeros(
-        (len(BEV_SEGMENTATION_CLASSES), *shape),
+        (len(BEV_SEGMENTATION_CLASSES), *bev_shape),
         dtype=np.float32,
     )
     semantic_valid = np.zeros_like(semantic, dtype=np.bool_)
@@ -607,26 +784,26 @@ def build_nuplan_reactive_targets(
             semantic[class_index] = _rasterize_polylines(
                 physical_lane_boundaries,
                 reference_pose,
-                geometry,
+                bev_geometry,
                 width_m=max(
                     0.4,
-                    2.0 * geometry.meters_per_pixel,
+                    2.0 * bev_geometry.meters_per_pixel,
                 ),
             )
         else:
             semantic[class_index] = _rasterize_polygons(
                 sources[class_name],
                 reference_pose,
-                geometry,
+                bev_geometry,
             )
         if class_name in map_available:
-            # Proximal map queries cover the circumscribed BEV radius, so
-            # visible off-feature cells are valid static negatives.
+            # Proximal map queries cover the circumscribed navigation radius,
+            # so visible off-feature cells are valid static negatives.
             semantic_valid[class_index] = (
                 camera_valid & map_available[class_name]
             )
         else:
-            semantic_valid[class_index] = camera_valid & lidar_valid
+            semantic_valid[class_index] = object_valid
 
     corridor_polygons = _route_polygons(scenario)
     route_target = np.zeros((2, *shape), dtype=np.float32)

@@ -10,9 +10,8 @@ from .packing import (
     NUPLAN_RECTIFICATION_POLICY_VERSION,
     NuPlanCameraBundle,
     camera_visibility_from_projection_matrices,
-    lidar_observability_from_points,
     load_nuplan_camera_bundle,
-    load_nuplan_lidar_observability,
+    load_nuplan_lidar_points,
     nuplan_reactive_sample_members,
     nuplan_scene_partition_id,
     nuplan_static_rig_projection,
@@ -25,7 +24,10 @@ from .targets import (
     NuPlanReactiveTargets,
     build_nuplan_reactive_targets,
     future_trajectory_xy,
+    lidar_observability_from_points,
+    nuplan_boxes,
     nuplan_reactive_target_members,
+    unobserved_object_footprints,
 )
 
 __all__ = [
@@ -43,7 +45,8 @@ __all__ = [
     "future_trajectory_xy",
     "lidar_observability_from_points",
     "load_nuplan_camera_bundle",
-    "load_nuplan_lidar_observability",
+    "load_nuplan_lidar_points",
+    "nuplan_boxes",
     "nuplan_reactive_sample_members",
     "nuplan_reactive_target_members",
     "nuplan_scene_partition_id",
@@ -52,4 +55,5 @@ __all__ = [
     "pack_nuplan_local_scenes",
     "pack_nuplan_reactive_scene_partitions",
     "pack_nuplan_reactive_scenarios",
+    "unobserved_object_footprints",
 ]
