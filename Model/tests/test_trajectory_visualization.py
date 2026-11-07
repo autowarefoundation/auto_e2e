@@ -12,7 +12,6 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from evaluation.metrics import integrate_trajectory
 from data_parsing.l2d.calibration import l2d_projection_spec
 from Platform.pipelines.overlay import (
     BEV_HEATMAP_NAMES,
@@ -195,13 +194,26 @@ def _write_publication_manifests(
     return dataset_path, overlay_path, rig_path
 
 
-def test_report_integrator_matches_evaluation_reference():
+def _reference_integration(accel, curvature, v0, dt=0.1):
+    """The unicycle the Console golden file was generated with: speed first, then heading."""
+    positions = np.zeros((len(accel), 2), dtype=np.float64)
+    v, theta, x, y = float(v0), 0.0, 0.0, 0.0
+    for t in range(len(accel)):
+        v = max(0.0, v + float(accel[t]) * dt)
+        theta += float(curvature[t]) * v * dt
+        x += v * np.cos(theta) * dt
+        y += v * np.sin(theta) * dt
+        positions[t] = [x, y]
+    return positions
+
+
+def test_report_integrator_matches_the_reference_unicycle():
     controls = np.zeros((64, 2), dtype=np.float32)
     controls[:, 0] = 0.25
     controls[:, 1] = 0.01
 
     actual = integrate_controls(controls, 7.5)
-    expected = integrate_trajectory(
+    expected = _reference_integration(
         controls[:, 0],
         controls[:, 1],
         7.5,
