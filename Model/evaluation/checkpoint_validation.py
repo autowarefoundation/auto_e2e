@@ -35,6 +35,7 @@ from typing import Any, Final
 import torch
 
 from evaluation.autoe2e_metrics import bev_counts, calibrate_thresholds, summarize_bev, trajectory_errors
+from training import storage
 from training.trainer import CHECKPOINT_FILE, FEEDBACK_FILE, METADATA_FILE, TrainRun, model_inputs
 
 VALIDATION_SAMPLES: Final = 512
@@ -108,47 +109,22 @@ def drivable_score(metrics: Mapping[str, float]) -> float:
     return sum(bands) / len(bands)
 
 
-def _s3():
-    import boto3
-
-    return boto3.client("s3")
-
-
-def _split(uri: str) -> tuple[str, str]:
-    bucket, _, key = uri.removeprefix("s3://").partition("/")
-    return bucket, key
+def list_checkpoints(run_uri: str) -> list[str]:
+    """Ray checkpoint directories of the run, oldest first (their names sort by time)."""
+    return [uri for uri in storage.child_directories(run_uri) if uri.rsplit("/", 1)[-1].startswith("checkpoint_")]
 
 
-def _checkpoints(run_uri: str) -> list[str]:
-    """Ray checkpoint directories of the run, oldest first."""
-    bucket, prefix = _split(run_uri.rstrip("/") + "/")
-    pages = _s3().get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix, Delimiter="/")
-    names = sorted(p["Prefix"] for page in pages for p in page.get("CommonPrefixes", [])
-                   if p["Prefix"].rstrip("/").rsplit("/", 1)[-1].startswith("checkpoint_"))
-    return [f"s3://{bucket}/{name.rstrip('/')}" for name in names]
+def read_json(uri: str) -> dict:
+    return json.loads(storage.read_bytes(uri))
 
 
-def _exists(uri: str) -> bool:
-    bucket, key = _split(uri)
-    return _s3().list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1).get("KeyCount", 0) > 0
-
-
-def _read_json(uri: str) -> dict:
-    bucket, key = _split(uri)
-    return json.loads(_s3().get_object(Bucket=bucket, Key=key)["Body"].read())
-
-
-def _write_json(uri: str, payload: Mapping) -> None:
-    bucket, key = _split(uri)
-    _s3().put_object(Bucket=bucket, Key=key, Body=json.dumps(payload, indent=1, sort_keys=True).encode(),
-                     ContentType="application/json")
+def write_json(uri: str, payload: Mapping) -> None:
+    storage.write_bytes(uri, json.dumps(payload, indent=1, sort_keys=True).encode())
 
 
 def _load(model, checkpoint_dir: str) -> dict:
-    bucket, key = _split(f"{checkpoint_dir}/{CHECKPOINT_FILE}")
     with tempfile.TemporaryDirectory() as directory:
-        local = Path(directory) / CHECKPOINT_FILE
-        _s3().download_file(bucket, key, str(local))
+        local = storage.download(f"{checkpoint_dir}/{CHECKPOINT_FILE}", Path(directory) / CHECKPOINT_FILE)
         state = torch.load(local, map_location="cpu", weights_only=False)
     model.load_state_dict(state["model"])
     return state["metadata"]
@@ -170,13 +146,13 @@ def watch(run: TrainRun, calibration: Callable[[], Iterable], validation: Callab
     if run.stage == 2:
         _load(model.Reactive_E2E.AutoBEV, run.parent_checkpoint_uri.rstrip("/"))
         baseline = validate(model, run.stage, calibration(), validation(), device)
-        _write_json(f"{run_uri}/parent_{RESULT_FILE}", baseline)
+        write_json(f"{run_uri}/parent_{RESULT_FILE}", baseline)
     results, backoffs = [], 0
     while True:
         # A checkpoint counts once both of its files are uploaded.
-        pending = [c for c in _checkpoints(run_uri)
-                   if _exists(f"{c}/{METADATA_FILE}") and _exists(f"{c}/{CHECKPOINT_FILE}")
-                   and not _exists(f"{c}/{RESULT_FILE}")]
+        pending = [c for c in list_checkpoints(run_uri)
+                   if storage.exists(f"{c}/{METADATA_FILE}") and storage.exists(f"{c}/{CHECKPOINT_FILE}")
+                   and not storage.exists(f"{c}/{RESULT_FILE}")]
         if not pending:
             time.sleep(POLL_SECONDS)
             continue
@@ -184,11 +160,11 @@ def watch(run: TrainRun, calibration: Callable[[], Iterable], validation: Callab
             metadata = _load(model, checkpoint)
             result = {"step": metadata["step"], "checkpoint": checkpoint,
                       **validate(model, run.stage, calibration(), validation(), device)}
-            _write_json(f"{checkpoint}/{RESULT_FILE}", result)
+            write_json(f"{checkpoint}/{RESULT_FILE}", result)
             results.append(result)
             if baseline is not None and drivable_score(result["metrics"]) < (1 - BACKOFF_DROP) * drivable_score(
                     baseline["metrics"]):
                 backoffs += 1
-                _write_json(f"{run_uri}/{FEEDBACK_FILE}", {"autobev_backoffs": backoffs, "step": metadata["step"]})
+                write_json(f"{run_uri}/{FEEDBACK_FILE}", {"autobev_backoffs": backoffs, "step": metadata["step"]})
             if metadata["step"] >= run.steps:
                 return results
