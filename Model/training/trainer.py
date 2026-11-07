@@ -36,6 +36,11 @@ MAX_FAILURES: Final = 3
 LOG_EVERY_STEPS: Final = 10
 
 
+def AUTOCAST():  # noqa: N802 - reads like the context manager it returns
+    """bf16 autocast for network forwards."""
+    return torch.autocast("cuda", dtype=torch.bfloat16)
+
+
 @dataclass(frozen=True)
 class TrainRun:
     """What one training run reads and how long it trains; everything else is a constant."""
@@ -47,6 +52,7 @@ class TrainRun:
     mix_shards: list[str] = field(default_factory=list)
     early_shards: list[str] = field(default_factory=list)
     dataset_ids: list[str] = field(default_factory=list)
+    # The stage 1 checkpoint file (``.../checkpoint.pt`` or a registered ``<sha>.pt``).
     parent_checkpoint_uri: str = ""
     steps: int = 1000
     learning_rate: float = 2e-4
@@ -59,7 +65,9 @@ class TrainRun:
         if self.stage not in (1, 2):
             raise ValueError("stage is 1 (AutoBEV) or 2 (AutoE2E)")
         if (self.stage == 2) != bool(self.parent_checkpoint_uri):
-            raise ValueError("stage 2, and only stage 2, starts from a stage 1 checkpoint")
+            raise ValueError("stage 2, and only stage 2, starts from a stage 1 checkpoint file")
+        if self.stage == 2 and self.early_shards:
+            raise ValueError("early shards (SimBEV) join only the first half of stage 1")
         if min(self.steps, self.per_rank_batch_size, self.checkpoint_interval_steps, self.world_size) <= 0:
             raise ValueError("steps, batch size, checkpoint interval and world size must be positive")
 
@@ -107,8 +115,7 @@ def build_model(run: TrainRun) -> torch.nn.Module:
 
     model = AutoE2E(pretrained_backbone=False)
     with tempfile.TemporaryDirectory() as directory:
-        local = storage.download(f"{run.parent_checkpoint_uri.rstrip('/')}/{CHECKPOINT_FILE}",
-                                 Path(directory) / CHECKPOINT_FILE)
+        local = storage.download(run.parent_checkpoint_uri, Path(directory) / CHECKPOINT_FILE)
         state = torch.load(local, map_location="cpu", weights_only=False)
     check_autobev_contract(state["metadata"].get("autobev_contract"), source=run.parent_checkpoint_uri)
     if state["metadata"]["stage"] != 1:
@@ -163,11 +170,12 @@ def _stage2_terms(model, objective, batch, generator, schedule, step):
     # after the student's forward would invalidate its saved tensors.
     if bool(distortion.distorted.any()):
         network = model.module
-        with torch.no_grad(), preserved_batch_norm_statistics(network):
+        with torch.no_grad(), preserved_batch_norm_statistics(network), AUTOCAST():
             _, clean = network(**model_inputs(batch, localization))
         teacher, teacher_mask = aligned_teacher_bev(clean["planner_bev"], distortion)
         del clean
-    controls, auxiliary = model(**model_inputs(distorted, localization))
+    with AUTOCAST():
+        controls, auxiliary = model(**model_inputs(distorted, localization))
     return objective(
         controls, auxiliary, distorted, auxiliary_weight=schedule.auxiliary_weight(step),
         teacher_bev=teacher, teacher_mask=teacher_mask,
@@ -183,8 +191,9 @@ def _stage1_terms(model, objective, batch, generator):
     batch = restrict_to_visible(bev_augment(photometric(camera_augment(batch, every, generator), every, generator),
                                             generator))
     batch["autobev_dense_supervised"] = every.to(batch["visual_tiles"].device)
-    outputs = model(batch["visual_tiles"], batch["camera_history_tiles"], batch["camera_projection_matrix"],
-                    batch["camera_history_projection_matrix"], batch["autobev_image_projection"])
+    with AUTOCAST():
+        outputs = model(batch["visual_tiles"], batch["camera_history_tiles"], batch["camera_projection_matrix"],
+                        batch["camera_history_projection_matrix"], batch["autobev_image_projection"])
     return objective(outputs, batch)
 
 
@@ -206,6 +215,8 @@ def train_loop(config: dict[str, Any]) -> None:
     groups = stage1_groups(model) if run.stage == 1 else stage2_groups(model)
     optimizer = build_optimizer(groups, run.learning_rate)
     schedule = Schedule(run.steps, run.stage, groups, run.learning_rate)
+    clip_sets = [[p for g in groups if g.autobev == autobev for p in g.parameters] for autobev in (True, False)]
+    clip_sets = [group for group in clip_sets if group]
     objective = (AutoBEVObjective() if run.stage == 1 else AutoE2EObjective()).to(device)
     generator = torch.Generator().manual_seed(run.seed * 1000 + rank)
     start = 0
@@ -217,6 +228,8 @@ def train_loop(config: dict[str, Any]) -> None:
         optimizer.load_state_dict(state["optimizer"])
         schedule.autobev_backoff = int(state["autobev_backoff"])
         generator.set_state(state["generators"][rank])
+        torch.set_rng_state(state["torch_rng"][rank])
+        torch.cuda.set_rng_state(state["cuda_rng"][rank])
         start = int(state["step"])
     # The same starting weights on every rank: new layers are initialized per process.
     for tensor in [*model.parameters(), *model.buffers()]:
@@ -233,12 +246,16 @@ def train_loop(config: dict[str, Any]) -> None:
     for step in range(start, run.steps):
         schedule.apply(optimizer, step)
         batch = to_device(next(stream), device)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            terms = (_stage1_terms(ddp, objective, batch, generator) if run.stage == 1
-                     else _stage2_terms(ddp, objective, batch, generator, schedule, step))
+        # Geometry (augmentation, projections, targets) and the losses stay in
+        # float32; only the network forward runs in bf16.
+        terms = (_stage1_terms(ddp, objective, batch, generator) if run.stage == 1
+                 else _stage2_terms(ddp, objective, batch, generator, schedule, step))
         optimizer.zero_grad(set_to_none=True)
         terms["total"].backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP)
+        # AutoBEV and the planner side clip separately, so AutoBEV's auxiliary
+        # gradients (taken even while its rate is zero) do not shrink the planner's.
+        for group in clip_sets:
+            torch.nn.utils.clip_grad_norm_(group, GRADIENT_CLIP)
         optimizer.step()
         for name, value in terms.items():
             running[name] = running.get(name, 0.0) + float(value.detach())
@@ -253,17 +270,20 @@ def train_loop(config: dict[str, Any]) -> None:
             ray_train.report(report)
             continue
         # Rank 0 reads the validation feedback, so every rank applies the same back-off.
-        requested = torch.tensor(_feedback_backoffs(run.storage_uri, run.run_name), device=device)
+        requested = torch.tensor(_feedback_backoffs(run.storage_uri, run.run_name) if rank == 0 else 0,
+                                 device=device)
         dist.broadcast(requested, 0)
         schedule.autobev_backoff = max(schedule.autobev_backoff, min(int(requested), MAX_BACKOFFS))
-        generators = [torch.empty(0, dtype=torch.uint8) for _ in range(world)]
-        dist.all_gather_object(generators, generator.get_state())
+        states = [None] * world
+        dist.all_gather_object(states, (generator.get_state(), torch.get_rng_state(), torch.cuda.get_rng_state()))
+        generators, torch_rng, cuda_rng = (list(column) for column in zip(*states))
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = None
             if rank == 0:
                 torch.save({
                     "model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": done,
                     "autobev_backoff": schedule.autobev_backoff, "generators": generators,
+                    "torch_rng": torch_rng, "cuda_rng": cuda_rng,
                     "metadata": _metadata(run, done),
                 }, Path(directory) / CHECKPOINT_FILE)
                 (Path(directory) / METADATA_FILE).write_text(json.dumps(_metadata(run, done), indent=1))
