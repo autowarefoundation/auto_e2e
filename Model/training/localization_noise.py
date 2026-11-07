@@ -17,6 +17,10 @@ GNSS regimes, one per sample:
 - outage (the rest): no fixes in the window; the EKF starts from the drift DR
   accumulated since the last good fix ``OUTAGE_S`` ago.
 
+The EKF state is (x, y, yaw, yaw-rate bias), so a constant gyro bias is
+estimated from the GNSS track instead of being treated as white noise. The
+final crop error is kept within the raster margin (``MAX_CROP_OFFSET_M``).
+
 DR uses the logged speed with a ``SPEED_SCALE_ERROR`` scale error and the
 logged yaw rate with a ``YAW_RATE_BIAS_DEG_S`` bias.
 
@@ -42,18 +46,26 @@ BIAS_SIGMA_M: Final = 0.5
 BIAS_TAU_S: Final = 30.0
 JUMP_M: Final = (3.0, 10.0)
 JUMP_DURATION_S: Final = (2.0, 30.0)
-OUTAGE_S: Final = (6.4, 30.0)
+OUTAGE_S: Final = (5.0, 30.0)
 SPEED_SCALE_ERROR: Final = (0.01, 0.02)
 YAW_RATE_BIAS_DEG_S: Final = (0.1, 0.5)
 # What the EKF assumes: the receiver's nominal accuracy and DR noise bounds.
 EKF_GNSS_SIGMA_M: Final = 1.0
 EKF_SPEED_SIGMA: Final = 0.02
-EKF_YAW_RATE_SIGMA_DEG_S: Final = 0.5
+# White gyro noise; the yaw-rate bias is a state of the EKF, starting at zero
+# with the largest simulated bias as its standard deviation.
+EKF_GYRO_NOISE_DEG_S: Final = 0.05
+EKF_BIAS_WALK_DEG_S2: Final = 0.002
 EKF_INITIAL_SIGMA_M: Final = 0.5
 EKF_INITIAL_YAW_SIGMA_DEG: Final = 1.0
 # Innovations beyond the 99 % chi-square bound with two degrees of freedom
 # are rejected, so a jump is ignored until the covariance has grown to it.
 GATE_CHI2: Final = 9.21
+# The 0.4 m navigation raster extends 30 to 40 m beyond the AutoBEV grid, so
+# crops are kept within 10 m and 10 degrees of the truth; a larger drift would
+# leave the grid without map, which no onboard system would hand on as a map.
+MAX_CROP_OFFSET_M: Final = 10.0
+MAX_CROP_YAW_DEG: Final = 10.0
 # Share of samples whose crop is then refined by map matching.
 MAP_MATCHING_SHARE: Final = 0.5
 
@@ -137,16 +149,20 @@ def simulate_localization(egomotion_history: torch.Tensor, generator: torch.Gene
         truth[:, 0, 2] + heading_error
         + torch.randn(batch, generator=generator) * math.radians(EKF_INITIAL_YAW_SIGMA_DEG),
     ], dim=-1)
-    yaw_sigma = math.radians(EKF_YAW_RATE_SIGMA_DEG_S)
+    bias_sigma = math.radians(YAW_RATE_BIAS_DEG_S[1])
     lon_sigma = EKF_SPEED_SIGMA * start_speed * since_fix + EKF_INITIAL_SIGMA_M
-    lat_sigma = 0.5 * yaw_sigma * start_speed * since_fix.square() + EKF_INITIAL_SIGMA_M
+    lat_sigma = 0.5 * bias_sigma * start_speed * since_fix.square() + EKF_INITIAL_SIGMA_M
+    yaw_sigma0 = bias_sigma * since_fix + math.radians(EKF_INITIAL_YAW_SIGMA_DEG)
+    # State (x, y, yaw, yaw-rate bias).
+    state = torch.cat([initial, torch.zeros(batch, 1)], dim=-1)
     covariance = torch.diag_embed(torch.stack([
-        lon_sigma.square(), lat_sigma.square(),
-        (yaw_sigma * since_fix + math.radians(EKF_INITIAL_YAW_SIGMA_DEG)).square(),
+        lon_sigma.square(), lat_sigma.square(), yaw_sigma0.square(), torch.full((batch,), bias_sigma ** 2),
     ], dim=-1))
 
-    observation = torch.eye(2, 3).expand(batch, 2, 3)
+    observation = torch.eye(2, 4).expand(batch, 2, 4)
     gnss_noise = torch.eye(2) * EKF_GNSS_SIGMA_M ** 2
+    gyro = math.radians(EKF_GYRO_NOISE_DEG_S) * DT_S
+    walk = math.radians(EKF_BIAS_WALK_DEG_S2) * DT_S
 
     def update(state, covariance, row):
         residual = fixes[:, row] - state[:, :2]
@@ -154,21 +170,24 @@ def simulate_localization(egomotion_history: torch.Tensor, generator: torch.Gene
         mahalanobis = torch.einsum("bi,bij,bj->b", residual, inverse, residual)
         accept = (available[:, row] & (mahalanobis <= GATE_CHI2)).float()[:, None, None]
         gain = covariance @ observation.transpose(1, 2) @ inverse * accept
-        return state + (gain @ residual[..., None])[..., 0], (torch.eye(3) - gain @ observation) @ covariance
+        return state + (gain @ residual[..., None])[..., 0], (torch.eye(4) - gain @ observation) @ covariance
 
-    state, covariance = update(initial, covariance, 0)
+    state, covariance = update(state, covariance, 0)
     for row in range(1, HISTORY_STEPS + 1):
-        v, w, theta = dr_speed[:, row - 1], dr_yaw_rate[:, row - 1], state[:, 2]
-        state = state + torch.stack([v * torch.cos(theta), v * torch.sin(theta), w], dim=-1) * DT_S
-        jacobian = torch.eye(3).repeat(batch, 1, 1)
+        v, theta = dr_speed[:, row - 1], state[:, 2]
+        w = dr_yaw_rate[:, row - 1] - state[:, 3]
+        state = state + torch.stack([v * torch.cos(theta), v * torch.sin(theta), w, torch.zeros_like(v)], -1) * DT_S
+        jacobian = torch.eye(4).repeat(batch, 1, 1)
         jacobian[:, 0, 2] = -v * torch.sin(theta) * DT_S
         jacobian[:, 1, 2] = v * torch.cos(theta) * DT_S
+        jacobian[:, 2, 3] = -DT_S
         position_variance = (EKF_SPEED_SIGMA * v * DT_S + 1e-3) ** 2
         process = torch.diag_embed(torch.stack([
-            position_variance, position_variance, torch.full_like(v, (yaw_sigma * DT_S) ** 2),
+            position_variance, position_variance, torch.full_like(v, gyro ** 2), torch.full_like(v, walk ** 2),
         ], dim=-1))
         covariance = jacobian @ covariance @ jacobian.transpose(1, 2) + process
         state, covariance = update(state, covariance, row)
+    covariance = covariance[:, :3, :3]
 
     # Express the estimate in the true current ego frame: T_E<-Ê = T_W<-E^-1 T_W<-Ê.
     current = truth[:, -1]
@@ -184,5 +203,10 @@ def simulate_localization(egomotion_history: torch.Tensor, generator: torch.Gene
     rotation[:, 1, 0], rotation[:, 1, 1] = -sin, cos
     rotation[:, 2, 2] = 1.0
     covariance = rotation @ covariance @ rotation.transpose(1, 2)
+    offset = pose[:, :2].norm(dim=-1, keepdim=True)
+    pose = torch.cat([
+        pose[:, :2] * (MAX_CROP_OFFSET_M / offset.clamp_min(MAX_CROP_OFFSET_M)),
+        pose[:, 2:].clamp(-math.radians(MAX_CROP_YAW_DEG), math.radians(MAX_CROP_YAW_DEG)),
+    ], dim=-1)
     map_matching = torch.rand(batch, generator=generator) < MAP_MATCHING_SHARE
     return LocalizationEstimate(pose.to(device), covariance.to(device), map_matching.to(device))
