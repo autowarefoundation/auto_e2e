@@ -175,7 +175,7 @@ TRAIN_TASKS = {GpuProfile.RAY_1: train_ray_1, GpuProfile.RAY_8: train_ray_8}
       environment=TRAIN_ENVIRONMENT, retries=2)
 def validate_checkpoints(spec: TrainingSpec, data: TrainingData, run: TrainedRun, parent_uri: str) -> int:
     """Validate the run's checkpoints as they appear; returns how many it validated."""
-    from data_parsing.pre_extracted import autobev_validation_batches
+    from training.autobev_data import autobev_validation_batches
     from evaluation.checkpoint_validation import CALIBRATION_SAMPLES, VALIDATION_SAMPLES, watch
 
     results = watch(
