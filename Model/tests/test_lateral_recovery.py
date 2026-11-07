@@ -12,6 +12,7 @@ from training.lateral_recovery import (
     MAX_YAW_RAD,
     _frenet_slope,
     _history_camera_targets,
+    _shift_map_context,
     _warp_images,
     aligned_clean_planner_bev,
     apply_lateral_recovery,
@@ -209,8 +210,9 @@ def test_sampling_respects_probability_bounds_and_eligibility():
         "trajectory_valid": torch.ones(2, 64, dtype=torch.bool),
         "egomotion_history": history,
     }
-    assert not bool(sample_lateral_shift(batch, 0.0).active.any())
-    shift = sample_lateral_shift(batch, 1.0)
+    generator = torch.Generator().manual_seed(0)
+    assert not bool(sample_lateral_shift(batch, torch.zeros(2, dtype=torch.bool), generator).active.any())
+    shift = sample_lateral_shift(batch, torch.ones(2, dtype=torch.bool), generator)
     assert shift.active.tolist() == [True, False]
     assert abs(shift.offset_m[0].item()) <= MAX_OFFSET_M
     assert abs(shift.yaw_rad[0].item()) <= MAX_YAW_RAD
@@ -222,23 +224,20 @@ def _camera_batch(batch_size=2, size=16):
     motion = torch.eye(4).repeat(7, 1, 1)
     motion[:, 0, 3] = -torch.arange(7, 0, -1, dtype=torch.float32) * 5.0
     history = rig[None] @ motion[:, None]
-    front = _camera(0.0, image_size=2 * size)[None]
     return {
         "visual_tiles": torch.rand(batch_size, 3, 3, size, size),
-        "front_camera_tile": torch.rand(batch_size, 3, 2 * size, 2 * size),
         "camera_history_tiles": torch.rand(batch_size, 7, 3, 3, size, size),
         "camera_projection_matrix": rig.expand(batch_size, -1, -1, -1).clone(),
-        "front_camera_projection_matrix": front.expand(
-            batch_size, -1, -1, -1
-        ).clone(),
+        "autobev_depth": torch.rand(batch_size, 3, size // 4, size // 4) + 1.0,
+        "autobev_boxes": [torch.tensor([[10.0, 1.0, 0.5, 4.0, 2.0, 1.5, 0.1, 5.0, 0.0]])] * batch_size,
         "camera_history_projection_matrix": history.expand(
             batch_size, -1, -1, -1, -1
         ).clone(),
-        "map_context": torch.rand(batch_size, 14, 36, 24),
-        "route_mask": torch.rand(batch_size, 2, 36, 24),
-        "bev_segmentation_target": torch.rand(batch_size, 2, 36, 24) > 0.5,
+        "map_context": torch.rand(batch_size, 14, 450, 300),
+        "route_mask": torch.rand(batch_size, 2, 450, 300),
+        "bev_segmentation_target": torch.rand(batch_size, 2, 220, 160) > 0.5,
         "bev_segmentation_valid": torch.ones(
-            batch_size, 2, 36, 24, dtype=torch.bool
+            batch_size, 2, 220, 160, dtype=torch.bool
         ),
         "egomotion_history": torch.cat(
             [_straight_history()] * batch_size
@@ -257,7 +256,6 @@ def test_inactive_samples_are_bitwise_unchanged(method):
         batch,
         shift,
         method=method,
-        geometry=_GEOMETRY,
     )
     for key, value in batch.items():
         assert torch.equal(out[key][1], value[1]), key
@@ -270,18 +268,18 @@ def test_inactive_samples_are_bitwise_unchanged(method):
         "trajectory_xy_m",
         "map_context",
         "route_mask",
+        "autobev_boxes",
     }
     if method == "projection":
         expected = common | {
             "camera_projection_matrix",
-            "front_camera_projection_matrix",
             "camera_history_projection_matrix",
         }
     else:
         expected = common | {
             "visual_tiles",
-            "front_camera_tile",
             "camera_history_tiles",
+            "autobev_depth",
             "camera_history_projection_matrix",
         }
     assert expected <= set(changed)
@@ -296,33 +294,19 @@ def test_raster_mark_moves_to_its_shifted_cell():
     raster = torch.zeros(1, 14, 36, 24)
     # Ego point (x=4.25 m, y=1.25 m) is row 15, column 9.
     raster[0, 0, 15, 9] = 1.0
-    batch = _camera_batch(batch_size=1)
-    batch["map_context"] = raster
-    shift = _shift([1.0], [0.0])
-    out = apply_lateral_recovery(
-        batch,
-        shift,
-        method="projection",
-        geometry=_GEOMETRY,
-    )
+    shifted = _shift_map_context(raster, _shift([1.0], [0.0]), _GEOMETRY)
     # One metre to the left moves the point one metre right in E': two columns.
-    peak = torch.nonzero(out["map_context"][0, 0] == 1.0)
+    peak = torch.nonzero(shifted[0, 0] == 1.0)
     assert peak.tolist() == [[15, 11]]
 
 
 def test_map_traffic_direction_rotates_into_the_shifted_frame():
-    batch = _camera_batch(batch_size=1)
-    batch["map_context"] = torch.zeros(1, 14, 36, 24)
-    batch["map_context"][0, MapChannel.TRAFFIC_DIRECTION_SIN] = 0.5
-    batch["map_context"][0, MapChannel.TRAFFIC_DIRECTION_COS] = 1.0
-    batch["map_context"][0, MapChannel.TRAFFIC_DIRECTION_VALID] = 1.0
-    out = apply_lateral_recovery(
-        batch,
-        _shift([0.0], [math.radians(5.0)]),
-        method="projection",
-        geometry=_GEOMETRY,
-    )
-    cell = out["map_context"][0, :, 18, 12]
+    raster = torch.zeros(1, 14, 36, 24)
+    raster[0, MapChannel.TRAFFIC_DIRECTION_SIN] = 0.5
+    raster[0, MapChannel.TRAFFIC_DIRECTION_COS] = 1.0
+    raster[0, MapChannel.TRAFFIC_DIRECTION_VALID] = 1.0
+    shifted = _shift_map_context(raster, _shift([0.0], [math.radians(5.0)]), _GEOMETRY)
+    cell = shifted[0, :, 18, 12]
     assert cell[MapChannel.TRAFFIC_DIRECTION_SIN].item() == pytest.approx(
         (math.sin(math.radians(-5.0)) + 1.0) / 2.0, abs=1e-5
     )
@@ -342,10 +326,10 @@ def test_heading_offset_matches_the_yaw_on_curved_paths():
 
 def test_planner_bev_alignment_uses_its_own_resolution_and_full_support():
     shift = _shift([0.1], [0.0])
-    # The planner BEV covers the raster extent at a coarser 24x16 grid.
+    # The planner BEV covers the AutoBEV extent, here at a coarser 24x16 grid.
     teacher = torch.zeros(1, 2, 24, 16)
     teacher[:, 0] = 4.0
-    aligned, mask = aligned_clean_planner_bev(teacher, shift, _GEOMETRY)
+    aligned, mask = aligned_clean_planner_bev(teacher, shift)
     assert aligned.shape == teacher.shape
     assert bool(mask.any())
     loss = feature_consistency_kl(teacher.clone(), aligned, mask)
@@ -366,8 +350,10 @@ def test_teacher_forward_keeps_batch_norm_statistics():
 def test_consistency_kl_trains_only_the_shifted_branch():
     clean = torch.randn(2, 4, 36, 24, requires_grad=True)
     shift = _shift([0.5, 0.0], [0.03, 0.0], torch.tensor([True, False]))
-    aligned, mask = aligned_clean_planner_bev(clean, shift, _GEOMETRY)
-    assert not bool(mask[1].any())
+    aligned, inside = aligned_clean_planner_bev(clean, shift)
+    # The trainer compares only the shifted samples (distortion_mix.aligned_teacher_bev).
+    mask = inside & shift.active[:, None, None]
+    assert bool(inside[1].any()) and not bool(mask[1].any())
     assert torch.allclose(aligned[1], clean.detach()[1], atol=1e-5)
     same = feature_consistency_kl(aligned.clone(), aligned, mask)
     assert same.item() == pytest.approx(0.0, abs=1e-6)
