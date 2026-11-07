@@ -12,6 +12,7 @@ sets the BEV thresholds and never trains; the rest trains.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import shutil
@@ -27,6 +28,7 @@ LOADER_SHUFFLE: Final = 256
 IMAGENET_MEAN: Final = (0.485, 0.456, 0.406)
 IMAGENET_STD: Final = (0.229, 0.224, 0.225)
 HELDOUT_PREFIX: Final = "heldout-"
+VALIDATION_CACHE: Final = Path(tempfile.gettempdir()) / "autobev-validation-shards"
 
 
 def _files(uri: str) -> list[str]:
@@ -155,17 +157,19 @@ def autobev_validation_batches(partition_uris: Sequence[str], *, split: str, lim
     for uri in partition_uris:
         manifest = _manifest(uri)
         for name in manifest["shard_names"]:
-            with tempfile.TemporaryDirectory() as directory:
-                local = Path(directory)
+            # Kept between passes: checkpoint validation reads the same shards every time.
+            local = VALIDATION_CACHE / hashlib.sha256(f"{uri}/{name}".encode()).hexdigest()[:24]
+            if not (local / "manifest.json").is_file():
+                local.mkdir(parents=True, exist_ok=True)
                 _fetch(uri, name, local / name)
                 single = {**manifest, "shard_names": [name],
                           "shard_sample_counts": {name: manifest["shard_sample_counts"][name]}}
                 (local / "manifest.json").write_text(json.dumps(single))
-                for batch in make_pre_extracted_loader(str(local), batch_size=1, num_workers=2, split="val",
-                                                       val_fraction=CALIBRATION_FRACTION, shuffle=0):
-                    if batch["split_group_uid"][0].startswith(HELDOUT_PREFIX) != held_out:
-                        continue
-                    yield batch
-                    count += 1
-                    if count == limit:
-                        return
+            for batch in make_pre_extracted_loader(str(local), batch_size=1, num_workers=2, split="val",
+                                                   val_fraction=CALIBRATION_FRACTION, shuffle=0):
+                if batch["split_group_uid"][0].startswith(HELDOUT_PREFIX) != held_out:
+                    continue
+                yield batch
+                count += 1
+                if count == limit:
+                    return
