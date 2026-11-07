@@ -15,13 +15,14 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
-import shutil
 import tempfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, Final
 
 import torch
+
+from training import storage
 
 CALIBRATION_FRACTION: Final = 0.02
 LOADER_SHUFFLE: Final = 256
@@ -31,32 +32,12 @@ HELDOUT_PREFIX: Final = "heldout-"
 VALIDATION_CACHE: Final = Path(tempfile.gettempdir()) / "autobev-validation-shards"
 
 
-def _files(uri: str) -> list[str]:
-    if uri.startswith("s3://"):
-        import boto3
-
-        bucket, _, prefix = uri.removeprefix("s3://").partition("/")
-        pages = boto3.client("s3").get_paginator("list_objects_v2").paginate(
-            Bucket=bucket, Prefix=prefix.rstrip("/") + "/")
-        return sorted(item["Key"].rsplit("/", 1)[-1] for page in pages for item in page.get("Contents", []))
-    return sorted(path.name for path in Path(uri).iterdir())
-
-
 def _fetch(uri: str, name: str, target: Path) -> None:
-    if uri.startswith("s3://"):
-        import boto3
-
-        bucket, _, prefix = uri.removeprefix("s3://").partition("/")
-        boto3.client("s3").download_file(bucket, f"{prefix.rstrip('/')}/{name}", str(target))
-    else:
-        shutil.copyfile(Path(uri) / name, target)
+    storage.download(f"{uri.rstrip('/')}/{name}", target)
 
 
 def _manifest(uri: str) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory() as directory:
-        target = Path(directory) / "manifest.json"
-        _fetch(uri, "manifest.json", target)
-        return json.loads(target.read_text())
+    return json.loads(storage.read_bytes(f"{uri.rstrip('/')}/manifest.json"))
 
 
 def stage_rank_shards(partition_uris: Sequence[str], *, rank: int, world: int, root: Path) -> list[str]:
