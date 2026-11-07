@@ -73,12 +73,16 @@ TAGS: Final = {
     14: ("vehicle", "VEHICLE"), 15: ("vehicle", "VEHICLE"), 16: ("vehicle", "VEHICLE"),
     17: ("vehicle", "VEHICLE"), 18: ("vehicle", "VEHICLE"), 19: ("vulnerable_road_user", "BICYCLE"),
 }
+INFOS: Final = frozenset(f"simbev_infos_{split}.json" for split in SPLITS)
 _MEMBER_RE: Final = re.compile(r"SimBEV-scene-\d{4}-frame-(\d{4})-(.+)\.[a-z]+$")
 
 
 def needed_member(name: str) -> bool:
-    """Whether a member of a SimBEV sensor or ground-truth archive is read by some sample."""
-    match = _MEMBER_RE.search(name.rsplit("/", 1)[-1])
+    """Whether a member of a SimBEV archive is read: the infos, or a frame some sample uses."""
+    base = name.rsplit("/", 1)[-1]
+    if base in INFOS:
+        return True
+    match = _MEMBER_RE.search(base)
     if match is None:
         return False
     frame, sensor = int(match.group(1)), match.group(2)
