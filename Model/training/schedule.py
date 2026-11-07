@@ -161,14 +161,3 @@ class Schedule:
                 optimizer.state.pop(parameter, None)
         for param_group, group in zip(optimizer.param_groups, self.groups, strict=True):
             param_group["lr"] = self.base_lr * group.scale * self.factor(step, group)
-
-    def back_off(self) -> bool:
-        """Halve the AutoBEV rates once more; False when the limit is reached."""
-        if self.autobev_backoff >= MAX_BACKOFFS:
-            return False
-        self.autobev_backoff += 1
-        return True
-
-    def constants(self) -> dict[str, object]:
-        """The schedule constants, for the run log and the checkpoint metadata."""
-        return {name: value for name, value in globals().items() if name.isupper()}
