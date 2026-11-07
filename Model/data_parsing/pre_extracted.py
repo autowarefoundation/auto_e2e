@@ -46,7 +46,7 @@ import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Iterable, Mapping, Sequence
+from typing import Any, Final, Iterable, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -1505,7 +1505,7 @@ def _navigation_without_route(
     map_context: torch.Tensor,
     *,
     map_valid: bool,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Navigation inputs of a sample that has no route members."""
     shape = map_context.shape[-2:]
     return {
@@ -1519,7 +1519,7 @@ def _navigation_without_route(
     }
 
 
-def _decode_navigation(sample: Mapping[str, object]) -> dict[str, object]:
+def _decode_navigation(sample: dict) -> dict[str, Any]:
     """Decode the semantic map, route, and loss-only route members."""
     from navigation.artifacts import (
         decode_route_supervision,
@@ -1646,7 +1646,7 @@ def _decode_navigation(sample: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _decode_motion(sample: Mapping[str, object]) -> dict[str, torch.Tensor]:
+def _decode_motion(sample: dict) -> dict[str, torch.Tensor]:
     """Decode ego history and trajectory targets; zeros where absent."""
     ego_bytes = sample.get("ego.npy", b"")
     if isinstance(ego_bytes, bytes) and len(ego_bytes) > 0:
