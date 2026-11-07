@@ -2,15 +2,13 @@
 
 AlpaSim builds the driver through ``from_config`` with the cameras listed in
 ``driver.inference.use_cameras``. The plugin picks the calibration profile of
-that camera rig, rebuilds AutoE2E from the configuration saved in the
-checkpoint, and reads the model's input contract (camera slots, tile sizes)
-from that same configuration.
+that camera rig, loads a stage 2 AutoE2E checkpoint written by
+``training.trainer``, and feeds it the six cameras in the canonical slot order.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import inspect
 import logging
 from pathlib import Path
 from typing import Any
@@ -24,11 +22,6 @@ from alpasim_driver.models.base import (
     PredictionInput,
 )
 from data_parsing.camera_slots import CANONICAL_SIX_CAMERA_SLOTS
-from model_components.view_fusion.projection import PinholeProjection
-from reactive_training_contracts import (
-    REACTIVE_CAMERA_IMAGE_SIZE,
-    REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
-)
 from training.losses.control_rollout import integrate_controls_torch
 
 from .config import find_rig_profile
@@ -39,54 +32,39 @@ logger = logging.getLogger(__name__)
 MOCK_CHECKPOINT = "MOCK"
 """``checkpoint_path`` that runs without a model and drives straight ahead."""
 UNTRAINED_CHECKPOINT = "UNTRAINED"
-"""``checkpoint_path`` that builds the release architecture with random weights."""
+"""``checkpoint_path`` that builds AutoE2E with random weights."""
 
 OUTPUT_FREQUENCY_HZ = 10
 _WAYPOINT_STEP_US = 1_000_000 // OUTPUT_FREQUENCY_HZ
-_SUPPORTED_ARCHITECTURE = "bevformer_v2_t8"
 
 
-def load_checkpoint_model(
-    checkpoint_path: str | Path, device: torch.device
-) -> tuple[torch.nn.Module, dict[str, Any]]:
-    """Rebuild AutoE2E from the configuration saved in its checkpoint.
+def load_checkpoint_model(checkpoint_path: str | Path, device: torch.device) -> torch.nn.Module:
+    """Load a stage 2 AutoE2E checkpoint; it holds every weight, so nothing is downloaded."""
+    from model_components import AutoE2E
+    from model_components.autobev import check_autobev_contract
 
-    Same reconstruction as ``load_policy`` in ``Platform/pipelines/inference.py``.
-    The checkpoint holds the complete backbone, so no pretrained weights are
-    downloaded first.
-    """
-    from model_components.auto_e2e import AutoE2E
-
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    config = dict(checkpoint["config"])
-    accepted = set(inspect.signature(AutoE2E.__init__).parameters) - {"self"}
-    kwargs = {key: value for key, value in config.items() if key in accepted}
-    kwargs["is_pretrained"] = False
-    model = AutoE2E(**kwargs)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    return model.to(device).eval(), config
+    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    metadata = state["metadata"]
+    check_autobev_contract(metadata.get("autobev_contract"), source=str(checkpoint_path))
+    if metadata["stage"] != 2:
+        raise ValueError(
+            f"{checkpoint_path} is a stage {metadata['stage']} checkpoint; "
+            "the driver needs a stage 2 AutoE2E checkpoint"
+        )
+    model = AutoE2E(pretrained_backbone=False)
+    model.load_state_dict(state["model"])
+    return model.to(device).eval()
 
 
-def build_untrained_model(
-    num_views: int, device: torch.device
-) -> tuple[torch.nn.Module, dict[str, Any]]:
-    """Build the release architecture with random weights, for dry runs."""
-    from model_components.auto_e2e import AutoE2E
-    from training.reactive_multitask import (
-        ReactiveTrainingStage,
-        reactive_model_kwargs,
-    )
+def build_untrained_model(device: torch.device) -> torch.nn.Module:
+    """Build AutoE2E with random weights, for dry runs."""
+    from model_components import AutoE2E
 
-    config = reactive_model_kwargs(ReactiveTrainingStage.NUPLAN_FULL, num_views=num_views)
-    # The released checkpoints use the reactive training default backbone
-    # (Platform/pipelines/distributed_training.py).
-    config["backbone"] = "res_net_50"
-    config["is_pretrained"] = False
-    return AutoE2E(**config).to(device).eval(), config
+    return AutoE2E(pretrained_backbone=False).to(device).eval()
 
 
 class AutoE2EDriver(BaseTrajectoryModel):
-    """AlpaSim ``BaseTrajectoryModel`` running the AutoE2E reactive policy."""
+    """AlpaSim ``BaseTrajectoryModel`` running the AutoE2E policy."""
 
     def __init__(
         self,
@@ -100,38 +78,17 @@ class AutoE2EDriver(BaseTrajectoryModel):
         self.profile = find_rig_profile(camera_ids)
 
         self.model: torch.nn.Module | None = None
-        config: dict[str, Any] = {}
         if checkpoint_path == MOCK_CHECKPOINT:
             logger.warning("AutoE2E driver runs in mock mode: no model is loaded")
         elif checkpoint_path == UNTRAINED_CHECKPOINT:
             logger.warning("AutoE2E driver runs an untrained model")
-            self.model, config = build_untrained_model(len(camera_ids), self.device)
+            self.model = build_untrained_model(self.device)
         elif Path(checkpoint_path).is_file():
-            self.model, config = load_checkpoint_model(checkpoint_path, self.device)
+            self.model = load_checkpoint_model(checkpoint_path, self.device)
         else:
             raise FileNotFoundError(f"AutoE2E checkpoint {checkpoint_path!r} not found")
 
-        view_fusion = dict(config.get("view_fusion_kwargs") or {})
-        if self.model is not None and view_fusion.get("architecture") != _SUPPORTED_ARCHITECTURE:
-            raise ValueError(
-                "The AutoE2E driver supports the reactive BEVFormer T8 model "
-                f"('{_SUPPORTED_ARCHITECTURE}'); the checkpoint uses "
-                f"{view_fusion.get('architecture')!r}"
-            )
-        camera_slots = list(config.get("camera_slots") or CANONICAL_SIX_CAMERA_SLOTS)
-        if self.model is not None and config.get("num_views") != len(camera_slots):
-            raise ValueError(
-                f"Checkpoint num_views={config.get('num_views')} does not match "
-                f"its camera_slots {camera_slots}"
-            )
-        self.parser = AlpasimStreamParser(
-            self.profile,
-            camera_slots,
-            image_size=int(view_fusion.get("image_size", REACTIVE_CAMERA_IMAGE_SIZE)),
-            front_image_size=int(
-                view_fusion.get("front_image_size", REACTIVE_FRONT_CAMERA_IMAGE_SIZE)
-            ),
-        )
+        self.parser = AlpasimStreamParser(self.profile, CANONICAL_SIX_CAMERA_SLOTS)
         logger.info(
             "AutoE2E driver: rig profile %s, cameras %s",
             self.profile.name,
@@ -205,49 +162,12 @@ class AutoE2EDriver(BaseTrajectoryModel):
         )
 
     def _run_model(self, parsed: ParsedObservation) -> torch.Tensor:
-        """Call AutoE2E the way ``predict_control`` in Platform/pipelines does."""
+        """Run ``AutoE2E.forward`` on the parsed inputs and return its ``[1, 128]`` controls."""
         assert self.model is not None
-        inputs = {
-            key: value.to(self.device) if torch.is_tensor(value) else value
-            for key, value in parsed.model_inputs.items()
-        }
-        projection = PinholeProjection(
-            inputs.pop("camera_projection_matrix"), geometry_type="pinhole"
-        )
-        history_matrix = inputs.pop("camera_history_projection_matrix")
-        history_projections = tuple(
-            PinholeProjection(history_matrix[:, index], geometry_type="pinhole")
-            for index in range(history_matrix.shape[1])
-        )
-        front_matrix = inputs.pop("front_camera_projection_matrix", None)
-        front_projection = (
-            PinholeProjection(front_matrix, geometry_type="pinhole")
-            if front_matrix is not None
-            else None
-        )
-        reset_visual_history = getattr(self.model, "reset_visual_history", None)
-        if callable(reset_visual_history):
-            reset_visual_history()
+        inputs = {key: value.to(self.device) for key, value in parsed.model_inputs.items()}
         with torch.no_grad():
-            output = self.model(
-                inputs["camera_tiles"],
-                inputs["map_context"],
-                inputs["visual_history"],
-                inputs["egomotion_history"],
-                route_mask=inputs["route_mask"],
-                map_valid=inputs["map_valid"],
-                route_valid=inputs["route_valid"],
-                projection=projection,
-                geometry_type="pinhole",
-                camera_history_tiles=inputs["camera_history_tiles"],
-                history_projections=history_projections,
-                front_camera_tile=inputs.get("front_camera_tile"),
-                front_projection=front_projection,
-                mode="infer",
-            )
-        if isinstance(output, tuple):
-            output = output[0]
-        return output
+            controls, _ = self.model(**inputs)
+        return controls
 
     @staticmethod
     def _mock_prediction(speed: float) -> ModelPrediction:
