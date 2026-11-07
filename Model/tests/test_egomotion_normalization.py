@@ -3,24 +3,20 @@
 The failure this guards against is silent. Scaling in place mutates the caller's
 batch, and the scaling is not idempotent — a second forward over the same batch
 divides speed by 33 again. Nothing raises; the run produces a plausible number
-from an input that is two orders of magnitude too small. The multi-seed loop in
-``Platform/pipelines/overlay_precompute.py`` reuses one batch across seeds and
-hits exactly this.
+from an input that is two orders of magnitude too small. The stage 2 trainer
+runs the distorted and the clean teacher pass on the same batch and would hit
+exactly this.
 """
 
 from __future__ import annotations
 
-import copy
-import pickle
-
 import pytest
 import torch
 
-from model_components.auto_e2e import (
-    _ACCELERATION_SCALE,
-    _SPEED_SCALE,
-    normalize_egomotion,
-)
+from model_components.auto_e2e import EGOMOTION_SCALE, normalize_egomotion
+
+_SPEED_SCALE = 1.0 / EGOMOTION_SCALE[0]
+_ACCELERATION_SCALE = 1.0 / EGOMOTION_SCALE[1]
 
 # 64 timesteps x [speed, acceleration, yaw_rate, curvature] — the packed
 # contract every dataset parser emits.
@@ -90,11 +86,6 @@ def test_preserves_shape_dtype_and_device():
     assert scaled.device == history.device
 
 
-def test_rejects_a_width_that_is_not_whole_timesteps():
-    with pytest.raises(ValueError, match="not a multiple of"):
-        normalize_egomotion(torch.zeros(2, 255))
-
-
 def test_gradients_flow_through():
     history = _history().requires_grad_(True)
 
@@ -106,16 +97,3 @@ def test_gradients_flow_through():
         history.grad.reshape(-1, 64, 4)[..., 0],
         torch.full((history.shape[0], 64), 1.0 / _SPEED_SCALE),
     )
-
-
-def test_model_attribute_stays_callable_and_copyable(build_mock_model, device):
-    """A closure assigned to ``self`` would break deepcopy and pickle."""
-    model = build_mock_model(num_views=7, device=device)
-    history = _history()
-
-    assert torch.equal(
-        model.normalize_egomotion(history),
-        normalize_egomotion(history),
-    )
-    copy.deepcopy(model)
-    pickle.dumps(model.normalize_egomotion)

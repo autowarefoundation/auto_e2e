@@ -12,11 +12,11 @@ from training.lateral_recovery import (
     MAX_YAW_RAD,
     _frenet_slope,
     _history_camera_targets,
+    _shift_map_context,
     _warp_images,
     aligned_clean_planner_bev,
     apply_lateral_recovery,
     ego_shift_transform,
-    feature_bottleneck_kl,
     feature_consistency_kl,
     preserved_batch_norm_statistics,
     recovery_trajectory,
@@ -210,8 +210,9 @@ def test_sampling_respects_probability_bounds_and_eligibility():
         "trajectory_valid": torch.ones(2, 64, dtype=torch.bool),
         "egomotion_history": history,
     }
-    assert not bool(sample_lateral_shift(batch, 0.0).active.any())
-    shift = sample_lateral_shift(batch, 1.0)
+    generator = torch.Generator().manual_seed(0)
+    assert not bool(sample_lateral_shift(batch, torch.zeros(2, dtype=torch.bool), generator).active.any())
+    shift = sample_lateral_shift(batch, torch.ones(2, dtype=torch.bool), generator)
     assert shift.active.tolist() == [True, False]
     assert abs(shift.offset_m[0].item()) <= MAX_OFFSET_M
     assert abs(shift.yaw_rad[0].item()) <= MAX_YAW_RAD
@@ -223,23 +224,20 @@ def _camera_batch(batch_size=2, size=16):
     motion = torch.eye(4).repeat(7, 1, 1)
     motion[:, 0, 3] = -torch.arange(7, 0, -1, dtype=torch.float32) * 5.0
     history = rig[None] @ motion[:, None]
-    front = _camera(0.0, image_size=2 * size)[None]
     return {
         "visual_tiles": torch.rand(batch_size, 3, 3, size, size),
-        "front_camera_tile": torch.rand(batch_size, 3, 2 * size, 2 * size),
         "camera_history_tiles": torch.rand(batch_size, 7, 3, 3, size, size),
         "camera_projection_matrix": rig.expand(batch_size, -1, -1, -1).clone(),
-        "front_camera_projection_matrix": front.expand(
-            batch_size, -1, -1, -1
-        ).clone(),
+        "autobev_depth": torch.rand(batch_size, 3, size // 4, size // 4) + 1.0,
+        "autobev_boxes": [torch.tensor([[10.0, 1.0, 0.5, 4.0, 2.0, 1.5, 0.1, 5.0, 0.0]])] * batch_size,
         "camera_history_projection_matrix": history.expand(
             batch_size, -1, -1, -1, -1
         ).clone(),
-        "map_context": torch.rand(batch_size, 14, 36, 24),
-        "route_mask": torch.rand(batch_size, 2, 36, 24),
-        "bev_segmentation_target": torch.rand(batch_size, 2, 36, 24) > 0.5,
+        "map_context": torch.rand(batch_size, 14, 450, 300),
+        "route_mask": torch.rand(batch_size, 2, 450, 300),
+        "bev_segmentation_target": torch.rand(batch_size, 2, 220, 160) > 0.5,
         "bev_segmentation_valid": torch.ones(
-            batch_size, 2, 36, 24, dtype=torch.bool
+            batch_size, 2, 220, 160, dtype=torch.bool
         ),
         "egomotion_history": torch.cat(
             [_straight_history()] * batch_size
@@ -258,8 +256,11 @@ def test_inactive_samples_are_bitwise_unchanged(method):
         batch,
         shift,
         method=method,
-        geometry=_GEOMETRY,
     )
+    boxes = batch.pop("autobev_boxes")
+    # An inactive sample's boxes go through the identity rotation: equal up to rounding.
+    assert torch.allclose(out["autobev_boxes"][1], boxes[1])
+    assert not torch.allclose(out["autobev_boxes"][0], boxes[0])
     for key, value in batch.items():
         assert torch.equal(out[key][1], value[1]), key
     changed = [
@@ -275,14 +276,13 @@ def test_inactive_samples_are_bitwise_unchanged(method):
     if method == "projection":
         expected = common | {
             "camera_projection_matrix",
-            "front_camera_projection_matrix",
             "camera_history_projection_matrix",
         }
     else:
         expected = common | {
             "visual_tiles",
-            "front_camera_tile",
             "camera_history_tiles",
+            "autobev_depth",
             "camera_history_projection_matrix",
         }
     assert expected <= set(changed)
@@ -297,33 +297,19 @@ def test_raster_mark_moves_to_its_shifted_cell():
     raster = torch.zeros(1, 14, 36, 24)
     # Ego point (x=4.25 m, y=1.25 m) is row 15, column 9.
     raster[0, 0, 15, 9] = 1.0
-    batch = _camera_batch(batch_size=1)
-    batch["map_context"] = raster
-    shift = _shift([1.0], [0.0])
-    out = apply_lateral_recovery(
-        batch,
-        shift,
-        method="projection",
-        geometry=_GEOMETRY,
-    )
+    shifted = _shift_map_context(raster, _shift([1.0], [0.0]), _GEOMETRY)
     # One metre to the left moves the point one metre right in E': two columns.
-    peak = torch.nonzero(out["map_context"][0, 0] == 1.0)
+    peak = torch.nonzero(shifted[0, 0] == 1.0)
     assert peak.tolist() == [[15, 11]]
 
 
 def test_map_traffic_direction_rotates_into_the_shifted_frame():
-    batch = _camera_batch(batch_size=1)
-    batch["map_context"] = torch.zeros(1, 14, 36, 24)
-    batch["map_context"][0, MapChannel.TRAFFIC_DIRECTION_SIN] = 0.5
-    batch["map_context"][0, MapChannel.TRAFFIC_DIRECTION_COS] = 1.0
-    batch["map_context"][0, MapChannel.TRAFFIC_DIRECTION_VALID] = 1.0
-    out = apply_lateral_recovery(
-        batch,
-        _shift([0.0], [math.radians(5.0)]),
-        method="projection",
-        geometry=_GEOMETRY,
-    )
-    cell = out["map_context"][0, :, 18, 12]
+    raster = torch.zeros(1, 14, 36, 24)
+    raster[0, MapChannel.TRAFFIC_DIRECTION_SIN] = 0.5
+    raster[0, MapChannel.TRAFFIC_DIRECTION_COS] = 1.0
+    raster[0, MapChannel.TRAFFIC_DIRECTION_VALID] = 1.0
+    shifted = _shift_map_context(raster, _shift([0.0], [math.radians(5.0)]), _GEOMETRY)
+    cell = shifted[0, :, 18, 12]
     assert cell[MapChannel.TRAFFIC_DIRECTION_SIN].item() == pytest.approx(
         (math.sin(math.radians(-5.0)) + 1.0) / 2.0, abs=1e-5
     )
@@ -343,10 +329,10 @@ def test_heading_offset_matches_the_yaw_on_curved_paths():
 
 def test_planner_bev_alignment_uses_its_own_resolution_and_full_support():
     shift = _shift([0.1], [0.0])
-    # The planner BEV covers the raster extent at a coarser 24x16 grid.
+    # The planner BEV covers the AutoBEV extent, here at a coarser 24x16 grid.
     teacher = torch.zeros(1, 2, 24, 16)
     teacher[:, 0] = 4.0
-    aligned, mask = aligned_clean_planner_bev(teacher, shift, _GEOMETRY)
+    aligned, mask = aligned_clean_planner_bev(teacher, shift)
     assert aligned.shape == teacher.shape
     assert bool(mask.any())
     loss = feature_consistency_kl(teacher.clone(), aligned, mask)
@@ -367,8 +353,10 @@ def test_teacher_forward_keeps_batch_norm_statistics():
 def test_consistency_kl_trains_only_the_shifted_branch():
     clean = torch.randn(2, 4, 36, 24, requires_grad=True)
     shift = _shift([0.5, 0.0], [0.03, 0.0], torch.tensor([True, False]))
-    aligned, mask = aligned_clean_planner_bev(clean, shift, _GEOMETRY)
-    assert not bool(mask[1].any())
+    aligned, inside = aligned_clean_planner_bev(clean, shift)
+    # The trainer compares only the shifted samples (distortion_mix.aligned_teacher_bev).
+    mask = inside & shift.active[:, None, None]
+    assert bool(inside[1].any()) and not bool(mask[1].any())
     assert torch.allclose(aligned[1], clean.detach()[1], atol=1e-5)
     same = feature_consistency_kl(aligned.clone(), aligned, mask)
     assert same.item() == pytest.approx(0.0, abs=1e-6)
@@ -379,247 +367,3 @@ def test_consistency_kl_trains_only_the_shifted_branch():
     assert clean.grad is None
     assert shifted.grad[0].abs().sum() > 0.0
     assert torch.equal(shifted.grad[1], torch.zeros_like(shifted.grad[1]))
-
-
-def test_bottleneck_kl_gradient_is_the_mean_scaled_feature():
-    feature = torch.randn(2, 3, 4, 5, requires_grad=True)
-    feature_bottleneck_kl(feature).backward()
-    assert torch.allclose(feature.grad, feature.detach() / feature.numel())
-
-
-_T8_TINY = {
-    "architecture": "bevformer_v2_t8",
-    "activation_checkpointing": False,
-    "image_size": 32,
-    "front_image_size": 64,
-    "num_encoder_layers": 1,
-    "num_points": 2,
-    "query_chunk_size": 64,
-}
-
-_MOCK_BEV_GEOMETRY = NavigationRasterGeometry(
-    geometry_id="lateral-recovery-mock-bev",
-    height_px=8,
-    width_px=8,
-    meters_per_pixel=15.0,
-    x_min_m=-60.0,
-    x_max_m=60.0,
-    y_min_m=-60.0,
-    y_max_m=60.0,
-    ego_anchor_row=3.5,
-    ego_anchor_col=3.5,
-    matching_pc_range=(-60.0, -60.0, -5.0, 60.0, 60.0, 3.0),
-    matching_bev_h=8,
-    matching_bev_w=8,
-    route_corridor_width_m=3.5,
-    destination_marker_radius_m=2.0,
-    route_rear_clip_m=10.0,
-)
-
-
-def _t8_model(build_mock_model):
-    from tests.test_reactive_multitask import _model
-
-    view_fusion_kwargs = dict(_T8_TINY)
-    view_fusion_kwargs["pc_range"] = list(
-        _MOCK_BEV_GEOMETRY.matching_pc_range
-    )
-    return _model(
-        build_mock_model,
-        torch.device("cpu"),
-        views=6,
-        view_fusion_kwargs=view_fusion_kwargs,
-    )
-
-
-def _t8_batch():
-    from tests.test_reactive_multitask import (
-        _attach_stage_a_camera_context,
-        _stage_batch,
-    )
-
-    batch = _stage_batch(
-        torch.device("cpu"),
-        include_bev=True,
-        batch_size=2,
-        views=6,
-        image_size=32,
-    )
-    _attach_stage_a_camera_context(batch, front_image_size=64)
-    # Mounted 1.6 m above the ground, unlike the synthetic context, so the
-    # ground-plane warp is defined.
-    rig = torch.stack([
-        _camera(yaw, image_size=32) for yaw in (0, 55, -55, 110, 180, -110)
-    ])
-    batch["camera_projection_matrix"] = rig.expand(2, -1, -1, -1).clone()
-    batch["front_camera_projection_matrix"] = (
-        _camera(0.0, image_size=64)[None, None].expand(2, -1, -1, -1).clone()
-    )
-    batch["camera_history_projection_matrix"] = (
-        rig[None, None].expand(2, 7, -1, -1, -1).clone()
-    )
-    batch["egomotion_history"] = torch.cat([_straight_history()] * 2)
-    batch["initial_speed_mps"] = torch.full((2,), 10.0)
-    batch["trajectory_xy_m"] = torch.cat([_straight_future()] * 2)
-    return batch
-
-
-def _objective(**weights):
-    from training.reactive_multitask import (
-        ReactiveMultitaskObjective,
-        ReactiveTrainingStage,
-    )
-
-    return ReactiveMultitaskObjective(
-        ReactiveTrainingStage.NUPLAN_FULL,
-        bev_pos_weight=[1.0] * 8,
-        bev_weight=0.0,
-        route_weight=1.0,
-        **weights,
-    )
-
-
-def _single_process(monkeypatch):
-    import torch.distributed as dist
-
-    monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(dist, "get_rank", lambda: 0)
-    monkeypatch.setattr(dist, "get_world_size", lambda: 1)
-
-
-def _train_one_step(model, batch, objective, **options):
-    from distributed_training.reactive_stage import _train_fixed_steps
-
-    return _train_fixed_steps(
-        model,
-        [batch],
-        objective,
-        torch.optim.SGD(model.parameters(), lr=0.0),
-        device=torch.device("cpu"),
-        optimizer_steps=1,
-        gradient_accumulation_steps=1,
-        grad_clip=1_000.0,
-        precision="fp32",
-        **options,
-    )
-
-
-def test_planner_bev_noise_only_applies_in_training(build_mock_model):
-    model = _t8_model(build_mock_model)
-    batch = _t8_batch()
-
-    def call(mode, **options):
-        return model(
-            batch["visual_tiles"],
-            batch["map_context"],
-            batch["visual_history"],
-            batch["egomotion_history"],
-            route_mask=batch["route_mask"],
-            mode=mode,
-            **options,
-        )
-
-    model.eval()
-    with torch.no_grad():
-        plain = call("eval")
-        noisy, auxiliary = call(
-            "eval",
-            return_planner_bev=True,
-            planner_bev_noise=True,
-        )
-    assert torch.equal(plain, noisy)
-    assert auxiliary["planner_bev"].shape[-2:] == (8, 8)
-    model.train()
-    for module in model.modules():
-        if isinstance(module, torch.nn.Dropout):
-            module.eval()
-    torch.manual_seed(0)
-    reference, _ = call("train", return_planner_bev=True)
-    torch.manual_seed(0)
-    repeated, _ = call("train", return_planner_bev=True)
-    torch.manual_seed(0)
-    noisy, _ = call("train", planner_bev_noise=True)
-    assert torch.equal(reference, repeated)
-    assert not torch.allclose(reference, noisy)
-
-
-def test_disabled_step_matches_a_direct_forward(build_mock_model, monkeypatch):
-    from training.reactive_stage_runner import (
-        resolve_reactive_batch_projection,
-        resolve_reactive_camera_history,
-        resolve_reactive_front_projection,
-    )
-
-    _single_process(monkeypatch)
-    model = _t8_model(build_mock_model)
-    batch = _t8_batch()
-    objective = _objective()
-    projection, geometry_type = resolve_reactive_batch_projection(
-        batch, None, "pseudo", device=torch.device("cpu")
-    )
-    history_tiles, history_projections = resolve_reactive_camera_history(
-        batch, geometry_type, device=torch.device("cpu")
-    )
-    model.train()
-    torch.manual_seed(7)
-    controls, auxiliary = model(
-        batch["visual_tiles"],
-        batch["map_context"],
-        batch["visual_history"],
-        batch["egomotion_history"],
-        route_mask=batch["route_mask"],
-        map_valid=batch["map_valid"],
-        route_valid=batch["route_valid"],
-        projection=projection,
-        geometry_type=geometry_type,
-        camera_history_tiles=history_tiles,
-        history_projections=history_projections,
-        front_camera_tile=batch["front_camera_tile"],
-        front_projection=resolve_reactive_front_projection(
-            batch, geometry_type, device=torch.device("cpu")
-        ),
-        mode="train",
-        compute_bev_segmentation=False,
-        compute_route_reconstruction=True,
-        bev_only=False,
-    )
-    expected = objective(controls, auxiliary, batch)
-    torch.manual_seed(7)
-    metrics = _train_one_step(model, batch, objective)
-    assert metrics["total"] == pytest.approx(expected["total"].item(), rel=1e-6)
-    assert metrics["feature_consistency"] == 0.0
-    assert metrics["feature_bottleneck"] == 0.0
-
-
-@pytest.mark.parametrize("method", ["projection", "image_warp"])
-def test_enabled_step_trains_on_recovery_with_both_feature_losses(
-    build_mock_model,
-    monkeypatch,
-    method,
-):
-    import navigation.geometry
-
-    _single_process(monkeypatch)
-    monkeypatch.setattr(
-        navigation.geometry,
-        "AUTOE2E_NAVIGATION_GEOMETRY",
-        _MOCK_BEV_GEOMETRY,
-    )
-    model = _t8_model(build_mock_model)
-    batch = _t8_batch()
-    objective = _objective(
-        feature_consistency_weight=1.0,
-        feature_bottleneck_weight=0.1,
-    )
-    torch.manual_seed(3)
-    metrics = _train_one_step(
-        model,
-        batch,
-        objective,
-        lateral_recovery_method=method,
-        lateral_recovery_probability=1.0,
-    )
-    assert math.isfinite(metrics["total"])
-    assert metrics["feature_consistency"] > 0.0
-    assert metrics["feature_bottleneck"] > 0.0
-    assert metrics["gradient_planner_pre_clip_norm"] > 0.0

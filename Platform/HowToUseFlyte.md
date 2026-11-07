@@ -48,18 +48,24 @@ the `source_manifest` of every later `DatasetSpec`.
 {
   "workflow": "wf_autoe2e",
   "dataset": {
-    "dataset": "kitscenes",
-    "source_manifest": {"uri": "…", "version_id": "null", "sha256": "…"},
-    "pack_version": "<current_pack_version('kitscenes')>",
-    "image_size": 256,
-    "unit_limit": 10,
-    "reasoning": {"teacher": "openai_compatible", "teacher_model": "nvidia/Cosmos3-Nano", "prompt_version": "action_relevant_reasoning_v3_temporal_front256", "label_stride": 10}
+    "dataset": "nuplan",
+    "source_manifest": {"uri": "…", "version_id": "…", "sha256": "…"},
+    "pack_version": "<current_pack_version('nuplan')>",
+    "image_size": 1344
   },
-  "training": {"gpu_profile": "ray_1", "stage": "kitscenes_finetune", "epochs": 1, "steps_per_epoch": 8},
-  "evaluation": [{"suite": "internal_val"}],
+  "mix": [{"dataset": "nuscenes", "source_manifest": {"uri": "…", "version_id": "…", "sha256": "…"}, "pack_version": "<current_pack_version('nuscenes')>", "image_size": 1344}],
+  "early_mix": [{"dataset": "simbev", "source_manifest": {"uri": "…", "version_id": "…", "sha256": "…"}, "pack_version": "<current_pack_version('simbev')>", "image_size": 1344}],
+  "training": {"stage": 1, "gpu_profile": "ray_1", "steps": 8, "checkpoint_interval_steps": 4},
+  "evaluation": ["geo_val"],
   "runtime": {"datasets_bucket": "…", "checkpoints_bucket": "…", "tracking_url": "https://<mlflow>"}
 }
 ```
+
+`training` takes the `TrainingSpec` fields of
+`Platform/pipelines/autoe2e_training.py` (`stage`, `gpu_profile`, `steps`,
+`learning_rate`, `per_rank_batch_size`, `checkpoint_interval_steps`, `seed`).
+`mix` lists the BEV datasets trained with `dataset`, `early_mix` those used in
+the first half of stage 1 only.
 
 `pack_version` must equal `current_pack_version(dataset)` from
 `Platform/pipelines/autoe2e_adapters.py`; it changes whenever a pack contract
@@ -72,15 +78,15 @@ What the run does, and what it skips:
 | plan and resolve the dataset | — |
 | label units, pack, publish, commit | the same `DatasetSpec` is already published |
 | label one unit | its label set is already committed |
-| train on the profile's queue | `training.epochs` is 0 |
+| train on the profile's queue | `training.steps` is 0 |
 | register one LoggedModel per distinct checkpoint | the checkpoint is already registered |
 | evaluate each target | — |
 | verify lineage | — |
 
-GPU profiles: `ray_1` (one validation GPU, smoke only), `ray_2` (two
-validation GPUs), `ray_4` and `ray_8` (p5en Capacity Block). The profile is
-the only way to pick a queue; the 4- and 8-GPU tasks read the active block's
-end time themselves.
+GPU profiles: `ray_1` (one validation GPU, smoke only) and `ray_8` (one
+8-GPU p5en node). The profile is the only way to pick a queue. Every
+training run also starts a one-GPU task that validates each checkpoint as it
+lands; the best and the final checkpoint are registered.
 
 ## 3. Multi-stage training
 
@@ -91,7 +97,7 @@ registered as an imported model first, so every stage has a model page.
 
 ## 4. Evaluate an existing model
 
-Set `training.epochs` to 0, `parent` to the model version, and list the
+Set `training.steps` to 0, `parent` to the model version, and list the
 evaluation targets. The metrics attach to that model; no new version is made.
 
 ## 5. When something fails

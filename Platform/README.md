@@ -359,11 +359,13 @@ Platform/
 ├── infra-console/                  Data/model console ALB SG + CloudFront
 │
 ├── pipelines/                      Flyte workflows and tasks
-│   ├── workflows.py                Ingest, labeling, packing, training, eval
-│   ├── distributed_training.py     Ray multi-GPU training
+│   ├── autoe2e.py                  wf_autoe2e: datasets, training, registration, evaluation
+│   ├── autoe2e_training.py         Ray training and checkpoint validation tasks
+│   ├── autoe2e_acquire.py          wf_acquire_raw_snapshot
+│   ├── workflows.py                KITScenes and L2D ingest, labeling and packing tasks
 │   ├── nuplan_acquisition.py
 │   ├── nuplan_dataset.py
-│   └── overlay*.py                 Trajectory overlays
+│   └── overlay.py                  Trajectory overlay artifact format (Console)
 │
 ├── scripts/                        Operator CLIs (p5en Capacity Blocks, ...)
 ├── tests/

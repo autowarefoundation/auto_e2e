@@ -2,7 +2,6 @@
   "dataset_name": "nuplan/nuplan-v1.1",
   "source": "camera table of nuPlan v1.1 log 2021.05.12.22.00.38_veh-35_01008_01518 (veh-35)",
   "reference_frame": "nuPlan ego frame (ego_pose). The AlpaSim rig frame of the rendered world must match it; cameras are rectified pinhole.",
-  "native_front_camera_tile": true,
   "egomotion": {
     "curvature_speed_floor_mps": 0.5,
     "curvature_zero_below_mps": 0.5,

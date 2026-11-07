@@ -119,7 +119,9 @@ The install check needs `make`, which you can get from a [package manager](https
 
 The checkpoints are for non-commercial use under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/), because they are trained on nuPlan (CC BY-NC-SA 4.0) and KITScenes-Multimodal (CC BY-NC 4.0) and start from BEVFormer V2 weights trained on nuScenes (CC BY-NC-SA 4.0). The source code and the assets in this repository remain under Apache-2.0. The [model card](https://huggingface.co/AutowareFoundation/auto_e2e#license) lists the license of every release file.
 
-**3. Go further.** Read the [documentation and academic paper](https://autowarefoundation.github.io/auto_e2e/), explore the [Model](./Model/) folder, or follow the [Trial Guide](./TRIAL.md) to run the test suite on AWS EC2. Inference reaches up to **~76 FPS** (SwinV2-Tiny, feature-concat fusion, RTX 5080, batch 1); [BENCHMARKS.md](./Model/speed_benchmark/BENCHMARKS.md) has every GPU, backbone and batch size.
+These checkpoints run with the code tagged [`v1.0`](https://github.com/autowarefoundation/auto_e2e/tree/v1.0). The current code trains the AutoBEV model ([`Design/autobev_integration.md`](./Design/autobev_integration.md)) through `wf_autoe2e`; [`Platform/HowToUseFlyte.md`](./Platform/HowToUseFlyte.md) shows how to launch training and evaluation.
+
+**3. Go further.** Read the [documentation and academic paper](https://autowarefoundation.github.io/auto_e2e/), explore the [Model](./Model/) folder, or follow the [Trial Guide](./TRIAL.md) to run the test suite on AWS EC2.
 
 <img src="./Media/readme/section-community.svg" alt="Join the community" width="100%">
 

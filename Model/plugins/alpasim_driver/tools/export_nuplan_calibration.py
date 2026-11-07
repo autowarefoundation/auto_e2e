@@ -112,8 +112,6 @@ def main() -> None:
             "nuPlan ego frame (ego_pose). The AlpaSim rig frame of the rendered "
             "world must match it; cameras are rectified pinhole."
         ),
-        # nuPlan shards pack the front camera at 1024 px (front_camera_tile).
-        "native_front_camera_tile": True,
         # data_parsing/nuplan/packing.py _state_signals.
         "egomotion": {
             "curvature_speed_floor_mps": 0.5,

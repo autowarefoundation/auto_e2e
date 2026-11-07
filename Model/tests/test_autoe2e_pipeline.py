@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 from pathlib import Path
 
 import pytest
@@ -174,14 +173,6 @@ def test_checkpoints_are_stored_content_addressed_and_verified():
         store_checkpoint(s3, source_uri="s3://ray/run/checkpoint.pt", sha256="f" * 64, bucket="ckpt")
 
 
-def test_numeric_leaves_flatten_only_finite_numbers():
-    from Platform.pipelines.autoe2e import numeric_leaves
-
-    assert numeric_leaves("", {"trajectory": {"ade_3s_m": 0.7, "ade_6p4s_m": None, "n": 3},
-                               "route": {"available": False}, "x": float("nan")}) == {
-        "trajectory.ade_3s_m": 0.7, "trajectory.n": 3.0}
-
-
 class ListingS3(S3):
     def get_paginator(self, name):
         s3 = self
@@ -265,124 +256,3 @@ def test_tar_tree_keeps_one_file_open_at_a_time(tmp_path):
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
     assert len(members) == 300
-
-
-def _source(metrics='{"validation_ade_6p4s_m": 2.5, "validation_fde_6p4s_m": 6.0, "route": {"x": 1}}'):
-    from Platform.pipelines.autoe2e import OverlaySource, RegisteredModel
-
-    model = RegisteredModel("best", "m-abc", "71", "s3://ckpt/autoe2e/checkpoints/x.pt", "c" * 64, "l" * 64)
-    return OverlaySource(model, "r" * 32, metrics, "res_net_50", 0.1, "exec", "v3.7")
-
-
-def test_overlay_metadata_names_the_registered_version_and_validation_metrics():
-    from Platform.pipelines.autoe2e import overlay_metadata
-
-    metadata = overlay_metadata(_source(), dataset_source="KIT-MRT/KITScenes-Multimodal")
-    assert metadata["registered_model_name"] == "auto-e2e-driving-policy"
-    assert metadata["model_version"] == "71"
-    assert metadata["artifact_uri"] == "models:/m-abc"
-    assert (metadata["eval_ade"], metadata["eval_fde"]) == (2.5, 6.0)
-    assert (metadata["model_name"], metadata["dataset_version_source"], metadata["train_execution_id"]) == (
-        "res_net_50", "v3.7", "exec")
-    with pytest.raises(ValueError, match="validation ADE"):
-        overlay_metadata(_source('{"bev_iou": 0.3}'), dataset_source="d")
-
-
-def test_overlays_need_a_console_publication(monkeypatch):
-    from Platform.pipelines import autoe2e_store
-    from Platform.pipelines.autoe2e import RuntimeOptions, console_manifest_sha256
-    from Platform.pipelines.autoe2e_store import DatasetHandle
-
-    handle = DatasetHandle("d" * 64, "kitscenes", "v3.7", True, "exec", lineage_key="k", lineage_sha256="s")
-    runtime = RuntimeOptions(datasets_bucket=BUCKET)
-    for console, expected in (({"manifest_sha256": "m" * 64}, "m" * 64), (None, "")):
-        monkeypatch.setattr(autoe2e_store, "read_dataset_lineage",
-                            lambda s3, *, bucket, key, sha256, c=console: {"console": c})
-        assert console_manifest_sha256(S3(), handle, runtime) == expected
-
-
-def test_overlay_chunks_balance_samples_and_cover_every_partition_once():
-    from Platform.pipelines.autoe2e import overlay_chunks
-
-    counts = {f"s3://d/p{i:03d}": c for i, c in enumerate([500, 10, 10, 10, 480, 20, 30, 5])}
-    chunks = overlay_chunks(counts, 2)
-    assert sorted(u for c in chunks for u in c) == sorted(counts)
-    loads = sorted(sum(counts[u] for u in c) for c in chunks)
-    assert loads == [530, 535]
-    for chunk in chunks:
-        assert chunk == sorted(chunk)  # dataset order inside a chunk
-    assert [len(c) for c in overlay_chunks(dict(list(counts.items())[:2]), 16)] == [1, 1]
-    with pytest.raises(ValueError, match="at least 1"):
-        overlay_chunks(counts, 0)
-    with pytest.raises(ValueError, match="no partitions"):
-        overlay_chunks({}, 4)
-
-
-def _parent_logged(**params):
-    from types import SimpleNamespace
-
-    metric = lambda key, value, ts: SimpleNamespace(key=key, value=value, timestamp=ts)  # noqa: E731
-    return SimpleNamespace(
-        source_run_id="r" * 32,
-        params={"dataset.dataset": "kitscenes", "dataset_id": "d" * 64, "training.backbone": "res_net_50",
-                "training.val_fraction": "0.1", "provenance.flyte_execution_id": "train-exec", **params},
-        metrics=[
-            metric("eval/internal_val/kitscenes-v3.7/validation_ade_6p4s_m", 9.0, 1),
-            metric("eval/internal_val/kitscenes-v3.7/validation_ade_6p4s_m", 3.0, 2),
-            metric("eval/internal_val/kitscenes-v3.7/validation_fde_6p4s_m", 7.0, 2),
-            metric("eval/kitscenes_benchmark/kitscenes-val-v3.6/ade_3s_m", 1.0, 3),
-        ],
-    )
-
-
-def test_overlay_source_reads_a_parent_from_its_own_logged_model():
-    from types import SimpleNamespace
-
-    from Platform.pipelines.autoe2e import RegisteredModel, RuntimeOptions, TrainedCheckpoints, TrainingSpec, overlay_source
-    from Platform.pipelines.autoe2e_store import DatasetHandle
-
-    s3 = S3()
-    s3.objects[(BUCKET, f"kitscenes/by-id/{'d' * 64}.json")] = b'{"version": "v3.7"}'
-    parent = RegisteredModel("parent", "m-p", "70", "s3://c/p.pt", "c" * 64, "l" * 64)
-    logged = _parent_logged()
-    client = SimpleNamespace(get_logged_model=lambda model_id: logged)
-    # The epochs=0 run's own spec and dataset must not leak into the attribution.
-    args = (TrainedCheckpoints(trained=False), TrainingSpec(backbone="other", val_fraction=0.3),
-            DatasetHandle("e" * 64, "kitscenes", "v9.9", True, "x"), RuntimeOptions(datasets_bucket=BUCKET))
-    source = overlay_source(client, s3, [parent], *args)
-    assert (source.model, source.run_id, source.backbone, source.val_fraction) == (parent, "r" * 32, "res_net_50", 0.1)
-    assert (source.train_execution_id, source.train_dataset_version) == ("train-exec", "v3.7")
-    assert json.loads(source.metrics_json) == {"validation_ade_6p4s_m": 3.0, "validation_fde_6p4s_m": 7.0}
-    for change in ({"source_run_id": None}, {"params": {**logged.params, "dataset.dataset": "nuplan"}},
-                   {"metrics": logged.metrics[:2]}):
-        client = SimpleNamespace(get_logged_model=lambda model_id, c=change: SimpleNamespace(**{**vars(logged), **c}))
-        assert overlay_source(client, s3, [parent], *args) is None
-
-
-def test_overlay_source_takes_a_training_best_but_not_a_one_gpu_smoke():
-    from Platform.pipelines.autoe2e import (
-        GpuProfile, RegisteredModel, RuntimeOptions, TrainedCheckpoints, TrainingSpec, overlay_source)
-    from Platform.pipelines.autoe2e_store import DatasetHandle
-
-    best = RegisteredModel("best", "m-b", "71", "s3://c/b.pt", "b" * 64, "l" * 64)
-    trained = TrainedCheckpoints(trained=True, run_id="t" * 32, best_metrics_json="{}")
-    handle = DatasetHandle("e" * 64, "kitscenes", "v3.7", True, "x")
-    source = overlay_source(None, None, [best], trained, TrainingSpec(gpu_profile=GpuProfile.RAY_8), handle,
-                            RuntimeOptions())
-    assert (source.model, source.run_id, source.train_dataset_version) == (best, "t" * 32, "v3.7")
-    assert overlay_source(None, None, [best], trained, TrainingSpec(gpu_profile=GpuProfile.RAY_1), handle,
-                          RuntimeOptions()) is None
-
-
-def test_overlays_skip_partitions_without_samples():
-    from Platform.pipelines.autoe2e import RuntimeOptions, partition_sample_counts
-    from Platform.pipelines.autoe2e_store import DatasetHandle
-
-    s3 = S3()
-    views = json.dumps({"partitions": [{"prefix": "kitscenes/v3.7/partitions/p0", "sample_count": 3},
-                                       {"prefix": "kitscenes/v3.7/partitions/p1", "sample_count": 0}]}).encode()
-    s3.objects[(BUCKET, "kitscenes/v3.7/partitions/manifest.json")] = views
-    uris = [f"s3://{BUCKET}/kitscenes/v3.7/partitions/p0", f"s3://{BUCKET}/kitscenes/v3.7/partitions/p1"]
-    handle = DatasetHandle("e" * 64, "kitscenes", "v3.7", True, "x", views_sha256=sha256_bytes(views),
-                           partition_uris=uris)
-    assert partition_sample_counts(s3, handle, RuntimeOptions(datasets_bucket=BUCKET)) == {uris[0]: 3}
