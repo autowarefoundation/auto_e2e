@@ -3,8 +3,9 @@
 Tiny synthetic packs (a planner pack with a held-out Pittsburgh group and a
 calibration-share group, and a BEV-only pack) go through the real staging,
 loaders, Ray Train loop, S3 checkpoints, stage 1 to stage 2 hand-over, and the
-checkpoint validation watcher. ``AUTOE2E_SMOKE_STORAGE`` names an S3 prefix the
-host may write; the test is skipped without it and without a GPU.
+checkpoint validation watcher. ``AUTOE2E_SMOKE_STORAGE`` names the run storage
+(an S3 prefix or a local directory); the test is skipped without it and
+without a GPU.
 """
 
 import os
@@ -38,7 +39,7 @@ def _group_in_split(validation: bool) -> str:
 def test_two_stage_training_and_validation(tmp_path):
     import ray
 
-    from evaluation.checkpoint_validation import _checkpoints, watch
+    from evaluation.checkpoint_validation import list_checkpoints, watch
     from training.autobev_data import autobev_validation_batches
     from training.trainer import TrainRun, run_training
 
@@ -58,7 +59,7 @@ def test_two_stage_training_and_validation(tmp_path):
         stage1 = TrainRun(stage=1, run_name="stage1", storage_uri=storage, primary_shards=[planner],
                           mix_shards=[bev_only], steps=4, checkpoint_interval_steps=2, world_size=1)
         run_training(stage1)
-        stage1_checkpoints = _checkpoints(f"{storage}/stage1")
+        stage1_checkpoints = list_checkpoints(f"{storage}/stage1")
         assert len(stage1_checkpoints) == 2
         stage2 = TrainRun(stage=2, run_name="stage2", storage_uri=storage, primary_shards=[planner],
                           mix_shards=[bev_only], steps=4, checkpoint_interval_steps=2, world_size=1,
