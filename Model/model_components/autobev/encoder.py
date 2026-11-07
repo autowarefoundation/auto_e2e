@@ -46,7 +46,6 @@ NUM_BOX_CLASSES = 4
 F_REF = 1000.0
 DEPTH_BINS = 112
 DEPTH_MIN_M, DEPTH_MAX_M = 0.7, 180.0
-FEATURE_STRIDE = 8
 DEPTH_WEIGHT_FLOOR = 0.2
 PV_SEG_CLASSES = ("drivable_area", "lane_boundary", "intersection", "crosswalk", "stop_line")
 CENTER_GROUPS = ("vehicle", "vulnerable_road_user")
