@@ -136,7 +136,7 @@ def _feedback_backoffs(storage_uri: str, run_name: str) -> int:
         return 0
 
 
-def _model_inputs(batch: dict[str, Any], localization) -> dict[str, torch.Tensor]:
+def model_inputs(batch: dict[str, Any], localization) -> dict[str, torch.Tensor]:
     return {
         "images": batch["visual_tiles"],
         "history_images": batch["camera_history_tiles"],
@@ -164,14 +164,14 @@ def _stage2_terms(model, objective, batch, generator, schedule, step):
     distorted, distortion = apply_distortions(batch, generator)
     distorted = restrict_to_visible(distorted)
     distorted["autobev_dense_supervised"] = distorted["planner_supervised"]
-    controls, auxiliary = model(**_model_inputs(distorted, localization))
+    controls, auxiliary = model(**model_inputs(distorted, localization))
     teacher = torch.zeros_like(auxiliary["planner_bev"])
     teacher_mask = torch.zeros_like(teacher[:, 0], dtype=torch.bool)
     # The clean teacher pass is only needed when some sample was distorted.
     if bool(distortion.distorted.any()):
         network = model.module
         with torch.no_grad(), preserved_batch_norm_statistics(network):
-            _, clean = network(**_model_inputs(batch, localization))
+            _, clean = network(**model_inputs(batch, localization))
         teacher, teacher_mask = aligned_teacher_bev(clean["planner_bev"], distortion)
     return objective(
         controls, auxiliary, distorted, auxiliary_weight=schedule.auxiliary_weight(step),
