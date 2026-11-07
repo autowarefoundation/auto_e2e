@@ -41,6 +41,9 @@ from training.trainer import CHECKPOINT_FILE, FEEDBACK_FILE, METADATA_FILE, Trai
 VALIDATION_SAMPLES: Final = 512
 CALIBRATION_SAMPLES: Final = 512
 POLL_SECONDS: Final = 300
+# Without a new checkpoint for this long the training task has stopped; the
+# watcher fails rather than hold its GPU.
+STALL_SECONDS: Final = 6 * 3600
 BACKOFF_DROP: Final = 0.10
 RESULT_FILE: Final = "validation.json"
 SEED: Final = 0
@@ -54,6 +57,7 @@ def _sum(totals: dict[str, torch.Tensor], counts: Mapping[str, torch.Tensor]) ->
 @torch.no_grad()
 def _bev_and_trajectory(model, stage: int, batches: Iterable[dict[str, Any]], device):
     from model_components.losses import TrajectoryXYImitationLoss
+    from training.autobev_augment import full_image_window, restrict_to_visible
     from training.autobev_data import to_device
     from training.localization_noise import simulate_localization
 
@@ -64,6 +68,8 @@ def _bev_and_trajectory(model, stage: int, batches: Iterable[dict[str, Any]], de
     integrate = TrajectoryXYImitationLoss().predicted_xy
     for raw in batches:
         batch = to_device(raw, device)
+        # Labels count only where a camera can see them, as in training.
+        batch = restrict_to_visible({**batch, "autobev_image_window": full_image_window(batch)})
         sample_ids += list(batch["sample_uid"])
         with torch.autocast("cuda", dtype=torch.bfloat16):
             if stage == 1:
@@ -85,19 +91,28 @@ def _bev_and_trajectory(model, stage: int, batches: Iterable[dict[str, Any]], de
     return totals, trajectory, sample_ids
 
 
-def validate(model, stage: int, calibration: Iterable, validation: Iterable, device) -> dict[str, Any]:
-    """Calibrate thresholds, then report BEV IoU (and ADE/FDE in stage 2) with per-sample trajectory errors."""
-    model.eval()
-    calibration_totals, _, _ = _bev_and_trajectory(model, stage, calibration, device)
-    thresholds = calibrate_thresholds(calibration_totals)
-    totals, trajectory, sample_ids = _bev_and_trajectory(model, stage, validation, device)
+def _metrics(totals, trajectory, thresholds) -> dict[str, float]:
     metrics = summarize_bev(totals, thresholds)
     for key, values in trajectory.items():
         finite = values[torch.isfinite(values)]
         if finite.numel():
             metrics[key] = float(finite.mean())
+    return metrics
+
+
+def validate(model, stage: int, calibration: Iterable, validation: Iterable, device) -> dict[str, Any]:
+    """Calibrate thresholds, then report BEV IoU (and ADE/FDE in stage 2) with per-sample trajectory errors.
+
+    ``calibration_metrics`` (non-Pittsburgh calibration split) choose
+    checkpoints; ``metrics`` (held-out Pittsburgh) stay unbiased by that choice.
+    """
+    model.eval()
+    calibration_totals, calibration_trajectory, _ = _bev_and_trajectory(model, stage, calibration, device)
+    thresholds = calibrate_thresholds(calibration_totals)
+    totals, trajectory, sample_ids = _bev_and_trajectory(model, stage, validation, device)
     return {
-        "metrics": metrics,
+        "metrics": _metrics(totals, trajectory, thresholds),
+        "calibration_metrics": _metrics(calibration_totals, calibration_trajectory, thresholds),
         "thresholds": thresholds,
         "sample_uids": sample_ids,
         "per_sample": {key: [float(v) for v in values] for key, values in trajectory.items()},
@@ -122,10 +137,14 @@ def write_json(uri: str, payload: Mapping) -> None:
     storage.write_bytes(uri, json.dumps(payload, indent=1, sort_keys=True).encode())
 
 
-def _load(model, checkpoint_dir: str) -> dict:
+def load_checkpoint(model, checkpoint_file: str) -> dict:
+    """Load a checkpoint file into ``model`` after checking its AutoBEV contract; returns its metadata."""
+    from model_components.autobev import check_autobev_contract
+
     with tempfile.TemporaryDirectory() as directory:
-        local = storage.download(f"{checkpoint_dir}/{CHECKPOINT_FILE}", Path(directory) / CHECKPOINT_FILE)
+        local = storage.download(checkpoint_file, Path(directory) / CHECKPOINT_FILE)
         state = torch.load(local, map_location="cpu", weights_only=False)
+    check_autobev_contract(state["metadata"].get("autobev_contract"), source=checkpoint_file)
     model.load_state_dict(state["model"])
     return state["metadata"]
 
@@ -144,27 +163,37 @@ def watch(run: TrainRun, calibration: Callable[[], Iterable], validation: Callab
     model = (AutoBEV(pretrained_backbone=False) if run.stage == 1 else AutoE2E(pretrained_backbone=False)).to(device)
     baseline = None
     if run.stage == 2:
-        _load(model.Reactive_E2E.AutoBEV, run.parent_checkpoint_uri.rstrip("/"))
+        load_checkpoint(model.Reactive_E2E.AutoBEV, run.parent_checkpoint_uri)
         baseline = validate(model, run.stage, calibration(), validation(), device)
         write_json(f"{run_uri}/parent_{RESULT_FILE}", baseline)
-    results, backoffs = [], 0
+    feedback_uri = f"{run_uri}/{FEEDBACK_FILE}"
+    # A retried watcher continues the count it wrote before.
+    feedback = read_json(feedback_uri) if storage.exists(feedback_uri) else {"autobev_backoffs": 0, "step": -1}
+    results = []
+    last_seen = time.monotonic()
     while True:
         # A checkpoint counts once both of its files are uploaded.
         pending = [c for c in list_checkpoints(run_uri)
                    if storage.exists(f"{c}/{METADATA_FILE}") and storage.exists(f"{c}/{CHECKPOINT_FILE}")
                    and not storage.exists(f"{c}/{RESULT_FILE}")]
         if not pending:
+            if time.monotonic() - last_seen > STALL_SECONDS:
+                raise RuntimeError(f"no new checkpoint under {run_uri} for {STALL_SECONDS} s")
             time.sleep(POLL_SECONDS)
             continue
+        last_seen = time.monotonic()
         for checkpoint in pending:
-            metadata = _load(model, checkpoint)
+            metadata = load_checkpoint(model, f"{checkpoint}/{CHECKPOINT_FILE}")
             result = {"step": metadata["step"], "checkpoint": checkpoint,
                       **validate(model, run.stage, calibration(), validation(), device)}
             write_json(f"{checkpoint}/{RESULT_FILE}", result)
             results.append(result)
-            if baseline is not None and drivable_score(result["metrics"]) < (1 - BACKOFF_DROP) * drivable_score(
-                    baseline["metrics"]):
-                backoffs += 1
-                write_json(f"{run_uri}/{FEEDBACK_FILE}", {"autobev_backoffs": backoffs, "step": metadata["step"]})
+            # The trainer applies a back-off at its next checkpoint, so only a
+            # checkpoint trained a full interval after that may ask for another.
+            settled = metadata["step"] > feedback["step"] + 2 * run.checkpoint_interval_steps
+            if settled and baseline is not None and drivable_score(result["metrics"]) < (
+                    1 - BACKOFF_DROP) * drivable_score(baseline["metrics"]):
+                feedback = {"autobev_backoffs": feedback["autobev_backoffs"] + 1, "step": metadata["step"]}
+                write_json(feedback_uri, feedback)
             if metadata["step"] >= run.steps:
                 return results
