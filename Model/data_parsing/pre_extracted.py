@@ -23,6 +23,14 @@ Usage:
         # batch["visual_history"]     (B, 896)
         # batch["trajectory_target"]  (B, 128)
         # batch["camera_projection_matrix"] (B, V, 3, 4)   when packed per sample
+
+Packs with the AutoBEV member contract (nuPlan and the BEV-only datasets)
+decode into one layout instead: ``visual_tiles`` [B, 6, 3, 768, 1344],
+``camera_history_tiles`` [B, 7, 6, 3, 768, 1344], projections, BEV labels on
+the 220x160 AutoBEV grid, ``autobev_depth`` [B, 6, 96, 168], box lists, the
+0.4 m navigation inputs (zeros with invalid flags for BEV-only samples), and
+``planner_supervised``. ``make_autobev_bev_share_loader`` and
+``make_autobev_sample_count_loader`` mix such packs per sample.
 """
 
 from __future__ import annotations
@@ -38,7 +46,7 @@ import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Final, Iterable, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -54,6 +62,16 @@ from reactive_training_contracts import (
     REACTIVE_FRONT_CAMERA_INDEX,
 )
 from torchvision import transforms
+
+# Stage 2 draws this share of its samples from the BEV-only packs so the
+# encoder keeps what it learned on the other rigs (autobev_integration 3.3).
+AUTOBEV_BEV_ONLY_SHARE: Final = 0.15
+# nuPlan packs supervise the planner; BEV-only packs carry only AutoBEV members.
+AUTOBEV_SAMPLE_KINDS: Final = ("planner", "autobev_only")
+# Every AutoBEV projection is a pinhole [3, 4] matrix to the cropped pixels.
+AUTOBEV_GEOMETRY_TYPE: Final = "rectified_pinhole"
+# Box counts differ per sample, so a batch keeps these as lists of tensors.
+AUTOBEV_VARIABLE_LENGTH_KEYS: Final = ("autobev_boxes", "autobev_box_labels")
 
 _HISTORY_STEPS = 64
 _FUTURE_STEPS = 64
@@ -2225,6 +2243,186 @@ def _decode_sample(
     return out
 
 
+def read_autobev_manifest(shard_dir: str | Path) -> Mapping[str, object] | None:
+    """Return the manifest of a pack with AutoBEV members, or None for others.
+
+    A pack that records ``autobev_members_version`` must match
+    ``manifest_contract()`` in every field and name a known ``sample_kind``;
+    any difference is refused rather than read with the wrong geometry.
+    """
+    from data_processing.autobev_members import manifest_contract
+    from model_components.autobev.geometry import check_autobev_contract
+
+    path = Path(shard_dir) / "manifest.json"
+    if not path.is_file():
+        return None
+    manifest = json.loads(path.read_text())
+    if "autobev_members_version" not in manifest:
+        return None
+    check_autobev_contract(manifest.get("autobev_geometry"), source=str(path))
+    differing = sorted(
+        key
+        for key, value in manifest_contract().items()
+        if manifest.get(key) != value
+    )
+    if differing:
+        raise ValueError(
+            f"{path} has a different AutoBEV member contract: {differing}"
+        )
+    if manifest.get("sample_kind") not in AUTOBEV_SAMPLE_KINDS:
+        raise ValueError(
+            f"{path} has an unknown AutoBEV sample_kind "
+            f"{manifest.get('sample_kind')!r}"
+        )
+    return manifest
+
+
+def _decode_autobev_sample(
+    sample: dict,
+    *,
+    planner_supervised: bool,
+) -> dict:
+    """Decode a sample of the AutoBEV member contract into training tensors.
+
+    nuPlan samples carry navigation, ego, and trajectory members; BEV-only
+    samples do not, and get zero inputs with invalid flags and
+    ``planner_supervised=False`` so both kinds share one batch layout.
+    """
+    from data_processing.autobev_members import (
+        BOXES_MEMBER,
+        DEPTH_MEMBER,
+        FEATURE_H,
+        FEATURE_W,
+        HISTORY_PROJECTION_MEMBER,
+        PROJECTION_MEMBER,
+        camera_member,
+        check_projections,
+        decode_boxes,
+        decode_npy,
+        decode_stride_depth,
+        history_camera_member,
+    )
+    from data_processing.reactive_training_artifacts import (
+        BEV_SEGMENTATION_CLASSES,
+        decode_bev_segmentation,
+    )
+    from model_components.autobev.geometry import (
+        BEV_H,
+        BEV_W,
+        HISTORY_FRAMES,
+        NUM_VIEWS,
+    )
+    from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
+
+    projection = decode_npy(sample[PROJECTION_MEMBER])
+    history_projection = decode_npy(sample[HISTORY_PROJECTION_MEMBER])
+    check_projections(projection, history_projection)
+    bev_target, bev_valid = decode_bev_segmentation(
+        sample["bev_segmentation.npz"]
+    )
+    if bev_target.shape != (len(BEV_SEGMENTATION_CLASSES), BEV_H, BEV_W):
+        raise ValueError(
+            f"AutoBEV labels must be [{len(BEV_SEGMENTATION_CLASSES)},"
+            f"{BEV_H},{BEV_W}], got {bev_target.shape}"
+        )
+    depth = (
+        decode_stride_depth(sample[DEPTH_MEMBER])
+        if DEPTH_MEMBER in sample
+        else np.zeros((NUM_VIEWS, FEATURE_H, FEATURE_W), dtype=np.float32)
+    )
+    boxes, box_labels = decode_boxes(sample.get(BOXES_MEMBER))
+    navigation = (
+        _decode_navigation(sample)
+        if _NAVIGATION_KEYS.intersection(sample)
+        else _navigation_without_route(_empty_navigation_map(), map_valid=False)
+    )
+    if tuple(navigation["map_context"].shape[1:]) != (
+        AUTOE2E_NAVIGATION_GEOMETRY.height_px,
+        AUTOE2E_NAVIGATION_GEOMETRY.width_px,
+    ):
+        raise ValueError("AutoBEV samples need the 0.4 m navigation raster")
+    del navigation["navigation_metadata"]
+    sample_metadata = (
+        _json_mapping(sample["meta.json"], member_name="meta.json")
+        if "meta.json" in sample
+        else {}
+    )
+    frame_index = sample_metadata.get("frame_idx", -1)
+    return {
+        "sample_uid": sample.get("__key__", ""),
+        "split_group_uid": str(sample_metadata.get("split_group_uid", "")),
+        "source_frame_index": torch.tensor(
+            frame_index
+            if isinstance(frame_index, int) and not isinstance(frame_index, bool)
+            else -1,
+            dtype=torch.int64,
+        ),
+        "visual_tiles": torch.stack([
+            _decode_image(sample[camera_member(view)])
+            for view in range(NUM_VIEWS)
+        ]),
+        "camera_history_tiles": torch.stack([
+            torch.stack([
+                _decode_image(sample[history_camera_member(frame, view)])
+                for view in range(NUM_VIEWS)
+            ])
+            for frame in range(HISTORY_FRAMES)
+        ]),
+        "camera_projection_matrix": torch.from_numpy(
+            projection.astype(np.float32)
+        ),
+        "camera_history_projection_matrix": torch.from_numpy(
+            history_projection.astype(np.float32)
+        ),
+        **navigation,
+        **_decode_motion(sample),
+        "visual_history": torch.zeros(_VISUAL_HISTORY_DIM),
+        "planner_supervised": torch.tensor(
+            planner_supervised,
+            dtype=torch.bool,
+        ),
+        "bev_segmentation_target": torch.from_numpy(
+            bev_target.astype(np.float32)
+        ),
+        "bev_segmentation_valid": torch.from_numpy(bev_valid.astype(np.bool_)),
+        "bev_segmentation_available": torch.tensor(True, dtype=torch.bool),
+        "bev_repeat_factor": torch.tensor(
+            int(sample.get("__bev_repeat_factor__", 1)),
+            dtype=torch.int64,
+        ),
+        "bev_sampling_importance": torch.tensor(
+            float(sample.get("__bev_sampling_importance__", 1.0)),
+            dtype=torch.float32,
+        ),
+        "autobev_depth": torch.from_numpy(depth),
+        "autobev_boxes": torch.from_numpy(boxes),
+        "autobev_box_labels": torch.from_numpy(box_labels),
+        **{
+            f"reasoning__{key}": tensor
+            for key, tensor in _decode_reasoning_targets(
+                sample.get("reasoning.json")
+            ).items()
+        },
+    }
+
+
+def collate_autobev_batch(samples: Sequence[Mapping[str, object]]) -> dict:
+    """Stack AutoBEV samples; variable-length boxes stay lists of tensors."""
+    from torch.utils.data import default_collate
+
+    batch = default_collate([
+        {
+            key: value
+            for key, value in sample.items()
+            if key not in AUTOBEV_VARIABLE_LENGTH_KEYS
+        }
+        for sample in samples
+    ])
+    for key in AUTOBEV_VARIABLE_LENGTH_KEYS:
+        batch[key] = [sample[key] for sample in samples]
+    return batch
+
+
 def _decode_reasoning_targets(data) -> dict:
     """Decode the reasoning.json member into per-sample target tensors.
 
@@ -2712,6 +2910,159 @@ def _detach_resource_tracker_pipe_from_exec(worker_id: int) -> None:
         pass
 
 
+def _sample_pipeline(
+    shard_dir: str,
+    *,
+    split: str,
+    val_fraction: float,
+    shuffle: int,
+    shuffle_seed: int | None,
+    shard_files: Sequence[str | Path] | None = None,
+    sample_uids: Sequence[str] | None = None,
+    validation_group_uids: Sequence[str] | None = None,
+    decode_history_frames: bool = True,
+    decode_future_frames: bool = True,
+    decode_front_camera_fpn: bool = False,
+    navigation_repeat_policy: NavigationRepeatPolicy | None = None,
+    bev_repeat_policy: BEVClassRepeatPolicy | None = None,
+    nodesplitter=None,
+    repeat: bool = False,
+):
+    """Return ``(decoded samples, shard count, AutoBEV manifest or None)``.
+
+    Packs that record the AutoBEV member contract decode with
+    ``_decode_autobev_sample``; every other pack keeps ``_decode_sample``.
+    """
+    shard_root = Path(shard_dir).resolve()
+    available_tarfiles = packed_sample_tar_paths(shard_root)
+    available_resolved = {
+        path.resolve() for path in available_tarfiles
+    }
+    tarfiles = (
+        sorted(Path(path) for path in shard_files)
+        if shard_files is not None
+        else list(available_tarfiles)
+    )
+    if not tarfiles:
+        raise FileNotFoundError(f"No .tar shards found in {shard_dir}")
+    if len(set(tarfiles)) != len(tarfiles):
+        raise ValueError("shard files must be unique")
+    for path in tarfiles:
+        resolved = path.resolve()
+        if (
+            not resolved.is_file()
+            or resolved.parent != shard_root
+            or resolved not in available_resolved
+        ):
+            raise ValueError(
+                "shard file must be declared as a sample shard under "
+                f"{shard_root}: {path}"
+            )
+        if resolved.suffix != ".tar":
+            raise ValueError(f"shard file must use .tar suffix: {path}")
+    if shuffle > 0:
+        random.Random(shuffle_seed).shuffle(tarfiles)
+
+    urls = [str(p) for p in tarfiles]
+
+    # webdataset's `workersplitter` already defaults to split_by_worker. Passing
+    # split_by_worker as `nodesplitter` too would split twice and silently drop
+    # (N-1)/N of the data, so the node slot uses single_node_only.
+    dataset = wds.WebDataset(
+        urls,
+        shardshuffle=False,
+        empty_check=False,
+        nodesplitter=nodesplitter or wds.single_node_only,
+    )
+    if repeat:
+        dataset = dataset.repeat()
+    if sample_uids is not None:
+        requested = [str(uid) for uid in sample_uids]
+        allowed = frozenset(requested)
+        if not allowed:
+            raise ValueError("sample_uids must not be empty")
+        if len(allowed) != len(requested):
+            raise ValueError("sample_uids contains duplicates")
+        dataset = dataset.select(_SampleUidFilter(allowed))
+    # Split BEFORE decode so dropped groups never incur image decoding.
+    keep = _split_keep(
+        split,
+        val_fraction,
+        validation_group_uids=validation_group_uids,
+    )
+    if split != "all" and (
+        val_fraction > 0.0 or validation_group_uids is not None
+    ):
+        dataset = dataset.select(keep)
+    if navigation_repeat_policy is not None:
+        if split != "train":
+            raise ValueError(
+                "navigation repeat policy is valid only for the train split"
+            )
+        dataset = dataset.compose(navigation_repeat_policy)
+    if bev_repeat_policy is not None:
+        if split != "train":
+            raise ValueError(
+                "BEV repeat policy is valid only for the train split"
+            )
+        if navigation_repeat_policy is not None:
+            raise ValueError(
+                "BEV and navigation repeat policies cannot be combined"
+            )
+        dataset = dataset.compose(bev_repeat_policy)
+    if shuffle > 0:
+        dataset = dataset.shuffle(shuffle, seed=shuffle_seed)
+    autobev = read_autobev_manifest(shard_dir)
+    # functools.partial rather than a lambda so the map fn pickles to workers.
+    decode = (
+        functools.partial(
+            _decode_autobev_sample,
+            planner_supervised=autobev["sample_kind"] == "planner",
+        )
+        if autobev is not None
+        else functools.partial(
+            _decode_sample,
+            # The frame pool is a sibling pool/ dir outside `urls`, so worker
+            # sharding never hides frames from a worker.
+            pool=_make_pool_accessor(shard_dir),
+            decode_history_frames=decode_history_frames,
+            decode_future_frames=decode_future_frames,
+            decode_front_camera_fpn=decode_front_camera_fpn,
+        )
+    )
+    return dataset.map(decode), len(tarfiles), autobev
+
+
+def _web_loader(
+    dataset,
+    *,
+    shard_count: int,
+    batch_size: int,
+    num_workers: int,
+    pin_memory: bool,
+    prefetch_factor: int,
+    drop_last: bool,
+    collate_fn,
+) -> wds.WebLoader:
+    # More workers than shards is wasted. Partition-scoped loaders are retired
+    # once exhausted, so workers must not persist beyond the iterator lifetime.
+    eff_workers = min(num_workers, shard_count) if num_workers > 0 else 0
+    loader_kwargs: dict = {
+        "batch_size": batch_size,
+        "collate_fn": collate_fn,
+        "drop_last": bool(drop_last),
+        "num_workers": eff_workers,
+    }
+    if eff_workers > 0:
+        loader_kwargs.update(
+            persistent_workers=False,
+            prefetch_factor=prefetch_factor,
+            pin_memory=pin_memory,
+            worker_init_fn=_detach_resource_tracker_pipe_from_exec,
+        )
+    return wds.WebLoader(dataset, **loader_kwargs)
+
+
 def make_pre_extracted_loader(
     shard_dir: str,
     batch_size: int = 8,
@@ -2784,117 +3135,44 @@ def make_pre_extracted_loader(
       - ``.geometry_type``: "pinhole" / "rectified_pinhole" / "ftheta" / "pseudo".
     Pass these to the model's forward alongside each batch.
     """
-    shard_root = Path(shard_dir).resolve()
-    available_tarfiles = packed_sample_tar_paths(shard_root)
-    available_resolved = {
-        path.resolve() for path in available_tarfiles
-    }
-    tarfiles = (
-        sorted(Path(path) for path in shard_files)
-        if shard_files is not None
-        else list(available_tarfiles)
-    )
-    if not tarfiles:
-        raise FileNotFoundError(f"No .tar shards found in {shard_dir}")
-    if len(set(tarfiles)) != len(tarfiles):
-        raise ValueError("shard files must be unique")
-    for path in tarfiles:
-        resolved = path.resolve()
-        if (
-            not resolved.is_file()
-            or resolved.parent != shard_root
-            or resolved not in available_resolved
-        ):
-            raise ValueError(
-                "shard file must be declared as a sample shard under "
-                f"{shard_root}: {path}"
-            )
-        if resolved.suffix != ".tar":
-            raise ValueError(f"shard file must use .tar suffix: {path}")
-    if shuffle > 0:
-        random.Random(shuffle_seed).shuffle(tarfiles)
-
-    urls = [str(p) for p in tarfiles]
-
-    # webdataset's `workersplitter` already defaults to split_by_worker. Passing
-    # split_by_worker as `nodesplitter` too would split twice and silently drop
-    # (N-1)/N of the data, so the node slot uses single_node_only.
-    dataset = wds.WebDataset(
-        urls,
-        shardshuffle=False,
-        empty_check=False,
-        nodesplitter=nodesplitter or wds.single_node_only,
-    )
-    if sample_uids is not None:
-        requested = [str(uid) for uid in sample_uids]
-        allowed = frozenset(requested)
-        if not allowed:
-            raise ValueError("sample_uids must not be empty")
-        if len(allowed) != len(requested):
-            raise ValueError("sample_uids contains duplicates")
-        dataset = dataset.select(_SampleUidFilter(allowed))
-    # Split BEFORE decode so dropped groups never incur image decoding.
-    keep = _split_keep(
-        split,
-        val_fraction,
+    dataset, shard_count, autobev = _sample_pipeline(
+        shard_dir,
+        split=split,
+        val_fraction=val_fraction,
+        shuffle=shuffle,
+        shuffle_seed=shuffle_seed,
+        shard_files=shard_files,
+        sample_uids=sample_uids,
         validation_group_uids=validation_group_uids,
-    )
-    if split != "all" and (
-        val_fraction > 0.0 or validation_group_uids is not None
-    ):
-        dataset = dataset.select(keep)
-    if navigation_repeat_policy is not None:
-        if split != "train":
-            raise ValueError(
-                "navigation repeat policy is valid only for the train split"
-            )
-        dataset = dataset.compose(navigation_repeat_policy)
-    if bev_repeat_policy is not None:
-        if split != "train":
-            raise ValueError(
-                "BEV repeat policy is valid only for the train split"
-            )
-        if navigation_repeat_policy is not None:
-            raise ValueError(
-                "BEV and navigation repeat policies cannot be combined"
-            )
-        dataset = dataset.compose(bev_repeat_policy)
-    if shuffle > 0:
-        dataset = dataset.shuffle(shuffle, seed=shuffle_seed)
-    # The frame pool is a sibling pool/ dir outside `urls`, so worker sharding
-    # never hides frames from a worker.
-    pool = _make_pool_accessor(shard_dir)
-    # functools.partial rather than a lambda so the map fn pickles to workers.
-    dataset = dataset.map(functools.partial(
-        _decode_sample,
-        pool=pool,
         decode_history_frames=decode_history_frames,
         decode_future_frames=decode_future_frames,
         decode_front_camera_fpn=decode_front_camera_fpn,
-    ))
-
-    # More workers than shards is wasted. Partition-scoped loaders are retired
-    # once exhausted, so workers must not persist beyond the iterator lifetime.
-    eff_workers = min(num_workers, len(tarfiles)) if num_workers > 0 else 0
-    loader_kwargs: dict = {
-        "batch_size": batch_size,
-        "drop_last": bool(drop_last),
-        "num_workers": eff_workers,
-    }
-    if eff_workers > 0:
-        loader_kwargs.update(
-            persistent_workers=False,
-            prefetch_factor=prefetch_factor,
-            pin_memory=pin_memory,
-            worker_init_fn=_detach_resource_tracker_pipe_from_exec,
-        )
-    loader = wds.WebLoader(dataset, **loader_kwargs)
-
-    # Per-dataset geometry, reconstructed once from the manifest.
-    projection, geometry_type = load_projection_from_manifest(shard_dir)
+        navigation_repeat_policy=navigation_repeat_policy,
+        bev_repeat_policy=bev_repeat_policy,
+        nodesplitter=nodesplitter,
+    )
+    loader = _web_loader(
+        dataset,
+        shard_count=shard_count,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        drop_last=drop_last,
+        collate_fn=collate_autobev_batch if autobev is not None else None,
+    )
+    # Per-dataset geometry, reconstructed once from the manifest. AutoBEV
+    # packs carry per-sample pinhole projections to the cropped pixels.
+    projection, geometry_type = (
+        (None, AUTOBEV_GEOMETRY_TYPE)
+        if autobev is not None
+        else load_projection_from_manifest(shard_dir)
+    )
     loader.projection = projection
     loader.geometry_type = geometry_type
     return loader
+
+
 
 
 @dataclass
@@ -3100,3 +3378,149 @@ def make_multi_dataset_loader(
         shuffle_seed=shuffle_seed,
     )
     return merged
+
+
+def _packed_sample_count(shard_dir: str | Path) -> int:
+    """Samples in the shards this directory exposes (the rank's, when staged)."""
+    manifest = json.loads((Path(shard_dir) / "manifest.json").read_text())
+    counts = manifest["shard_sample_counts"]
+    return sum(int(counts[path.name]) for path in packed_sample_tar_paths(shard_dir))
+
+
+def _make_autobev_mixed_loader(
+    shard_dirs: Sequence[str],
+    weights: Sequence[float],
+    *,
+    repeat: Sequence[bool],
+    longest: bool,
+    batch_size: int,
+    num_workers: int,
+    split: str,
+    val_fraction: float,
+    shuffle: int,
+    shuffle_seed: int | None,
+    pin_memory: bool,
+    prefetch_factor: int,
+    drop_last: bool,
+    nodesplitter,
+) -> MergedDatasetLoader:
+    """Draw each sample from one AutoBEV pack with probability ``weights``.
+
+    Every pack must carry the AutoBEV member contract, so nuPlan and
+    BEV-only samples share one batch layout. Each worker reads a slice of
+    every pack, so the workers are capped by the smallest shard count.
+    """
+    pipelines = []
+    shard_counts = []
+    for index, (shard_dir, repeated) in enumerate(zip(shard_dirs, repeat, strict=True)):
+        dataset, shard_count, autobev = _sample_pipeline(
+            shard_dir,
+            split=split,
+            val_fraction=val_fraction,
+            shuffle=shuffle,
+            shuffle_seed=None if shuffle_seed is None else shuffle_seed + index,
+            nodesplitter=nodesplitter,
+            repeat=repeated,
+        )
+        if autobev is None:
+            raise ValueError(f"{shard_dir} does not carry the AutoBEV members")
+        pipelines.append(dataset)
+        shard_counts.append(shard_count)
+    loader = _web_loader(
+        wds.RandomMix(pipelines, probs=list(weights), longest=longest),
+        shard_count=min(shard_counts),
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        drop_last=drop_last,
+        collate_fn=collate_autobev_batch,
+    )
+    loader.projection = None
+    loader.geometry_type = AUTOBEV_GEOMETRY_TYPE
+    return MergedDatasetLoader(loaders=[loader], num_workers=num_workers)
+
+
+def make_autobev_bev_share_loader(
+    primary_dirs: Sequence[str],
+    bev_only_dirs: Sequence[str],
+    *,
+    batch_size: int = 8,
+    num_workers: int = 4,
+    split: str = "train",
+    val_fraction: float = 0.0,
+    shuffle: int = 1000,
+    shuffle_seed: int | None = None,
+    pin_memory: bool = False,
+    prefetch_factor: int = 4,
+    drop_last: bool = False,
+    nodesplitter=None,
+) -> MergedDatasetLoader:
+    """Stage 2 loader: primary samples with ``AUTOBEV_BEV_ONLY_SHARE`` BEV-only.
+
+    Within each group the packs are weighted by their sample counts. The
+    BEV-only packs repeat, so one pass over the primary packs ends the epoch.
+    Yields ``(batch, projection, geometry_type)`` like ``make_multi_dataset_loader``.
+    """
+    primary_counts = [_packed_sample_count(path) for path in primary_dirs]
+    bev_only_counts = [_packed_sample_count(path) for path in bev_only_dirs]
+    weights = [
+        (1.0 - AUTOBEV_BEV_ONLY_SHARE) * count / sum(primary_counts)
+        for count in primary_counts
+    ] + [
+        AUTOBEV_BEV_ONLY_SHARE * count / sum(bev_only_counts)
+        for count in bev_only_counts
+    ]
+    return _make_autobev_mixed_loader(
+        [*primary_dirs, *bev_only_dirs],
+        weights,
+        repeat=[False] * len(primary_dirs) + [True] * len(bev_only_dirs),
+        longest=False,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        split=split,
+        val_fraction=val_fraction,
+        shuffle=shuffle,
+        shuffle_seed=shuffle_seed,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        drop_last=drop_last,
+        nodesplitter=nodesplitter,
+    )
+
+
+def make_autobev_sample_count_loader(
+    shard_dirs: Sequence[str],
+    *,
+    batch_size: int = 8,
+    num_workers: int = 4,
+    split: str = "train",
+    val_fraction: float = 0.0,
+    shuffle: int = 1000,
+    shuffle_seed: int | None = None,
+    pin_memory: bool = False,
+    prefetch_factor: int = 4,
+    drop_last: bool = False,
+    nodesplitter=None,
+) -> MergedDatasetLoader:
+    """Stage 1 loader: AutoBEV packs mixed in proportion to their sample counts.
+
+    The epoch ends when every pack is read once. Yields
+    ``(batch, projection, geometry_type)`` like ``make_multi_dataset_loader``.
+    """
+    return _make_autobev_mixed_loader(
+        shard_dirs,
+        [_packed_sample_count(path) for path in shard_dirs],
+        repeat=[False] * len(shard_dirs),
+        longest=True,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        split=split,
+        val_fraction=val_fraction,
+        shuffle=shuffle,
+        shuffle_seed=shuffle_seed,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        drop_last=drop_last,
+        nodesplitter=nodesplitter,
+    )
