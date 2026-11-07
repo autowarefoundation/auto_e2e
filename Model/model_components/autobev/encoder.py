@@ -175,13 +175,14 @@ class CenterHead(nn.Module):
 class AutoBEV(nn.Module):
     """Camera BEV encoder of AutoE2E; see the module docstring."""
 
-    def __init__(self, pretrained_backbone: bool = True, activation_checkpointing: bool = True) -> None:
+    def __init__(self, pretrained_backbone: bool = True) -> None:
         super().__init__()
         self.backbone = DinoV2Backbone(pretrained=pretrained_backbone)
         self.pyramid = BEVFormerFeaturePyramid(self.backbone.feature_channels, embed_dim=EMBED_DIM)
         self.view_fusion = BEVFormerV2T1ViewFusion(
             num_views=NUM_VIEWS, embed_dim=EMBED_DIM, bev_h=BEV_H, bev_w=BEV_W, pc_range=PC_RANGE,
-            activation_checkpointing=activation_checkpointing,
+            # Six encoder layers over 35,200 queries do not fit otherwise.
+            activation_checkpointing=True,
         )
         self.temporal_fusion = BEVFormerV2T8TemporalFusion(embed_dim=EMBED_DIM)
         self.image_transform = ImageTransform(model_input_size=(IMAGE_W, IMAGE_H))
