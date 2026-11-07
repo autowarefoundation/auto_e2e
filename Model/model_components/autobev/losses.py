@@ -24,6 +24,8 @@ The batch keys are those of an AutoBEV sample: ``bev_target`` and ``bev_valid``
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import torch
 import torch.nn.functional as F
 from torchvision.ops import sigmoid_focal_loss
@@ -50,7 +52,17 @@ OBJECT_CLASS_INDEX = [BEV_SEGMENTATION_CLASSES.index(name) for name in CENTER_GR
 BOX_RADIUS_CELLS = 1.5
 PV_CLASS_INDEX = [BEV_SEGMENTATION_CLASSES.index(name) for name in PV_SEG_CLASSES]
 PV_POS_WEIGHT = tuple(BEV_POS_WEIGHT[i] for i in PV_CLASS_INDEX)
-PV_SEG_WEIGHT, PV_PSEUDO_WEIGHT, RENDER_WEIGHT = 0.5, 0.5, 0.25
+LOSS_TERMS = ("bev", "depth", "box", "pv_seg", "pseudo", "render", "object", "center")
+# Stage 1 trains AutoBEV with every term. ``object`` adds a separate BCE+Dice
+# term on vehicle and vulnerable_road_user, so the map-side terms cannot crowd
+# out the object classes (BEVFusion reports that tasks sharing an encoder pull
+# each other down).
+STAGE1_WEIGHTS = {"bev": 1.0, "depth": 1.0, "box": 1.0, "pv_seg": 0.5, "pseudo": 0.5, "render": 0.25,
+                  "object": 0.5, "center": 1.0}
+# Stage 2 keeps segmentation, depth and centres as auxiliary terms; their sum
+# is scaled by the stage 2 schedule.
+STAGE2_AUX_WEIGHTS = {"bev": 1.0, "depth": 1.0, "box": 0.0, "pv_seg": 0.0, "pseudo": 0.0, "render": 0.0,
+                      "object": 0.0, "center": 1.0}
 # A LiDAR return blocks a cell's ground ray when it is this far above the
 # road and at least OCCLUSION_MARGIN_M nearer than the ground hit.
 OCCLUDER_HEIGHT_M, OCCLUSION_MARGIN_M = 0.25, 1.0
@@ -148,10 +160,11 @@ def _sample_valid_target(target: torch.Tensor, valid: torch.Tensor, grid: torch.
 
 def projected_map_targets(batch: dict, feature_hw):
     """BEV map labels on the ground seen by each stride-8 cell: target, valid [B, V, C, h, w] and the ray grid."""
-    grid, mask, road = ground_lookup(batch["projection"], batch["projection"].new_zeros(batch["projection"].shape[0]),
-                                     batch["depth"], feature_hw, batch.get("image_valid"))
-    target, valid = _sample_valid_target(batch["bev_target"][:, PV_CLASS_INDEX],
-                                         batch["bev_valid"][:, PV_CLASS_INDEX], grid)
+    projection = batch["camera_projection_matrix"]
+    grid, mask, road = ground_lookup(projection, projection.new_zeros(projection.shape[0]),
+                                     batch["autobev_depth"], feature_hw, batch.get("autobev_image_valid"))
+    target, valid = _sample_valid_target(batch["bev_segmentation_target"][:, PV_CLASS_INDEX],
+                                         batch["bev_segmentation_valid"][:, PV_CLASS_INDEX], grid)
     return target, valid & mask[:, :, None], grid, mask, road
 
 
@@ -162,7 +175,7 @@ def render_bev(bev_logits: torch.Tensor, batch: dict, feature_hw, road: torch.Te
     rays matches the area-averaged pseudo label instead of one point sample.
     """
     offsets = tuple((i + 0.5) / RENDER_SUBRAYS - 0.5 for i in range(RENDER_SUBRAYS))
-    _, _, t, grid = _ground_rays(batch["projection"], road, feature_hw, offsets)
+    _, _, t, grid = _ground_rays(batch["camera_projection_matrix"], road, feature_hw, offsets)
     batch_size, views, rays, height, width = t.shape
     probability = bev_logits.float()[:, PV_CLASS_INDEX].sigmoid()
     sampled = _sample_bev(probability, grid.permute(0, 1, 3, 2, 4, 5).reshape(batch_size, views, height, rays * width, 2),
@@ -322,28 +335,22 @@ def bev_class_terms(logits, target, valid) -> dict[str, torch.Tensor]:
 
 
 class AutoBEVLoss(torch.nn.Module):
-    def __init__(self, depth_weight: float = 1.0, box_weight: float = 1.0,
-                 pseudo_weight: float = PV_PSEUDO_WEIGHT, render_weight: float = RENDER_WEIGHT,
-                 object_weight: float = 0.0, center_weight: float = 0.0) -> None:
+    def __init__(self, weights: Mapping[str, float]) -> None:
         super().__init__()
+        if set(weights) != set(LOSS_TERMS):
+            raise ValueError(f"AutoBEV loss weights must name exactly {LOSS_TERMS}")
         self.bev = BEVSegmentationAuxiliaryLoss(BEV_POS_WEIGHT)
-        self.depth_weight, self.box_weight = depth_weight, box_weight
-        self.pseudo_weight, self.render_weight = pseudo_weight, render_weight
-        # object_weight adds a separate BCE+Dice term on vehicle and
-        # vulnerable_road_user, so the map-side terms (projected, pseudo and
-        # render losses) cannot crowd out the object classes; BEVFusion reports
-        # that tasks sharing an encoder pull each other down.
-        self.object_weight, self.center_weight = object_weight, center_weight
+        self.weights = dict(weights)
 
     def forward(self, outputs: dict, batch: dict) -> dict[str, torch.Tensor]:
-        bev_parts = self.bev.components(outputs["bev_logits"].float(), batch["bev_target"], batch["bev_valid"])
+        bev_parts = self.bev.components(outputs["bev_logits"].float(), batch["bev_segmentation_target"], batch["bev_segmentation_valid"])
         bev = bev_parts["total"]
-        per_class = bev_class_terms(outputs["bev_logits"].detach().float(), batch["bev_target"], batch["bev_valid"])
+        per_class = bev_class_terms(outputs["bev_logits"].detach().float(), batch["bev_segmentation_target"], batch["bev_segmentation_valid"])
 
-        image_projection = batch.get("image_projection", batch["projection"])
+        image_projection = batch.get("autobev_image_projection", batch["camera_projection_matrix"])
         scale = focal_scale(image_projection)  # [B, V]
         logits = outputs["depth_logits"].float()  # [B*V, D, h, w]
-        depth = batch["depth"].flatten(0, 1)
+        depth = batch["autobev_depth"].flatten(0, 1)
         valid = depth > 0
         normalized = depth * scale.flatten()[:, None, None]
         depth_loss = (
@@ -357,14 +364,14 @@ class AutoBEVLoss(torch.nn.Module):
         pv_loss = masked_bce_dice(pv_logits, pv_target.flatten(0, 1), pv_valid.flatten(0, 1), PV_POS_WEIGHT)
         pseudo_loss = render_loss = pv_logits.sum() * 0.0
         render_valid = fill = torch.zeros_like(pv_valid)
-        if "pv_pseudo" in batch and (self.pseudo_weight or self.render_weight):
+        if "pv_pseudo" in batch and (self.weights["pseudo"] or self.weights["render"]):
             # pv_pseudo [B, V, C, h, w] in PV_SEG_CLASSES order; pv_pseudo_valid
             # marks confident cells of known classes whose top Vistas class is
             # a ground surface, so cars and people are never road negatives.
             pseudo = batch["pv_pseudo"].float()
             pseudo_valid = batch["pv_pseudo_valid"]
-            if "image_valid" in batch:
-                pseudo_valid = pseudo_valid & batch["image_valid"][:, :, None]
+            if "autobev_image_valid" in batch:
+                pseudo_valid = pseudo_valid & batch["autobev_image_valid"][:, :, None]
             # The map labels stay the teacher where they supervise the image
             # head (their lane boundaries include unpainted edges, Vistas paint
             # does not). Everywhere else the pseudo labels teach it: ground
@@ -375,7 +382,7 @@ class AutoBEVLoss(torch.nn.Module):
             pseudo_loss = masked_bce_dice(pv_logits, pseudo.flatten(0, 1), fill.flatten(0, 1))
             # The render loss reaches BEV cells, so it needs a visible ground
             # hit inside the grid and only where the BEV labels are invalid.
-            map_valid = _sample_bev(batch["bev_valid"][:, PV_CLASS_INDEX].float(), grid, "nearest") > 0.5
+            map_valid = _sample_bev(batch["bev_segmentation_valid"][:, PV_CLASS_INDEX].float(), grid, "nearest") > 0.5
             render_valid = pseudo_valid & mask[:, :, None] & ~map_valid
             rendered = render_bev(outputs["bev_logits"], batch, feature_hw, road)
             render_loss = masked_bce_dice(rendered.flatten(0, 1), pseudo.flatten(0, 1), render_valid.flatten(0, 1),
@@ -383,10 +390,10 @@ class AutoBEVLoss(torch.nn.Module):
 
         cls_logits = outputs["box_cls"].float()
         reg = outputs["box_reg"].float()
-        boxes = batch.get("image_boxes", batch["boxes"])
+        boxes = batch.get("autobev_image_boxes", batch["autobev_boxes"])
         targets = [
             box_targets(b, l, p, feature_hw, s)
-            for b, l, p, s in zip(boxes, batch["box_labels"], image_projection, scale)
+            for b, l, p, s in zip(boxes, batch["autobev_box_labels"], image_projection, scale)
         ]
         cls_t = torch.cat([t[0] for t in targets])
         center_t = torch.cat([t[1] for t in targets])
@@ -409,25 +416,25 @@ class AutoBEVLoss(torch.nn.Module):
             center_kl = center_loss.detach()
         box = cls_loss + center_loss + reg_loss
         object_loss = heat_loss = offset_loss = bev.new_zeros(())
-        if self.object_weight:
+        if self.weights["object"]:
             bev_logits = outputs["bev_logits"].float()
-            object_loss = masked_bce_dice(bev_logits[:, OBJECT_CLASS_INDEX], batch["bev_target"][:, OBJECT_CLASS_INDEX],
-                                          batch["bev_valid"][:, OBJECT_CLASS_INDEX],
+            object_loss = masked_bce_dice(bev_logits[:, OBJECT_CLASS_INDEX], batch["bev_segmentation_target"][:, OBJECT_CLASS_INDEX],
+                                          batch["bev_segmentation_valid"][:, OBJECT_CLASS_INDEX],
                                           tuple(BEV_POS_WEIGHT[i] for i in OBJECT_CLASS_INDEX))
-        if self.center_weight and "center_logits" in outputs:
+        if self.weights["center"]:
             height, width = outputs["center_logits"].shape[-2:]
-            targets_c = [center_targets(b, l, height, width) for b, l in zip(batch["boxes"], batch["box_labels"])]
+            targets_c = [center_targets(b, l, height, width) for b, l in zip(batch["autobev_boxes"], batch["autobev_box_labels"])]
             heat_t = torch.stack([t[0] for t in targets_c])
             offset_t = torch.stack([t[1] for t in targets_c])
             peak_t = torch.stack([t[2] for t in targets_c])
-            valid_c = batch["bev_valid"][:, OBJECT_CLASS_INDEX]
+            valid_c = batch["bev_segmentation_valid"][:, OBJECT_CLASS_INDEX]
             heat_loss = center_focal_loss(outputs["center_logits"].float(), heat_t, valid_c)
             peak_mask = peak_t[:, None].expand_as(offset_t)
             offset_loss = (F.l1_loss(outputs["center_offset"].float()[peak_mask], offset_t[peak_mask])
                            if peak_mask.any() else heat_loss * 0.0)
-        total = (bev + self.depth_weight * depth_loss + self.box_weight * box + PV_SEG_WEIGHT * pv_loss
-                 + self.pseudo_weight * pseudo_loss + self.render_weight * render_loss
-                 + self.object_weight * object_loss + self.center_weight * (heat_loss + offset_loss))
+        terms = {"bev": bev, "depth": depth_loss, "box": box, "pv_seg": pv_loss, "pseudo": pseudo_loss,
+                 "render": render_loss, "object": object_loss, "center": heat_loss + offset_loss}
+        total = sum(self.weights[name] * terms[name] for name in LOSS_TERMS)
         return {"total": total, "bev": bev.detach(), "bev_bce": bev_parts["bce"].detach(),
                 "bev_dice": bev_parts["dice"].detach(), **per_class, "depth": depth_loss.detach(),
                 "box_cls": cls_loss.detach(), "box_center": center_loss.detach(), "box_center_kl": center_kl,
