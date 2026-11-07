@@ -70,7 +70,8 @@ The current nuPlan pack squeezes 1920 x 1080 into 512 x 512 and carries a
 - six cameras undistorted, scaled to cover 1344 x 768 with the aspect ratio
   kept, and centre-cropped; projections follow the same pixel transform; no
   front companion;
-- T8 history through the shared frame pool, at the same size;
+- T8 history stored in each sample (`hist_{h}_cam_{v}.jpg`) at the same
+  size, without a shared frame pool;
 - BEV labels on `AUTOBEV_GEOMETRY` with the AutoBEV v2 rules (boxes no LiDAR
   return saw are unknown, not negative);
 - stride-8 LiDAR depth (`depth.npz`) and 3D boxes (`boxes.npz`);
