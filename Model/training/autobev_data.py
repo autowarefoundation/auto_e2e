@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import shutil
 import tempfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -42,16 +43,21 @@ def _manifest(uri: str) -> dict[str, Any]:
 
 def stage_rank_shards(partition_uris: Sequence[str], *, rank: int, world: int, root: Path) -> list[str]:
     """Copy this rank's shards of every dataset into one directory per dataset; returns those directories."""
+    from data_processing.autobev_members import check_manifest_contract
+
     by_dataset: dict[str, list[tuple[str, dict]]] = {}
     for uri in partition_uris:
         manifest = _manifest(uri)
-        by_dataset.setdefault(str(manifest.get("dataset", "nuplan")), []).append((uri, manifest))
+        check_manifest_contract(manifest, source=uri)
+        by_dataset.setdefault(str(manifest["dataset"]), []).append((uri, manifest))
     directories = []
     for dataset, partitions in sorted(by_dataset.items()):
+        if len({manifest["sample_kind"] for _, manifest in partitions}) != 1:
+            raise ValueError(f"{dataset} partitions disagree on sample_kind")
         shards = [(uri, name, manifest) for uri, manifest in partitions for name in manifest["shard_names"]]
+        if len(shards) < world:
+            raise ValueError(f"{dataset} has {len(shards)} shards for {world} ranks; every rank needs one")
         mine = shards[rank::world]
-        if not mine:
-            continue
         target = root / dataset
         target.mkdir(parents=True, exist_ok=True)
         names, counts = [], {}
@@ -121,6 +127,7 @@ def autobev_training_stream(
     with_early = _forever(lambda epoch: make_autobev_sample_count_loader(
         primary_dirs + mix_dirs + early_dirs, shuffle_seed=seed + epoch, **common))
     yield from itertools.islice(with_early, max(0, early_until_step - start_step))
+    with_early.close()  # stops the first half's loader workers
     yield from _forever(lambda epoch: make_autobev_sample_count_loader(
         primary_dirs + mix_dirs, shuffle_seed=seed + 7919 + epoch, **common))
 
@@ -138,7 +145,8 @@ def autobev_validation_batches(partition_uris: Sequence[str], *, split: str, lim
     for uri in partition_uris:
         manifest = _manifest(uri)
         for name in manifest["shard_names"]:
-            # Kept between passes: checkpoint validation reads the same shards every time.
+            # A limited pass (checkpoint validation) keeps its shards for the next
+            # pass; a full pass (formal evaluation) would not fit on disk and drops them.
             local = VALIDATION_CACHE / hashlib.sha256(f"{uri}/{name}".encode()).hexdigest()[:24]
             if not (local / "manifest.json").is_file():
                 local.mkdir(parents=True, exist_ok=True)
@@ -154,3 +162,5 @@ def autobev_validation_batches(partition_uris: Sequence[str], *, split: str, lim
                 count += 1
                 if count == limit:
                     return
+            if not limit:
+                shutil.rmtree(local)
