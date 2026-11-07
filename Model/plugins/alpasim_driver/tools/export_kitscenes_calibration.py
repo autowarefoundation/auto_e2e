@@ -2,7 +2,7 @@
 
 The profile stores native intrinsics and camera-to-reference extrinsics, so the
 plugin can build the same projections as ``data_parsing/kit_scenes/camera.py``
-for any tile size and for the T8 history.
+for the AutoBEV crop of any rendered size and for the T8 history.
 
 Usage (with the ``kitscenes`` SDK installed):
     python Model/plugins/alpasim_driver/tools/export_kitscenes_calibration.py \
@@ -59,8 +59,6 @@ def main() -> None:
             "KITScenes ego reference frame (the frame of poses.txt). The AlpaSim "
             "rig frame of the rendered world must match it."
         ),
-        # KITScenes shards pack the front camera at 1024 px (front_camera_tile).
-        "native_front_camera_tile": True,
         # data_parsing/kit_scenes/egomotion.py: yaw_rate / max(speed, 0.1).
         "egomotion": {
             "curvature_speed_floor_mps": 0.1,
