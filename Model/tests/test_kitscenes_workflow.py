@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import ast
 import functools
-import hashlib
 import inspect
-import io
-import json
-import tarfile
 from pathlib import Path
 
 import pytest
@@ -21,9 +17,6 @@ from flytekit.core.context_manager import FlyteContextManager
 
 from Platform.pipelines import workflows
 from data_parsing.kit_scenes.source import InventoryResolution, SceneArchive
-from data_parsing.kit_scenes.temporal_contract import (
-    kitscenes_temporal_contract,
-)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
