@@ -10,13 +10,17 @@ from navigation.resample import compose_poses, resample_map_context, resample_ro
 def _raster_with_point(x_m: float, y_m: float, channel: int = MapChannel.CROSSWALK) -> torch.Tensor:
     raster = torch.zeros(1, MAP_CHANNEL_COUNT, 450, 300)
     row, col = AUTOE2E_NAVIGATION_GEOMETRY.ego_to_pixel(torch.tensor([[x_m, y_m]]).numpy())[0]
-    raster[0, channel, int(round(row)) - 2 : int(round(row)) + 3, int(round(col)) - 2 : int(round(col)) + 3] = 1.0
+    row, col = int(round(row)), int(round(col))
+    raster[0, channel, row - 2 : row + 3, col - 2 : col + 3] = 1.0
     return raster
 
 
 def _peak(bev: torch.Tensor) -> tuple[float, float]:
-    index = int(bev.flatten().argmax())
-    row, col = divmod(index, bev.shape[-1])
+    """Centre of mass of a resampled blob, in ego metres."""
+    rows = torch.arange(bev.shape[0], dtype=torch.float64)[:, None]
+    cols = torch.arange(bev.shape[1], dtype=torch.float64)[None, :]
+    weight = bev.double() / bev.double().sum()
+    row, col = float((weight * rows).sum()), float((weight * cols).sum())
     x, y = AUTOBEV_GEOMETRY.pixel_to_ego(torch.tensor([[row, col]], dtype=torch.float64).numpy())[0]
     return float(x), float(y)
 
@@ -26,7 +30,7 @@ def test_zero_pose_keeps_world_position():
     out = resample_map_context(raster, torch.zeros(1, 3), AUTOBEV_GEOMETRY)
     assert out.shape == (1, MAP_CHANNEL_COUNT, 220, 160)
     x, y = _peak(out[0, MapChannel.CROSSWALK])
-    assert abs(x - 20.0) <= 0.5 and abs(y - 5.0) <= 0.5
+    assert abs(x - 20.0) <= 0.25 and abs(y - 5.0) <= 0.25
 
 
 def test_translated_crop_moves_map_the_other_way():
@@ -34,7 +38,7 @@ def test_translated_crop_moves_map_the_other_way():
     raster = _raster_with_point(20.0, 0.0)
     out = resample_map_context(raster, torch.tensor([[2.0, 0.0, 0.0]]), AUTOBEV_GEOMETRY)
     x, _ = _peak(out[0, MapChannel.CROSSWALK])
-    assert abs(x - 18.0) <= 0.5
+    assert abs(x - 18.0) <= 0.25
 
 
 def test_rotated_crop_rotates_points_and_directions():
@@ -47,7 +51,7 @@ def test_rotated_crop_rotates_points_and_directions():
     out = resample_map_context(raster, torch.tensor([[0.0, 0.0, yaw]]), AUTOBEV_GEOMETRY)
     x, y = _peak(out[0, MapChannel.CROSSWALK])
     # The point at (20, 0) in M lies at R(-yaw) (20, 0) in F.
-    assert abs(x - 20.0 * math.cos(yaw)) <= 0.6 and abs(y + 20.0 * math.sin(yaw)) <= 0.6
+    assert abs(x - 20.0 * math.cos(yaw)) <= 0.25 and abs(y + 20.0 * math.sin(yaw)) <= 0.25
     sin = 2.0 * out[0, int(MapChannel.TRAFFIC_DIRECTION_SIN), 110, 80] - 1.0
     assert abs(float(sin) - math.sin(-yaw)) < 1e-3
 
