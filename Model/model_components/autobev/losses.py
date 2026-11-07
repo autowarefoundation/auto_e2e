@@ -15,7 +15,8 @@ Ported from ``experiment/autobev/losses.py``. Image-space map segmentation
 Every dataset's ego origin is on the road (``geometry.EGO_ORIGIN``), so the
 prior road height is 0 m; with LiDAR it is refined per sample.
 
-The batch keys are those of an AutoBEV sample: ``bev_target`` and ``bev_valid``
+``autobev_dense_supervised`` [B] selects the samples whose depth and centre
+terms count. The other batch keys are those of an AutoBEV sample: ``bev_target`` and ``bev_valid``
 [B, 8, 220, 160], ``depth`` [B, 6, 96, 168] (metres, 0 = no return),
 ``boxes`` and ``box_labels`` (lists of [N, 9] and [N]) and ``projection``
 [B, 6, 3, 4]; augmentation adds ``image_projection``, ``image_boxes`` and
@@ -350,8 +351,13 @@ class AutoBEVLoss(torch.nn.Module):
         image_projection = batch.get("autobev_image_projection", batch["camera_projection_matrix"])
         scale = focal_scale(image_projection)  # [B, V]
         logits = outputs["depth_logits"].float()  # [B*V, D, h, w]
+        # ``autobev_dense_supervised`` [B] marks the samples whose depth and
+        # centres are supervised; stage 2 gives the mixed-in datasets only the
+        # segmentation term.
+        dense = batch["autobev_dense_supervised"].bool()
+        views = batch["autobev_depth"].shape[1]
         depth = batch["autobev_depth"].flatten(0, 1)
-        valid = depth > 0
+        valid = (depth > 0) & dense.repeat_interleave(views)[:, None, None]
         normalized = depth * scale.flatten()[:, None, None]
         depth_loss = (
             F.cross_entropy(logits.permute(0, 2, 3, 1)[valid], depth_to_bin(normalized[valid]))
@@ -427,7 +433,7 @@ class AutoBEVLoss(torch.nn.Module):
             heat_t = torch.stack([t[0] for t in targets_c])
             offset_t = torch.stack([t[1] for t in targets_c])
             peak_t = torch.stack([t[2] for t in targets_c])
-            valid_c = batch["bev_segmentation_valid"][:, OBJECT_CLASS_INDEX]
+            valid_c = batch["bev_segmentation_valid"][:, OBJECT_CLASS_INDEX] & dense[:, None, None, None]
             heat_loss = center_focal_loss(outputs["center_logits"].float(), heat_t, valid_c)
             peak_mask = peak_t[:, None].expand_as(offset_t)
             offset_loss = (F.l1_loss(outputs["center_offset"].float()[peak_mask], offset_t[peak_mask])
