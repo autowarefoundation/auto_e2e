@@ -167,8 +167,13 @@ def sample_members(
     boxes: Sequence[Sequence[float]],
     box_labels: Sequence[int],
     meta: Mapping[str, object],
+    split_group_uid: str,
 ) -> dict[str, bytes]:
-    """The AutoBEV members of one sample; ``history`` is oldest first."""
+    """The AutoBEV members of one sample; ``history`` is oldest first.
+
+    ``split_group_uid`` (the scene, log or sequence) keeps correlated frames on
+    one side of every split.
+    """
     history_projection = np.stack([frame.projections for frame in history])
     check_projections(current.projections, history_projection)
     members = {camera_member(view): jpeg for view, jpeg in enumerate(current.jpegs)}
@@ -179,7 +184,7 @@ def sample_members(
     members[BEV_SEGMENTATION_MEMBER] = segmentation
     members[DEPTH_MEMBER] = encode_depth(points_ego, current.projections, current.camera_from_ego)
     members[BOXES_MEMBER] = encode_boxes(np.asarray(boxes, np.float32).reshape(-1, 9), box_labels)
-    members[META_MEMBER] = json.dumps(dict(meta), sort_keys=True).encode()
+    members[META_MEMBER] = json.dumps({**meta, "split_group_uid": split_group_uid}, sort_keys=True).encode()
     return members
 
 
