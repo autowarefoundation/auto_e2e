@@ -31,8 +31,10 @@ RUN python -c \
 
 # Cache the exact Stage A backbone in the immutable training image so all
 # workers avoid identical runtime downloads.
+# AutoBEV's DINOv2 ViT-B/14 (registers) weights are baked in: training pods do
+# not reach Hugging Face.
 RUN python -c \
-    "import timm; timm.create_model('swinv2_tiny_window8_256', pretrained=True, features_only=True)"
+    "import timm; timm.create_model('vit_base_patch14_reg4_dinov2.lvd142m', pretrained=True, num_classes=0)"
 
 COPY Model/ /workspace/Model/
 COPY Platform/pipelines/ /workspace/Platform/pipelines/
