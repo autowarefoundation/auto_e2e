@@ -224,6 +224,11 @@ def train_loop(config: dict[str, Any]) -> None:
     clip_sets = [group for group in clip_sets if group]
     objective = (AutoBEVObjective() if run.stage == 1 else AutoE2EObjective()).to(device)
     generator = torch.Generator().manual_seed(run.seed * 1000 + rank)
+    # Per-rank torch seeds: loader workers derive their sampling seeds from them,
+    # and equal seeds would make every rank draw the same dataset each step. A
+    # resumed run restores the saved states instead.
+    torch.manual_seed(run.seed * 1000 + rank)
+    torch.cuda.manual_seed(run.seed * 1000 + rank)
     start = 0
     resumed = ray_train.get_checkpoint()
     if resumed is not None:
