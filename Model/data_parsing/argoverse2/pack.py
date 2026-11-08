@@ -59,7 +59,7 @@ from model_components.autobev.geometry import AUTOBEV_GEOMETRY, FRAME_INTERVAL_U
 
 DATASET: Final = "argoverse2"
 # Bump when a rule that decides the packed bytes changes; part of dataset_id.
-PACK_CONTRACT: Final = "argoverse2-autobev-v1"
+PACK_CONTRACT: Final = "argoverse2-autobev-v2"
 UPSTREAM_BUCKET: Final = "argoverse"
 UPSTREAM_PREFIX: Final = "datasets/av2/sensor"
 # Training uses train and val; test has no annotations.
@@ -258,7 +258,7 @@ def build_sample(log: Log, sample: Mapping) -> tuple[str, dict[str, bytes]]:
         current, past, points_ego=points_ego,
         segmentation=bev_segmentation(labelled, never_labelled=NEVER_LABELLED),
         boxes=boxes, box_labels=labels,
-        meta={"dataset": DATASET, "log": log.log, "timestamp_ns": int(timestamp),
+        split_group_uid=f"{DATASET}-{log.log}", meta={"dataset": DATASET, "log": log.log, "timestamp_ns": int(timestamp),
               "cameras": list(sample["frames"][-1])},
     )
     return f"av2-{log.log}-{timestamp}", members
