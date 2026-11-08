@@ -370,8 +370,8 @@ def register_models(
                      "lineage_sha256": dataset.lineage_sha256},
             split={"policy": "pittsburgh_held_out"},
             training={"spec": _spec_dict(training), "flyte_execution_id": _execution_id(),
-                      "mixed_dataset_ids": [handle.dataset_id for handle in mix],
-                      "early_mixed_dataset_ids": [handle.dataset_id for handle in early_mix],
+                      "mixed_datasets": [_dataset_ref(handle, runtime) for handle in mix],
+                      "early_mixed_datasets": [_dataset_ref(handle, runtime) for handle in early_mix],
                       "mlflow_run_id": trained.run_id, "image_digest": TRAINING_IMAGE,
                       "git_commit": os.environ.get("AUTO_E2E_GIT_COMMIT", "unknown")},
             selection={"metrics": json.loads(metrics_json)},
@@ -423,6 +423,11 @@ def register_models(
             if any(m.model_id not in linked for m in missing):
                 raise
     return results
+
+
+def _dataset_ref(handle: DatasetHandle, runtime: RuntimeOptions) -> dict:
+    return {"dataset_id": handle.dataset_id, "lineage_uri": f"s3://{runtime.datasets_bucket}/{handle.lineage_key}",
+            "lineage_sha256": handle.lineage_sha256}
 
 
 def _spec_dict(spec: TrainingSpec) -> dict:
