@@ -56,8 +56,9 @@ cell centre is mapped to its world position, transformed by the pose used to
 crop the map (Section 5), and sampled from the 0.4 m raster
 (`Model/navigation/resample.py`). Binary map channels are sampled bilinearly,
 direction channels are sampled where valid and rotated into the new frame, and
-validity channels use nearest sampling. The 30 to 40 m margin of the 0.4 m
-raster around the AutoBEV grid leaves room for pose errors of up to 10 m.
+validity channels use nearest sampling. The 0.4 m raster reaches 20 m beyond
+the AutoBEV grid at the sides and 30 to 40 m ahead and behind, so simulated crop
+errors are kept within 8 m and 5 degrees.
 
 ## 3. Data
 
@@ -221,8 +222,10 @@ epochs, so the clean data is seen three times with different views.
   evaluation and tell how many epochs to train. When the Pittsburgh drivable
   IoU falls by more than 10 % relative to the stage 2 start, the training task
   halves the AutoBEV learning-rate multipliers (at most three times).
-- Formal evaluation (test sets, KITScenes benchmark) runs after training, as
-  today, and is the only result recorded on the MLflow model version.
+- Formal evaluation runs after training on the whole held-out Pittsburgh split
+  and is the only result recorded on the MLflow model version, together with
+  how the checkpoint was chosen and its calibrated BEV thresholds. The KITScenes
+  benchmark returns once KITScenes is repacked to the AutoBEV contract.
 
 This adds pipeline inputs and a new dataset layer content, keeps one workflow,
 and keeps every dataset and checkpoint addressed by digest.
