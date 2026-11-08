@@ -20,10 +20,9 @@ by a path that returns to the logged one within ``RECOVERY_HORIZON_S``
 
 from __future__ import annotations
 
-import contextlib
 import math
 from dataclasses import dataclass
-from typing import Any, Iterator, Mapping
+from typing import Any, Mapping
 
 import torch
 import torch.nn.functional as F
@@ -613,26 +612,6 @@ def aligned_clean_planner_bev(
         clean_planner_bev.detach().float(), grid, mode="bilinear", padding_mode="zeros", align_corners=False,
     )
     return aligned, inside
-
-
-@contextlib.contextmanager
-def preserved_batch_norm_statistics(module: torch.nn.Module) -> Iterator[None]:
-    """Restore BatchNorm running statistics after a teacher forward.
-
-    The teacher runs in training mode so it normalises like the student, but it
-    must not advance the running statistics a second time per micro-step.
-    """
-    saved = [
-        (buffer, buffer.clone())
-        for layer in module.modules()
-        if isinstance(layer, torch.nn.modules.batchnorm._BatchNorm)
-        for buffer in layer.buffers(recurse=False)
-    ]
-    try:
-        yield
-    finally:
-        for buffer, value in saved:
-            buffer.copy_(value)
 
 
 def feature_consistency_kl(
