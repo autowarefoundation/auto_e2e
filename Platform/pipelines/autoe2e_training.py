@@ -208,6 +208,11 @@ class TrainedCheckpoints:
 SELECTION_METRIC = {2: ("ade/6.4s", min), 1: ("drivable", max)}
 
 
+def _selection(result: dict, metric: str) -> dict:
+    return {"step": result["step"], "metric": f"calibration/{metric}",
+            "value": result["calibration_metrics"].get(metric), "thresholds": result["thresholds"]}
+
+
 @task(container_image=TRAINING_IMAGE, requests=Resources(cpu="2", mem="8Gi"), environment=TRAIN_ENVIRONMENT,
       retries=2)
 def select_checkpoints(spec: TrainingSpec, run: TrainedRun, validated: int) -> TrainedCheckpoints:
@@ -240,6 +245,8 @@ def select_checkpoints(spec: TrainingSpec, run: TrainedRun, validated: int) -> T
         trained=True, run_id=mlflow_run.info.run_id,
         best_uri=best_uri, best_sha256=sha256(best_uri), best_step=int(best["step"]),
         final_uri=final_uri, final_sha256=sha256(final_uri), final_step=int(final["step"]),
-        best_metrics_json=json.dumps(best["metrics"], sort_keys=True),
-        final_metrics_json=json.dumps(final["metrics"], sort_keys=True),
+        # The record names how the checkpoint was chosen and its BEV thresholds;
+        # the held-out numbers belong to the formal evaluation only.
+        best_metrics_json=json.dumps(_selection(best, name), sort_keys=True),
+        final_metrics_json=json.dumps(_selection(final, name), sort_keys=True),
     )
