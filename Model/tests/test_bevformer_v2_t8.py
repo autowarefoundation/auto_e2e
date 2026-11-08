@@ -12,7 +12,7 @@ def test_t8_fusion_preserves_order_and_current_gradient():
     torch.manual_seed(7)
     fusion = BEVFormerV2T8TemporalFusion(
         embed_dim=4,
-        inter_channels=8,
+        inter_channels=32,
         num_layers=3,
     ).eval()
     history = [
@@ -43,7 +43,7 @@ def test_t8_fusion_preserves_order_and_current_gradient():
 def test_t8_fusion_rejects_incomplete_history():
     fusion = BEVFormerV2T8TemporalFusion(
         embed_dim=4,
-        inter_channels=8,
+        inter_channels=32,
     )
 
     with pytest.raises(ValueError, match="8 ordered"):
