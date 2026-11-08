@@ -52,7 +52,7 @@ from model_components.autobev.geometry import AUTOBEV_GEOMETRY, HISTORY_FRAMES
 
 DATASET: Final = "simbev"
 # Bump when a rule that decides the packed bytes changes; part of dataset_id.
-PACK_CONTRACT: Final = "simbev-autobev-v1"
+PACK_CONTRACT: Final = "simbev-autobev-v2"
 CAMERAS: Final = ("CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT")
 SPLITS: Final = ("train", "val", "test")
 NEVER_LABELLED: Final = frozenset({"lane_boundary", "intersection", "crosswalk", "stop_line", "other_obstacle"})
@@ -229,7 +229,7 @@ def build_sample(scenes: Scenes, scene: str, index: int) -> tuple[str, dict[str,
         current, past, points_ego=points_ego,
         segmentation=bev_segmentation(labelled, never_labelled=NEVER_LABELLED),
         boxes=boxes, box_labels=labels,
-        meta={"dataset": DATASET, "scene": scene, "frame": index,
+        split_group_uid=f"{DATASET}-{scene}", meta={"dataset": DATASET, "scene": scene, "frame": index,
               "map": scenes.scenes[scene]["scene_info"]["map"]},
     )
     return f"simbev-{scene}-{index:04d}", members
