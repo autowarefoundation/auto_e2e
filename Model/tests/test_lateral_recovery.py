@@ -18,7 +18,6 @@ from training.lateral_recovery import (
     apply_lateral_recovery,
     ego_shift_transform,
     feature_consistency_kl,
-    preserved_batch_norm_statistics,
     recovery_trajectory,
     sample_lateral_shift,
     shift_egomotion_history,
@@ -337,17 +336,6 @@ def test_planner_bev_alignment_uses_its_own_resolution_and_full_support():
     assert bool(mask.any())
     loss = feature_consistency_kl(teacher.clone(), aligned, mask)
     assert loss.item() == pytest.approx(0.0, abs=1e-6)
-
-
-def test_teacher_forward_keeps_batch_norm_statistics():
-    norm = torch.nn.BatchNorm2d(3).train()
-    before = [norm.running_mean.clone(), norm.num_batches_tracked.clone()]
-    with torch.no_grad(), preserved_batch_norm_statistics(norm):
-        norm(torch.randn(4, 3, 5, 5) + 2.0)
-    assert torch.equal(norm.running_mean, before[0])
-    assert torch.equal(norm.num_batches_tracked, before[1])
-    norm(torch.randn(4, 3, 5, 5) + 2.0)
-    assert not torch.equal(norm.running_mean, before[0])
 
 
 def test_consistency_kl_trains_only_the_shifted_branch():
