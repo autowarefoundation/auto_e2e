@@ -204,9 +204,11 @@ epochs, so the clean data is seen three times with different views.
 
 ## 7. Pipeline
 
-- `TrainingSpec` gains `camera_architecture`, the stage 2 schedule fields, the
-  distortion and localization shares, and `bev_mix` (published datasets mixed
-  as BEV-only samples). Defaults keep today's results.
+- `TrainingSpec` holds only what changes per run: the stage, the GPU profile,
+  steps, learning rate, batch size, checkpoint interval and seed. `wf_autoe2e`
+  takes the mixed BEV datasets as `mix` and SimBEV as `early_mix`. The schedule,
+  loss weights, distortion and localization shares and every other value are
+  named constants in `Model/`, recorded with each checkpoint.
 - Checkpoints are written about every 30 minutes of training
   (`checkpoint_interval_steps`, set from the measured step time). Ray Train
   stores them under the run prefix; resume reads the last one. Run files go
