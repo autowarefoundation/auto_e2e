@@ -390,9 +390,11 @@ class AutoBEVLoss(torch.nn.Module):
             peak_t = torch.stack([t[2] for t in targets_c])
             valid_c = batch["bev_segmentation_valid"][:, OBJECT_CLASS_INDEX] & dense[:, None, None, None]
             heat_loss = center_focal_loss(outputs["center_logits"].float(), heat_t, valid_c)
-            peak_mask = (peak_t & dense[:, None, None])[:, None].expand_as(offset_t)
-            offset_loss = (F.l1_loss(outputs["center_offset"].float()[peak_mask], offset_t[peak_mask])
-                           if peak_mask.any() else heat_loss * 0.0)
+            # A masked mean keeps the offset head in the graph on steps without
+            # any object, as DDP's static graph needs.
+            peak = (peak_t & dense[:, None, None] & valid_c.any(1))[:, None].expand_as(offset_t).float()
+            offset_error = F.l1_loss(outputs["center_offset"].float(), offset_t, reduction="none")
+            offset_loss = (offset_error * peak).sum() / peak.sum().clamp_min(1.0)
         terms = {"bev": bev, "depth": depth_loss, "box": box, "pv_seg": pv_loss, "object": object_loss,
                  "center": heat_loss + offset_loss}
         total = sum(self.weights[name] * terms[name] for name in LOSS_TERMS)
