@@ -80,11 +80,17 @@ def _bev_and_trajectory(model, stage: int, batches: Iterable[dict[str, Any]], de
                 localization = type(localization)(localization.pose, localization.covariance,
                                                   torch.ones_like(localization.map_matching))
                 controls, outputs = model(**model_inputs(batch, localization))
-                predicted = integrate(controls.float(), batch["initial_speed_mps"])
                 supervised = batch["planner_supervised"].bool()
-                for key, value in trajectory_errors(predicted, batch["trajectory_xy_m"],
-                                                    batch["trajectory_valid"].bool() & supervised[:, None]).items():
-                    errors.setdefault(key, []).append(value.cpu())
+                valid = batch["trajectory_valid"].bool() & supervised[:, None]
+                # Zero controls integrate to constant speed straight ahead: the
+                # baseline a planner has to beat.
+                for prefix, plan in (("", controls), ("constant_velocity_", torch.zeros_like(controls))):
+                    predicted = integrate(plan.float(), batch["initial_speed_mps"])
+                    for key, value in trajectory_errors(predicted, batch["trajectory_xy_m"], valid).items():
+                        errors.setdefault(prefix + key, []).append(value.cpu())
+                # How far the map was cropped from the true ego, before and after matching.
+                errors.setdefault("crop_error_ekf_m", []).append(localization.pose[:, :2].norm(dim=-1).cpu())
+                errors.setdefault("crop_error_m", []).append(outputs["map_pose"][:, :2].norm(dim=-1).cpu())
         _sum(totals, bev_counts(outputs["bev_logits"], batch["bev_segmentation_target"],
                                 batch["bev_segmentation_valid"]))
     trajectory = {key: torch.cat(values) for key, values in errors.items()}
