@@ -55,7 +55,7 @@ from model_components.autobev.geometry import AUTOBEV_GEOMETRY, HISTORY_FRAMES, 
 
 DATASET: Final = "once"
 # Bump when a rule that decides the packed bytes changes; part of dataset_id.
-PACK_CONTRACT: Final = "once-autobev-v1"
+PACK_CONTRACT: Final = "once-autobev-v2"
 CAMERAS: Final = ("cam01", "cam06", "cam07", "cam05", "cam09", "cam08")
 LIDAR: Final = "lidar_roof"
 LANES_ROOT: Final = "ONCE_3DLanes/train"
@@ -205,7 +205,7 @@ def build_sample(seq: OnceSequence, history: list[str], frame: Mapping) -> tuple
         current, past, points_ego=points_ego,
         segmentation=bev_segmentation(labelled, never_labelled=NEVER_LABELLED),
         boxes=boxes, box_labels=labels,
-        meta={"dataset": DATASET, "sequence": seq.sequence, "frame_id": reference,
+        split_group_uid=f"{DATASET}-{seq.sequence}", meta={"dataset": DATASET, "sequence": seq.sequence, "frame_id": reference,
               "cameras": list(CAMERAS), "lanes": lanes is not None},
     )
     return f"once-{seq.sequence}-{reference}", members
