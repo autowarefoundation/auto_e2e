@@ -130,7 +130,9 @@ def _ray(workload: str, *, gpus: int, cpu: str, memory: str, shm: str, storage: 
 
 
 RAY_1 = _ray("gpu-validation", gpus=1, cpu="6", memory="48Gi", shm="8Gi", storage="200Gi")
-RAY_8 = _ray("p5en-capacity-block", gpus=8, cpu="96", memory="1Ti", shm="128Gi", storage="1500Gi")
+# Every rank stages its share of all datasets: about 0.9 TB of nuPlan at
+# 8.8 MB per sample plus about 0.6 TB of BEV-only datasets, with headroom.
+RAY_8 = _ray("p5en-capacity-block", gpus=8, cpu="96", memory="1Ti", shm="128Gi", storage="2400Gi")
 VALIDATION_POD = _pod("primary", workload="gpu-validation", shm="16Gi",
                       resources={"cpu": "6", "memory": "48Gi", "nvidia.com/gpu": "1", "ephemeral-storage": "400Gi"})
 
