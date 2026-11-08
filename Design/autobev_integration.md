@@ -231,3 +231,22 @@ epochs, so the clean data is seen three times with different views.
 
 This adds pipeline inputs and a new dataset layer content, keeps one workflow,
 and keeps every dataset and checkpoint addressed by digest.
+
+## 8. Checks before the full runs
+
+On 160 real nuPlan samples (7 logs) packed with the new nuPlan packer, on one
+RTX PRO 6000, with metrics on 48 of the training samples:
+
+| Run | Metric | Start | End |
+|---|---|---|---|
+| stage 1, 160 steps, lr 2e-4, batch 1 | drivable IoU 0-30 m (positive rate 0.42) | 0.36 | 0.59 |
+| | vehicle IoU 0-30 m (positive rate 0.04) | 0.17 | 0.25 |
+| stage 2, 160 steps, lr 1e-4, batch 2 | ADE 6.4 s (constant velocity 1.64 m) | 1.64 m | 1.56 m |
+| | ADE 3.0 s (constant velocity 0.50 m) | 0.50 m | 0.48 m |
+
+These show that both stages learn, not how well the full runs will drive. Map
+matching barely moves the crop yet (mean crop error 2.22 m before, 2.19 m
+after), because a 160-step AutoBEV does not yet see crosswalks and stop lines.
+Overfitting 8 samples through the whole stage 2 path (distortions,
+localization error, clean teacher, auxiliary losses) takes the trajectory loss
+from 0.74 to 0.2 in 300 steps.
