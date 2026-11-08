@@ -1,4 +1,4 @@
-"""Official-checkpoint-compatible temporal fusion for BEVFormer V2 T8."""
+"""Temporal fusion of BEVFormer V2 T8 (Yang et al., CVPR 2023) for eight ordered frame BEVs."""
 
 from __future__ import annotations
 
@@ -8,8 +8,14 @@ import torch
 import torch.nn as nn
 
 
+# GroupNorm instead of BEVFormer's BatchNorm: with one sample per GPU the
+# batch statistics of training and the running statistics of evaluation
+# differ, and the planner then reads differently normalized features.
+NORM_GROUPS = 32
+
+
 class BEVFormerV2T8BasicBlock(nn.Module):
-    """ResNet BasicBlock matching the official V2 temporal fusion state."""
+    """ResNet BasicBlock of the V2 temporal fusion, with GroupNorm."""
 
     expansion = 1
 
@@ -28,7 +34,7 @@ class BEVFormerV2T8BasicBlock(nn.Module):
             padding=1,
             bias=False,
         )
-        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.bn1 = nn.GroupNorm(NORM_GROUPS, out_channels)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(
             out_channels,
@@ -37,7 +43,7 @@ class BEVFormerV2T8BasicBlock(nn.Module):
             padding=1,
             bias=False,
         )
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.bn2 = nn.GroupNorm(NORM_GROUPS, out_channels)
         self.downsample = (
             nn.Sequential(
                 nn.Conv2d(
@@ -47,7 +53,7 @@ class BEVFormerV2T8BasicBlock(nn.Module):
                     padding=1,
                     bias=False,
                 ),
-                nn.BatchNorm2d(out_channels),
+                nn.GroupNorm(NORM_GROUPS, out_channels),
             )
             if downsample
             else None
