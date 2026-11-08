@@ -64,8 +64,8 @@ class TrainingSpec:
     steps: int = 0
     learning_rate: float = 2e-4
     per_rank_batch_size: int = 1
-    # About 30 minutes of training; set from the step time a smoke run measured.
-    checkpoint_interval_steps: int = 200
+    # About 30 minutes: 8 ranks at about 6 s per stage 2 sample.
+    checkpoint_interval_steps: int = 300
     seed: int = 0
 
 
