@@ -56,7 +56,7 @@ from model_components.autobev.geometry import AUTOBEV_GEOMETRY, HISTORY_FRAMES
 
 DATASET: Final = "nuscenes"
 # Bump when a rule that decides the packed bytes changes; part of dataset_id.
-PACK_CONTRACT: Final = "nuscenes-autobev-v1"
+PACK_CONTRACT: Final = "nuscenes-autobev-v2"
 VERSION: Final = "v1.0-trainval"
 CAMERAS: Final = ("CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT", "CAM_BACK_LEFT", "CAM_BACK", "CAM_BACK_RIGHT")
 LIDAR: Final = "LIDAR_TOP"
@@ -246,7 +246,7 @@ def build_sample(files: Mapping[str, bytes], tables: Tables, maps: MapLayers, sc
         current, past, points_ego=points_ego,
         segmentation=bev_segmentation(labelled, never_labelled=NEVER_LABELLED),
         boxes=boxes, box_labels=labels,
-        meta={"dataset": DATASET, "scene": scene["name"], "location": tables.location[scene["token"]],
+        split_group_uid=f"{DATASET}-{scene['name']}", meta={"dataset": DATASET, "scene": scene["name"], "location": tables.location[scene["token"]],
               "sample_token": token, "timestamp_us": tables.sample[token]["timestamp"]},
     )
     return f"nusc-{scene['name']}-{token}", members
