@@ -61,11 +61,11 @@ EKF_INITIAL_YAW_SIGMA_DEG: Final = 1.0
 # Innovations beyond the 99 % chi-square bound with two degrees of freedom
 # are rejected, so a jump is ignored until the covariance has grown to it.
 GATE_CHI2: Final = 9.21
-# The 0.4 m navigation raster extends 30 to 40 m beyond the AutoBEV grid, so
-# crops are kept within 10 m and 10 degrees of the truth; a larger drift would
-# leave the grid without map, which no onboard system would hand on as a map.
-MAX_CROP_OFFSET_M: Final = 10.0
-MAX_CROP_YAW_DEG: Final = 10.0
+# The 0.4 m navigation raster extends 20 m beyond the AutoBEV grid at the sides
+# and 30 to 40 m ahead and behind; within 8 m and 5 degrees even the front
+# corners of the grid (80, +-40 m) stay on the raster.
+MAX_CROP_OFFSET_M: Final = 8.0
+MAX_CROP_YAW_DEG: Final = 5.0
 # Share of samples whose crop is then refined by map matching.
 MAP_MATCHING_SHARE: Final = 0.5
 
@@ -143,9 +143,12 @@ def simulate_localization(egomotion_history: torch.Tensor, generator: torch.Gene
     across = 0.5 * bias * start_speed * since_fix.square()
     heading_error = bias * since_fix
     initial_sigma = torch.full((batch,), EKF_INITIAL_SIGMA_M)
+    # A jump already under way when the window opens built up while the EKF
+    # followed it, as multipath drift does, so the estimate starts on it.
+    carried = jumping[:, 0, None] * jump
     initial = torch.stack([
-        truth[:, 0, 0] + along + torch.randn(batch, generator=generator) * initial_sigma,
-        truth[:, 0, 1] + across + torch.randn(batch, generator=generator) * initial_sigma,
+        truth[:, 0, 0] + along + carried[:, 0] + torch.randn(batch, generator=generator) * initial_sigma,
+        truth[:, 0, 1] + across + carried[:, 1] + torch.randn(batch, generator=generator) * initial_sigma,
         truth[:, 0, 2] + heading_error
         + torch.randn(batch, generator=generator) * math.radians(EKF_INITIAL_YAW_SIGMA_DEG),
     ], dim=-1)
