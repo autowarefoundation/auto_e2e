@@ -11,6 +11,10 @@ import torch.nn.functional as F
 # Sampling offsets are scaled into a tenth of the BEV per unit, so the first
 # steps look near the predicted reference point.
 OFFSET_SCALE: Final = 0.1
+# Units of the head's (acceleration, curvature) outputs. 6.4 s ahead a unit of
+# curvature moves the position about 100 times more than a unit of
+# acceleration at 10 m/s, so curvature is scaled to keep both outputs near one.
+CONTROL_SCALE: Final = (1.0, 0.02)
 
 
 class GRUPlanner(nn.Module):
@@ -44,6 +48,7 @@ class GRUPlanner(nn.Module):
         # plan; random ones curve off and make the first updates erratic.
         nn.init.zeros_(self.control_head.weight)
         nn.init.zeros_(self.control_head.bias)
+        self.register_buffer("control_scale", torch.tensor(CONTROL_SCALE), persistent=False)
 
     def _cross_attend(self, query: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
         batch_size = query.shape[0]
@@ -66,5 +71,5 @@ class GRUPlanner(nn.Module):
             # Keep deformable lookup gradients out of the recurrent state history.
             query = hidden.squeeze(0).detach() + self.ego_query.weight
             _, hidden = self.gru(self._cross_attend(query, values).unsqueeze(0), hidden)
-            controls.append(self.control_head(hidden.squeeze(0)))
+            controls.append(self.control_head(hidden.squeeze(0)) * self.control_scale)
         return torch.cat(controls, dim=1)
