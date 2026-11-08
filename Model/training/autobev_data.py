@@ -30,6 +30,9 @@ LOADER_SHUFFLE: Final = 256
 IMAGENET_MEAN: Final = (0.485, 0.456, 0.406)
 IMAGENET_STD: Final = (0.229, 0.224, 0.225)
 HELDOUT_PREFIX: Final = "heldout-"
+# A limited validation pass takes at most this many samples per log, so 512
+# samples spread over many logs instead of the first three or four.
+MAX_SAMPLES_PER_GROUP: Final = 32
 VALIDATION_CACHE: Final = Path(tempfile.gettempdir()) / "autobev-validation-shards"
 
 
@@ -142,6 +145,7 @@ def autobev_validation_batches(partition_uris: Sequence[str], *, split: str, lim
 
     held_out = split == "validation"
     count = 0
+    per_group: dict[str, int] = {}
     for uri in partition_uris:
         manifest = _manifest(uri)
         for name in manifest["shard_names"]:
@@ -156,8 +160,11 @@ def autobev_validation_batches(partition_uris: Sequence[str], *, split: str, lim
                 (local / "manifest.json").write_text(json.dumps(single))
             for batch in make_pre_extracted_loader(str(local), batch_size=1, num_workers=2, split="val",
                                                    val_fraction=CALIBRATION_FRACTION, shuffle=0):
-                if batch["split_group_uid"][0].startswith(HELDOUT_PREFIX) != held_out:
+                group = batch["split_group_uid"][0]
+                if group.startswith(HELDOUT_PREFIX) != held_out or (
+                        limit and per_group.get(group, 0) >= MAX_SAMPLES_PER_GROUP):
                     continue
+                per_group[group] = per_group.get(group, 0) + 1
                 yield batch
                 count += 1
                 if count == limit:
