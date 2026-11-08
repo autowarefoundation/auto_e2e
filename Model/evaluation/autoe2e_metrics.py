@@ -55,6 +55,7 @@ def bev_counts(logits: torch.Tensor, target: torch.Tensor, valid: torch.Tensor) 
 
     for name, band in _band_masks(logits.shape[-2], logits.device).items():
         inside = band & valid.bool()
+        counts[f"{name}/valid"] = inside.sum((2, 3)).float()
         near_truth = dilate(truth & inside)
         for threshold in IOU_THRESHOLDS:
             predicted = (probability > threshold) & inside
@@ -84,7 +85,13 @@ def summarize_bev(totals: Mapping[str, torch.Tensor], thresholds: Mapping[str, f
     report = {}
     for index, name in enumerate(BEV_SEGMENTATION_CLASSES):
         threshold = thresholds[name]
+        report[f"bev_threshold/{name}"] = float(threshold)
         for band, _, _ in BANDS:
+            # Predicting every valid cell scores the positive rate; an IoU near
+            # it means the class has not been learned.
+            cells = float(totals[f"{band}/valid"][index])
+            if cells > 0:
+                report[f"bev_positive_rate/{band}/{name}"] = float(totals[f"{band}/{threshold}/true"][index]) / cells
             union = float(totals[f"{band}/{threshold}/union"][index])
             if union > 0:
                 report[f"bev/{band}/{name}"] = float(totals[f"{band}/{threshold}/inter"][index]) / union
