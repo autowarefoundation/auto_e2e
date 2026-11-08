@@ -87,9 +87,6 @@ class BEVFormerV2T8TemporalFusion(nn.Module):
         self.embed_dim = int(embed_dim)
         self.frame_count = int(frame_count)
         self.inter_channels = int(inter_channels)
-        # Official BEVFormer V2 leaves ResNetFusion.with_cp disabled. Its
-        # trainable BatchNorm state must update exactly once per micro-step.
-        self.activation_checkpointing = False
         in_channels = self.frame_count * self.embed_dim
         blocks = []
         for index in range(num_layers):
