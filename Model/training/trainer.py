@@ -74,14 +74,17 @@ class TrainRun:
 
 def training_constants() -> dict[str, Any]:
     """Every module constant that shapes training, recorded with each checkpoint."""
+    from data_parsing import pre_extracted
+    from evaluation import checkpoint_validation
     from model_components import reactive_e2e
     from model_components.autobev import encoder, geometry, losses
+    from model_components.trajectory_planning import gru_planner
     from navigation import map_matching
-    from training import distortion_mix, localization_noise, objective, schedule
-    from training import autobev_augment
+    from training import autobev_augment, autobev_data, distortion_mix, localization_noise, objective, schedule
 
-    modules = (geometry, encoder, losses, reactive_e2e, map_matching, distortion_mix, localization_noise,
-               objective, schedule, autobev_augment)
+    modules = (geometry, encoder, losses, reactive_e2e, gru_planner, map_matching, distortion_mix,
+               localization_noise, objective, schedule, autobev_augment, autobev_data, pre_extracted,
+               checkpoint_validation)
     constants: dict[str, Any] = {}
     for module in modules:
         for name, value in vars(module).items():
@@ -167,8 +170,11 @@ def _stage2_terms(model, objective, batch, generator, schedule, step):
     # The clean teacher pass is only needed when some sample was distorted.
     if bool(distortion.distorted.any()):
         network = model.module
+        # Eval mode turns dropout off, so the teacher target carries no mask noise.
+        network.eval()
         with torch.no_grad(), bf16_autocast():
             _, clean = network(**model_inputs(batch, localization))
+        network.train()
         teacher, teacher_mask = aligned_teacher_bev(clean["planner_bev"], distortion)
         # Mixed-in BEV-only samples take the segmentation loss alone.
         teacher_mask = teacher_mask & batch["planner_supervised"].bool()[:, None, None]
