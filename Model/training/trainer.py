@@ -154,7 +154,6 @@ def _stage2_terms(model, objective, batch, generator, schedule, step):
     from model_components.autobev.geometry import BEV_H, BEV_W, EMBED_DIM
     from training.autobev_augment import restrict_to_visible
     from training.distortion_mix import aligned_teacher_bev, apply_distortions
-    from training.lateral_recovery import preserved_batch_norm_statistics
     from training.localization_noise import simulate_localization
 
     localization = simulate_localization(batch["egomotion_history"], generator)
@@ -165,12 +164,10 @@ def _stage2_terms(model, objective, batch, generator, schedule, step):
     device = batch["visual_tiles"].device
     teacher = torch.zeros(size, EMBED_DIM, BEV_H, BEV_W, device=device)
     teacher_mask = torch.zeros(size, BEV_H, BEV_W, dtype=torch.bool, device=device)
-    # The clean teacher pass is only needed when some sample was distorted. It
-    # runs before the student: restoring the BatchNorm statistics in place
-    # after the student's forward would invalidate its saved tensors.
+    # The clean teacher pass is only needed when some sample was distorted.
     if bool(distortion.distorted.any()):
         network = model.module
-        with torch.no_grad(), preserved_batch_norm_statistics(network), bf16_autocast():
+        with torch.no_grad(), bf16_autocast():
             _, clean = network(**model_inputs(batch, localization))
         teacher, teacher_mask = aligned_teacher_bev(clean["planner_bev"], distortion)
         del clean
