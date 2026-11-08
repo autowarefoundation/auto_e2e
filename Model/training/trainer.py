@@ -170,6 +170,8 @@ def _stage2_terms(model, objective, batch, generator, schedule, step):
         with torch.no_grad(), bf16_autocast():
             _, clean = network(**model_inputs(batch, localization))
         teacher, teacher_mask = aligned_teacher_bev(clean["planner_bev"], distortion)
+        # Mixed-in BEV-only samples take the segmentation loss alone.
+        teacher_mask = teacher_mask & batch["planner_supervised"].bool()[:, None, None]
         del clean
     with bf16_autocast():
         controls, auxiliary = model(**model_inputs(distorted, localization))
