@@ -1,0 +1,26 @@
+diff --git a/src/driver/src/alpasim_driver/main.py b/src/driver/src/alpasim_driver/main.py
+index 9013bf2..d4b14ee 100644
+--- a/src/driver/src/alpasim_driver/main.py
++++ b/src/driver/src/alpasim_driver/main.py
+@@ -724,6 +724,7 @@ class EgoDriverService(EgodriverServiceServicer):
+                     inference_seed=inference_seed,
+                     previous_plan=job.session.last_selected_plan,
+                     route=job.session.route,
++                    scene_id=job.session.debug_scene_id,
+                 )
+             )
+ 
+diff --git a/src/driver/src/alpasim_driver/models/base.py b/src/driver/src/alpasim_driver/models/base.py
+index a39a852..41d4bab 100644
+--- a/src/driver/src/alpasim_driver/models/base.py
++++ b/src/driver/src/alpasim_driver/models/base.py
+@@ -64,6 +64,9 @@ class PredictionInput:
+     # at the route's own timestamp.  None until the first route arrives, and
+     # for scenarios that run without a route.
+     route: Any | None  # Route
++    # Scene of the session (DriveSessionRequest.debug_info.scene_id), so a
++    # model can load the scene's HD map from its USDZ. Empty when not sent.
++    scene_id: str = ""
+ 
+ 
+ @dataclass

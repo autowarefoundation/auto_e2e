@@ -50,3 +50,12 @@ services:
     environments:
       # Copy of the auto_e2e Model/ directory, placed next to the checkpoint.
       - AUTOE2E_MODEL_ROOT=/mnt/drivers/autoe2e/Model
+    # AlpaSim's driver volumes plus the scene cache, from which the plugin
+    # reads each scene's HD map. Hydra replaces lists, so all are repeated.
+    volumes:
+      - "${defines.drivers}:/mnt/drivers"
+      - "${wizard.log_dir}:/mnt/output"
+      - "${repo-relative:'src'}:/repo/src"
+      - "${repo-relative:'plugins'}:/repo/plugins"
+      - "${defines.hf_cache}:/root/.cache/huggingface"
+      - "${scenes.scene_cache}:/mnt/nre-data:ro"

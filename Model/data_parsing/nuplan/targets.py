@@ -46,7 +46,7 @@ def _pose_xy_heading(state: Any) -> tuple[float, float, float]:
     return float(pose.x), float(pose.y), float(pose.heading)
 
 
-def _global_to_ego(
+def global_to_ego(
     points_xy: np.ndarray,
     reference_pose: tuple[float, float, float],
 ) -> np.ndarray:
@@ -93,7 +93,7 @@ def future_trajectory_xy(
             ],
             dtype=np.float64,
         )
-        ego_xy = _global_to_ego(global_xy, reference_pose)
+        ego_xy = global_to_ego(global_xy, reference_pose)
         finite = np.isfinite(ego_xy).all(axis=1)
         trajectory[:usable] = np.where(
             finite[:, None],
@@ -160,7 +160,7 @@ def _tracked_object_polygons(
     return grouped
 
 
-def _rasterize_polygons(
+def rasterize_polygons(
     polygons_global: Sequence[np.ndarray],
     reference_pose: tuple[float, float, float],
     geometry: NavigationRasterGeometry,
@@ -179,7 +179,7 @@ def _rasterize_polygons(
     )
     draw = ImageDraw.Draw(high)
     for polygon in polygons_global:
-        ego_polygon = _global_to_ego(polygon, reference_pose)
+        ego_polygon = global_to_ego(polygon, reference_pose)
         pixels = geometry.ego_to_pixel(ego_polygon)
         high_pixels = np.rint(
             (pixels + 0.5) * supersample - 0.5
@@ -223,7 +223,7 @@ def _rasterize_polylines(
         if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] != 2:
             continue
         pixels = geometry.ego_to_pixel(
-            _global_to_ego(values, reference_pose)
+            global_to_ego(values, reference_pose)
         )
         high_pixels = np.rint(
             (pixels + 0.5) * supersample - 0.5
@@ -373,45 +373,84 @@ def _lane_features(
     return centerlines, boundaries
 
 
+@dataclasses.dataclass(frozen=True)
+class NavigationMapLayers:
+    """Vector map primitives in the frame of the rasterizer's ``reference_pose``.
+
+    Polygons and polylines are ``[N, 2]`` XY arrays. The nuPlan packer fills
+    them from the devkit map API; the AlpaSim driver fills them from the
+    scene's trajdata vector map, so both reach the model through the same
+    rasterization.
+    """
+
+    drivable_area: Sequence[np.ndarray] = ()
+    intersection: Sequence[np.ndarray] = ()
+    crosswalk: Sequence[np.ndarray] = ()
+    stop_line: Sequence[np.ndarray] = ()
+    lane_centerlines: Sequence[np.ndarray] = ()
+    lane_boundaries: Sequence[np.ndarray] = ()
+
+
 def _build_navigation_map_context(
     scenario: Any,
     map_polygons: dict[str, list[np.ndarray]],
     reference_pose: tuple[float, float, float],
     geometry: NavigationRasterGeometry,
 ) -> tuple[np.ndarray, bool]:
-    context = np.zeros(
-        (MAP_CHANNEL_COUNT, geometry.height_px, geometry.width_px),
-        dtype=np.float32,
-    )
-    drivable_polygons = (
-        map_polygons["drivable_area"]
-        + map_polygons["intersection"]
-    )
-    context[MapChannel.DRIVABLE_AREA] = _rasterize_polygons(
-        drivable_polygons,
-        reference_pose,
-        geometry,
-    )
-    context[MapChannel.INTERSECTION] = _rasterize_polygons(
-        map_polygons["intersection"],
-        reference_pose,
-        geometry,
-    )
-    context[MapChannel.CROSSWALK] = _rasterize_polygons(
-        map_polygons["crosswalk"],
-        reference_pose,
-        geometry,
-    )
-    context[MapChannel.STOP_LINE] = _rasterize_polygons(
-        map_polygons["stop_line"],
-        reference_pose,
-        geometry,
-    )
     centerlines, boundaries = _lane_features(
         scenario,
         reference_pose,
         geometry,
     )
+    layers = NavigationMapLayers(
+        drivable_area=(
+            map_polygons["drivable_area"] + map_polygons["intersection"]
+        ),
+        intersection=map_polygons["intersection"],
+        crosswalk=map_polygons["crosswalk"],
+        stop_line=map_polygons["stop_line"],
+        lane_centerlines=centerlines,
+        lane_boundaries=boundaries,
+    )
+    return rasterize_navigation_map(layers, reference_pose, geometry)
+
+
+def rasterize_navigation_map(
+    layers: NavigationMapLayers,
+    reference_pose: tuple[float, float, float],
+    geometry: NavigationRasterGeometry = AUTOE2E_NAVIGATION_GEOMETRY,
+) -> tuple[np.ndarray, bool]:
+    """Rasterize ``layers`` into the ``[14, H, W]`` map context of nuPlan training.
+
+    Returns the context and ``map_valid`` (any known map cell). Channels the
+    nuPlan maps do not carry (static signals, road level) stay zero.
+    """
+    context = np.zeros(
+        (MAP_CHANNEL_COUNT, geometry.height_px, geometry.width_px),
+        dtype=np.float32,
+    )
+    context[MapChannel.DRIVABLE_AREA] = rasterize_polygons(
+        layers.drivable_area,
+        reference_pose,
+        geometry,
+    )
+    context[MapChannel.INTERSECTION] = rasterize_polygons(
+        layers.intersection,
+        reference_pose,
+        geometry,
+    )
+    context[MapChannel.CROSSWALK] = rasterize_polygons(
+        layers.crosswalk,
+        reference_pose,
+        geometry,
+    )
+    context[MapChannel.STOP_LINE] = rasterize_polygons(
+        layers.stop_line,
+        reference_pose,
+        geometry,
+    )
+    centerlines = layers.lane_centerlines
+    boundaries = layers.lane_boundaries
     context[MapChannel.LANE_CENTERLINE] = _rasterize_polylines(
         centerlines,
         reference_pose,
@@ -429,7 +468,7 @@ def _build_navigation_map_context(
     direction_cos = np.zeros_like(direction_sin)
     direction_count = np.zeros_like(direction_sin)
     for centerline in centerlines:
-        ego_line = _global_to_ego(centerline, reference_pose)
+        ego_line = global_to_ego(centerline, reference_pose)
         delta = ego_line[-1] - ego_line[0]
         norm = float(np.linalg.norm(delta))
         if norm <= 1e-6:
@@ -502,7 +541,7 @@ def _route_polygons(scenario: Any) -> list[np.ndarray]:
     return polygons
 
 
-def _destination_heatmap(
+def destination_heatmap(
     goal_xy_ego: np.ndarray,
     geometry: NavigationRasterGeometry,
 ) -> tuple[np.ndarray, bool]:
@@ -614,7 +653,7 @@ def build_nuplan_reactive_targets(
                 ),
             )
         else:
-            semantic[class_index] = _rasterize_polygons(
+            semantic[class_index] = rasterize_polygons(
                 sources[class_name],
                 reference_pose,
                 geometry,
@@ -631,7 +670,7 @@ def build_nuplan_reactive_targets(
     corridor_polygons = _route_polygons(scenario)
     route_target = np.zeros((2, *shape), dtype=np.float32)
     if corridor_polygons:
-        route_target[0] = _rasterize_polygons(
+        route_target[0] = rasterize_polygons(
             corridor_polygons,
             reference_pose,
             geometry,
@@ -642,14 +681,14 @@ def build_nuplan_reactive_targets(
     )
     mission_goal = scenario.get_mission_goal()
     if mission_goal is not None:
-        goal_ego = _global_to_ego(
+        goal_ego = global_to_ego(
             np.asarray(
                 [[float(mission_goal.x), float(mission_goal.y)]],
                 dtype=np.float64,
             ),
             reference_pose,
         )[0]
-        destination, destination_valid = _destination_heatmap(
+        destination, destination_valid = destination_heatmap(
             goal_ego,
             geometry,
         )
