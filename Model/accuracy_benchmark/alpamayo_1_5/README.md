@@ -1,9 +1,8 @@
 # Evaluate Alpamayo_1.5 model
 
 ## Prepare KITScenes evaluation data for val split
-```
-$ python prepare.py --out-dir <KITSCENES_VAL_EVAL_DATA>
-```
+
+[Prepare KITScenes evaluation data for val split](../kitscenes/README.md)
 
 ## Evaluate Alpamayo_1.5 model
 ### Clone  Alpamayo_1.5 github repository
@@ -30,7 +29,15 @@ $ MAX_JOBS=8 pip install "flash-attn>=2.8.3" --no-build-isolation
 ### Generate predictions data and evaluation results
 Navigate to the  Model/accuracy_benchmark/alpamayo_1_5 directory and execute
 ```
-$ nohup python eval_kitscenes.py --data-dir <KITSCENES_VAL_EVAL_DATA> \
-    --image-root /tmp/$USER/ratarmount/kitscenes/data \
-    --out <OUTPUT_DIR>/alpamayo15 --num-samples 3 --seed 42 > <OUTPUT_DIR>/alpamayo15/run.log 2>&1 &
+$ nohup python eval_kitscenes.py \
+    --scenes <KITSCENES_VAL_EVAL_DIR>/kitscenes_val.jsonl \
+    --out --out <OUTPUT_DIR>/alpamayo15/metrics \
+    > <OUTPUT_DIR>/alpamayo15/run.log 2>&1 &
+```
+To generate only statistics if the metrics directory already exists
+```
+$ python eval_kitscenes.py \
+    --scenes <KITSCENES_VAL_EVAL_DIR>/kitscenes_val.jsonl \
+    --out --out <OUTPUT_DIR>/alpamayo15/metrics \
+    --report-only
 ```
