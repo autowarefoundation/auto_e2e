@@ -1,5 +1,7 @@
-# AutoE2E -- Academic Paper
+# AutoE2E - Academic Paper
 
 The work in progress into structuring the development and preparing to publish it.
 
-[Three Minds, One Wheel: A Decoupled Reactive–World–Reasoning Model for Open End-to-End Driving](https://docs.google.com/document/d/1x_59gmxVmTQpgtpJbwr0mASb5wOQ2HmF/edit?usp=sharing&ouid=116038880172893009378&rtpof=true&sd=true)
+1. V1.0 - Reactive open loop | Oracle Route conditioned: 
+  - Technical report: [AutoE2E_OpenLoop_Map_OracleRoute_EN_v1](AutoE2E_Route_Conditioned/AutoE2E_OpenLoop_Map_OracleRoute_EN_v1.0.0.pdf)
+  <!-- - Draft: [](v1.0_paper/AutoE2E___AWF.pdf) -->
