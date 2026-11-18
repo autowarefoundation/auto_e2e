@@ -25,7 +25,7 @@ graph TD
 | `camera_history_tiles` `[1,7,6,3,512,512]` | The seven previous frames, 500 ms apart. |
 | projections | `K_scaled @ inv(camera_to_reference)`. History projections map current-ego points into each past image (`reference_frame: current_ego`), using the ego poses interpolated at the frame timestamps. |
 | `egomotion_history` `[1,256]` | 64 rows of `[speed, acceleration, yaw_rate, curvature]` before `t0`, from the ego poses by `np.gradient` on a 10 Hz grid. The dataset policy masks the newest acceleration (KITScenes). |
-| `map_context`, `route_mask` | All zeros, with `map_valid = route_valid = False`. AlpaSim's model API passes no map, so the model runs on its evaluated camera-only track. |
+| `map_context` `[1,14,450,300]`, `route_mask` `[1,2,450,300]` | The scene's HD map and `PredictionInput.route`, drawn by the nuPlan training rasterizer (`data_parsing/nuplan/targets.py`) in the rig frame at `t0` ([`scene_map.py`](./alpasim_autoe2e/scene_map.py)). Lanes stand in for nuPlan's roadblocks (drivable area, route corridor), wait lines for stop lines, and the end of the recorded drive for the mission goal. Without a map for the scene, both stay zero with `map_valid = route_valid = False` (the camera-only track). |
 
 Against packed KITScenes v3.5 samples rebuilt from raw `poses.txt`, the projections match to 1e-5 px. The egomotion matches to within 1e-2 (see `test_projections_and_egomotion_match_packed_kitscenes_samples`). The camera tiles match within JPEG noise.
 
@@ -50,6 +50,7 @@ Against packed KITScenes v3.5 samples rebuilt from raw `poses.txt`, the projecti
 | `runtime.simulation_config.force_gt_duration_us` | `7_000_000` | The ego follows the recording for 7 s, so the 6.4 s egomotion history and the 3.5 s camera history are real before AutoE2E drives. |
 | `runtime.simulation_config.cameras` | native aspect ratio | The plugin squashes frames to square tiles, as in training. |
 | `services.driver.environments` | `AUTOE2E_MODEL_ROOT=/mnt/drivers/autoe2e/Model` | Where the driver container finds the AutoE2E model code. |
+| `services.driver.volumes` | AlpaSim's five plus `${scenes.scene_cache}:/mnt/nre-data:ro` | The plugin opens the scene's USDZ there for its HD map. |
 
 `driver=autoe2e_nuplan` drives the nuPlan v1.1 rig, for example with the nuPlan Epoch 5 checkpoint, in NuRec scenes of the NVIDIA camera rig. AlpaSim's `runtime.extra_cameras` can only override cameras a scene already has. So the six nuPlan cameras are rendered as rectified pinhole cameras on six NVIDIA camera IDs, the way AlpaSim's Transfuser plugin renders its nuPlan-style rig, and `nuplan_nurec.json` maps them back. `nuplan.json` keeps the `CAM_*` names for worlds reconstructed from nuPlan. [`tools/profile_to_extra_cameras.py`](./tools/profile_to_extra_cameras.py) regenerates them from the profile, and a test keeps the two identical.
 
@@ -69,6 +70,8 @@ rsync -a --exclude tests Model/ "$ALPASIM_FILESYSTEM/drivers/autoe2e/Model/"
 rm -rf "$ALPASIM_ROOT/plugins/alpasim_driver"
 cp -r Model/plugins/alpasim_driver "$ALPASIM_ROOT/plugins/"
 ```
+
+AlpaSim does not tell a driver model which scene it drives. Apply [`experiment/closed-loop/alpasim.patch`](../../../experiment/closed-loop/alpasim.patch) (4 lines: `PredictionInput.scene_id`); the driver needs it and fails on an unpatched AlpaSim. A scene whose USDZ has no HD map runs camera-only.
 
 Next, add `autoe2e = ["alpasim_autoe2e"]` to the plugin extras in `$ALPASIM_ROOT/pyproject.toml`, and `--extra autoe2e` to the `uv sync` line of its `Dockerfile`. Then build the image and run:
 
@@ -110,7 +113,7 @@ The whole loop on one GPU therefore needs at least 10 GB. On a 6 GB GPU, run the
 
 ```bash
 cd Model
-python -m pytest tests/test_alpasim_stream.py tests/test_rewards.py                   # unit tests
+python -m pytest tests/test_alpasim_stream.py tests/test_alpasim_scene_map.py tests/test_rewards.py  # unit tests
 AUTOE2E_CHECKPOINT=/path/to/checkpoint.pt \
 KITSCENES_VAL_MIRROR=/path/to/kitscenes-val/v3.5/shards \
 KITSCENES_RAW=/path/to/kitscenes/scenes \
@@ -124,4 +127,4 @@ python -m pytest tests/test_alpasim_stream.py -m integration                    
 - **Tracking term:** for each AutoE2E decision, `-(w_ade·ADE + w_fde·FDE)` between the plan and the recorded drive at the same timestamps.
 - **Renderer validity bound:** once the ego itself is more than 3 m from the recording, a −10 penalty is added and `truncated` is set. The reconstruction is only reliable near the recorded path, so this bound does not share the tracking weight.
 
-[`tools/score_rollout.py`](./tools/score_rollout.py) applies the reward to an AlpaSim `rollout.asl`. The driver does not call the reward; the RL loop will (see `Design/reinforcement_learning.md`, which lists the further terms as future work).
+[`tools/score_rollout.py`](./tools/score_rollout.py) applies the reward to an AlpaSim `rollout.asl`. The driver does not call the reward; the RL experiment in [`experiment/closed-loop/rl`](../../../experiment/closed-loop/rl) does.

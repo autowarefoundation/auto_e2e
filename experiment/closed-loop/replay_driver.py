@@ -6,11 +6,13 @@ plan matches the logged one, and rerun it with the egomotion history's yaw
 rate and curvature zeroed. A plan that only turns when those columns are
 present is driven by the ego's own motion, not by the cameras.
 
-Run inside the AlpaSim image with a GPU, e.g. on the GPU host:
+Run inside the AlpaSim image with a GPU, e.g. on the GPU host. The scene cache
+mount gives the replay the scene's HD map, as in the driver:
 
     docker run --rm --gpus all \
       -v ~/closed-loop-runs/<run>:/rundir:ro \
       -v ~/alpasim/data/drivers/autoe2e:/drivers:ro \
+      -v ~/alpasim/data/nre-artifacts:/mnt/nre-data:ro \
       -v <repo>:/src:ro \
       -e AUTOE2E_MODEL_ROOT=/drivers/Model \
       -e PYTHONPATH=/src/Model/plugins/alpasim_driver:/src/Model/plugins/alpasim_driver/tools \
@@ -22,9 +24,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import io
 import math
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from alpasim_driver.models.base import CameraFrame, DriveCommand, ModelPrediction, PredictionInput
@@ -47,45 +51,62 @@ NUPLAN_CAMERAS = [
 HISTORY_STEP_US = 500_000  # inference.subsample_factor 5 on 10 Hz frames
 
 
-async def read_log(path: Path):
-    images: dict[str, dict[int, bytes]] = {}
+@dataclasses.dataclass
+class LoggedRollout:
+    """What the driver received and returned in one ``rollout.asl``."""
+
+    scene_id: str
+    images: dict[str, dict[int, bytes]]
+    poses: list[Any]
+    routes: list[Any]
+    requests: list[int]
+    returns: list[list]
+
+
+async def read_log(path: Path) -> LoggedRollout:
+    log = LoggedRollout("", {}, [], [], [], [])
     poses: dict[int, object] = {}
-    requests: list[int] = []
-    returns: list[list] = []
     async for message in async_read_pb_log(str(path)):
         kind = message.WhichOneof("log_entry")
-        if kind == "driver_camera_image":
+        if kind == "driver_session_request":
+            log.scene_id = message.driver_session_request.debug_info.scene_id
+        elif kind == "driver_camera_image":
             image = message.driver_camera_image.camera_image
-            images.setdefault(image.logical_id, {})[int(image.frame_end_us)] = bytes(image.image_bytes)
+            log.images.setdefault(image.logical_id, {})[int(image.frame_end_us)] = bytes(image.image_bytes)
         elif kind == "driver_ego_trajectory":
             for pose in message.driver_ego_trajectory.trajectory.poses:
                 poses[int(pose.timestamp_us)] = pose
+        elif kind == "route_request":
+            log.routes.append(message.route_request.route)
         elif kind == "driver_request":
-            requests.append(int(message.driver_request.time_now_us))
+            log.requests.append(int(message.driver_request.time_now_us))
         elif kind == "driver_return":
-            returns.append(list(message.driver_return.trajectory.poses))
-    return images, [poses[t] for t in sorted(poses)], requests, returns
+            log.returns.append(list(message.driver_return.trajectory.poses))
+    log.poses = [poses[t] for t in sorted(poses)]
+    return log
 
 
-def prediction_input(images, poses, camera_ids, now_us: int) -> PredictionInput:
-    """The frames and poses the driver held when the request at ``now_us`` arrived."""
+def prediction_input(log: LoggedRollout, camera_ids, now_us: int) -> PredictionInput:
+    """The frames, poses and route the driver held when the request at ``now_us`` arrived."""
     cameras = {}
     for camera in camera_ids:
-        newest = max(t for t in images[camera] if t <= now_us)
+        newest = max(t for t in log.images[camera] if t <= now_us)
         times = [newest - HISTORY_STEP_US * i for i in range(CONTEXT_FRAMES - 1, -1, -1)]
         cameras[camera] = [
-            CameraFrame(t, np.array(Image.open(io.BytesIO(images[camera][t])).convert("RGB")))
+            CameraFrame(t, np.array(Image.open(io.BytesIO(log.images[camera][t])).convert("RGB")))
             for t in times
         ]
+    routes = [route for route in log.routes if int(route.timestamp_us) <= now_us]
     return PredictionInput(
         camera_images=cameras,
         command=DriveCommand.STRAIGHT,
         speed=0.0,
         acceleration=0.0,
-        ego_pose_history=[p for p in poses if int(p.timestamp_us) <= now_us],
+        ego_pose_history=[p for p in log.poses if int(p.timestamp_us) <= now_us],
         inference_seed=0,
         previous_plan=None,
-        route=None,
+        route=routes[-1] if routes else None,
+        scene_id=log.scene_id,
     )
 
 
@@ -110,7 +131,7 @@ def main() -> None:
     opts = args.parse_args()
 
     asl = next(opts.run_dir.glob(f"rollouts/clipgt-{opts.scene}*/*/rollout.asl"))
-    images, poses, requests, returns = asyncio.run(read_log(asl))
+    log = asyncio.run(read_log(asl))
     driver = AutoE2EDriver(opts.checkpoint, NUPLAN_CAMERAS, device="cuda")
 
     original = parser_module.egomotion_from_poses
@@ -121,7 +142,7 @@ def main() -> None:
         return egomotion
 
     for index in (int(i) for i in opts.decisions.split(",")):
-        inputs = prediction_input(images, poses, driver.camera_ids, requests[index])
+        inputs = prediction_input(log, driver.camera_ids, log.requests[index])
         parser_module.egomotion_from_poses = original
         replay = driver.predict(inputs)
         parser_module.egomotion_from_poses = without_yaw
@@ -133,7 +154,7 @@ def main() -> None:
             driver.profile.egomotion,
         )[-1]
         print(
-            f"decision {index + 1}: heading@3s logged {logged_heading_deg(returns[index], 3.0):+.2f}"
+            f"decision {index + 1}: heading@3s logged {logged_heading_deg(log.returns[index], 3.0):+.2f}"
             f" replay {heading_deg(replay, 3.0):+.2f} yaw/curvature=0 {heading_deg(ablated, 3.0):+.2f} deg;"
             f" newest yaw rate {newest[2]:+.4f} rad/s, curvature {newest[3]:+.4f} 1/m"
         )

@@ -114,13 +114,13 @@ The AlpaSim driver plugin lives in `Model/plugins/alpasim_driver/` and registers
   - Each frame is squashed to a 512 px tile; the front camera also enters at 1024 px.
 - **Camera history**: the seven previous frames, 500 ms apart, with projections into the current ego frame (BEVFormer T8).
 - **Egomotion**: 64 rows of speed, acceleration, yaw rate and curvature before the current frame, derived from the ego poses. KITScenes divides yaw rate by `max(speed, 0.1)` (`data_parsing/kit_scenes/egomotion.py`). nuPlan zeroes curvature below 0.5 m/s and clips it to ±0.5 (`data_parsing/nuplan/packing.py`). Each rig profile carries its dataset's rule.
-- **Map and route**: AlpaSim's model API passes neither to the driver, so the model receives `map_valid = route_valid = False` (the camera-only track). Route conditioning from AlpaSim's route is future work.
+- **Map and route**: the 14-channel map context and the 2-channel route mask are drawn by the nuPlan training rasterizer, so closed loop sees the inputs of training ([#221](https://github.com/autowarefoundation/auto_e2e/issues/221)). The map is the scene's HD map, which the driver reads from the scene USDZ. AlpaSim does not tell a model its scene, so `experiment/closed-loop/alpasim.patch` adds `PredictionInput.scene_id` (4 lines). The route corridor is drawn from the lanes under `PredictionInput.route` and their neighbours, in place of nuPlan's route roadblocks. The destination is the end of the recorded drive, in place of the mission goal. NuRec maps have no intersection areas, so that channel stays empty.
 
 **Outputs** (`ModelPrediction`): 64 waypoint poses at 10 Hz in the rig frame (*X* forward, *Y* left), built from positions and headings with `ModelPrediction.from_planar`.
 
 ### 5.3 Current Limitations
 
-- **No map or route:** AlpaSim's model API passes neither to the driver, so the model runs camera-only.
+- **Map stand-ins:** lanes replace nuPlan roadblocks, and the recorded drive's end replaces the mission goal. A scene without an HD map falls back to the camera-only track.
 - **Rendering domain gap:** AutoE2E was trained on real images. NuRec renders show artifacts for viewpoints away from the recording cameras, for example the nuPlan rig in an NVIDIA scene, and on dynamic vehicles.
 - **Worlds:** KITScenes and nuPlan reconstructions do not exist yet (§3).
 
@@ -148,9 +148,9 @@ R = w_track * R_track + R_bound
 *(Note on Stationary-Ego Progress Incentive):* In Phase 1, the stationary-ego failure mode cannot occur. If the ego stops or under-progresses, the recorded drive keeps moving. ADE and FDE grow, and the ego soon falls more than 3 m behind the recorded position, which triggers the terminal penalty and truncation. The progress incentive is therefore carried by construction in Phase 1, rather than requiring the dedicated progress term of Phase 2 (§6.2.2).
 
 **Future work within Phase 1:**
-- **Wiring:** the reward returns `truncated`, but ending the episode is the RL environment's job. That environment, and the loop that collects rewards, do not exist yet (§7).
+- **Wiring:** a first loop exists as an experiment outside the pipeline, `experiment/closed-loop/rl` (GRPO on one scene, decisions after the bound are dropped). It goes into the pipeline only after it shows value, with this section redesigned first.
 - **Threshold provenance:** the 3 m bound comes from [#140](https://github.com/autowarefoundation/auto_e2e/issues/140) and [#177](https://github.com/autowarefoundation/auto_e2e/pull/177) and has not been measured. Rendering quality (PSNR/LPIPS) against lateral offset from the recorded path would ground it and show whether it must be per scene.
-- **Off-road term:** an off-road term against Lanelet2 drivable polygons was prototyped earlier in [#177](https://github.com/autowarefoundation/auto_e2e/pull/177). It needs a map, which AlpaSim does not pass to the driver, and AlpaSim already reports an `offroad` metric. It moves to Phase 2's safety term.
+- **Off-road term:** an off-road term against Lanelet2 drivable polygons was prototyped earlier in [#177](https://github.com/autowarefoundation/auto_e2e/pull/177). AlpaSim already reports an `offroad` metric. It moves to Phase 2's safety term.
 
 ### 6.2 Phase 2 (Future Work): Multi-Objective Reward Formulation
 

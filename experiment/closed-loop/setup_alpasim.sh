@@ -28,6 +28,9 @@ if [[ ! -d "${ALPASIM_ROOT}/.git" ]]; then
 fi
 git -C "${ALPASIM_ROOT}" fetch --quiet origin "${ALPASIM_COMMIT}"
 git -C "${ALPASIM_ROOT}" checkout --quiet --force "${ALPASIM_COMMIT}"
+# The only change to AlpaSim itself: driver models receive the scene id, so
+# the AutoE2E driver can load the scene's HD map (README, "AlpaSim patch").
+git -C "${ALPASIM_ROOT}" apply "${HERE}/alpasim.patch"
 
 # Docker cannot follow symlinks out of the build context, so copy the plugin.
 rm -rf "${ALPASIM_ROOT}/plugins/alpasim_driver"
