@@ -88,7 +88,7 @@ The 11,035 samples are every frame of the 117 validation scenes, and the 202 key
 
 <img src="./Media/readme/section-get-started.svg" alt="Get started" width="100%">
 
-**1. Install** with Python 3.12 (the pinned PyTorch build has no wheels for 3.13+).
+**1. Install** with Python 3.12, the version used in CI.
 
 ```bash
 git clone https://github.com/autowarefoundation/auto_e2e.git
