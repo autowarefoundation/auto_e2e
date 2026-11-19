@@ -42,6 +42,8 @@ done
 ```
 
 ### Prepare KITScenes evaluation data for val split
+Create kitscenes_val.jsonl
+
 ```
-$ python prepare.py --out-dir <KITSCENES_VAL_EVAL_DATA>
+$ python prepare.py --split val --output <KITSCENES_VAL_EVAL_DIR>/kitscenes_val.jsonl
 ```
