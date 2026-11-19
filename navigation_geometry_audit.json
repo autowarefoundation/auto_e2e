@@ -1,0 +1,62 @@
+{
+  "absolute_lateral_m": {
+    "p100": 59.25801671513514,
+    "p50": 2.438129020365487,
+    "p90": 14.888682879810869,
+    "p95": 22.81339640036322,
+    "p99": 38.208952838236975
+  },
+  "candidate_coverage": {
+    "0.5": {
+      "fraction": 0.8931224459408037,
+      "geometry_id": "kitscenes-v3-bev-0.5m-audit",
+      "outside_sample_count": 6460,
+      "x_max_m": 85.25,
+      "x_min_m": -42.75,
+      "y_max_m": 64.0,
+      "y_min_m": -64.0
+    },
+    "1": {
+      "fraction": 0.9978823023344308,
+      "geometry_id": "kitscenes-v3-bev-1m-audit",
+      "outside_sample_count": 128,
+      "x_max_m": 170.5,
+      "x_min_m": -85.5,
+      "y_max_m": 128.0,
+      "y_min_m": -128.0
+    }
+  },
+  "displacement_norm_m": {
+    "p100": 178.81260143128696,
+    "p50": 44.15181835829834,
+    "p90": 86.57288253241711,
+    "p95": 100.25489818282576,
+    "p99": 131.3533100293386
+  },
+  "longitudinal_m": {
+    "p100": 178.79359382652905,
+    "p50": 43.29035022552288,
+    "p90": 86.34200549714527,
+    "p95": 97.40376161233107,
+    "p99": 131.18556740145885
+  },
+  "schema_version": "navigation_geometry_audit_v1",
+  "selection": {
+    "meters_per_pixel": 1.0,
+    "reason": "0.5 m/px does not cover the observed 6.4-second displacement distribution; 1.0 m/px covers more than 99%."
+  },
+  "source": {
+    "episode_path_count": 404,
+    "horizon_sample_count": 60443,
+    "horizon_seconds": 6.4,
+    "horizon_steps": 64,
+    "source_hz": 10.0
+  },
+  "speed_mps": {
+    "p100": 28.202579162605133,
+    "p50": 7.152352719879653,
+    "p90": 13.599641613714857,
+    "p95": 15.50520885400013,
+    "p99": 20.677186887812606
+  }
+}
