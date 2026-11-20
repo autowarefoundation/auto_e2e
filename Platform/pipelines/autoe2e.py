@@ -94,6 +94,11 @@ class TrainingSpec:
     bev_min_positive_cells: int = 2000
     validation_sample_limit: int = 1024
     parent_profile: str = ""
+    # Lateral recovery (#221): "projection" or "image_warp"; probability 0 is off.
+    lateral_recovery_method: str = "projection"
+    lateral_recovery_probability: float = 0.0
+    feature_consistency_weight: float = 0.0
+    feature_bottleneck_weight: float = 0.0
 
 
 @dataclass
@@ -367,6 +372,10 @@ def _train(spec: TrainingSpec, dataset: DatasetHandle, parent: ParentHandle, num
         parent_profile=spec.parent_profile,
         parent_checkpoint_sha256=parent.checkpoint_sha256,
         parent_checkpoint_epoch=parent.epoch,
+        lateral_recovery_method=spec.lateral_recovery_method,
+        lateral_recovery_probability=spec.lateral_recovery_probability,
+        feature_consistency_weight=spec.feature_consistency_weight,
+        feature_bottleneck_weight=spec.feature_bottleneck_weight,
     )
     metadata = json.loads(open(output.metadata.download()).read())
     return TrainedCheckpoints(

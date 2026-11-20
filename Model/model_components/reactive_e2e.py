@@ -1237,6 +1237,8 @@ class ReactiveE2E(nn.Module):
                 compute_bev_segmentation=True,
                 compute_route_reconstruction=True,
                 bev_only=False,
+                return_planner_bev=False,
+                planner_bev_noise=False,
                 **kwargs):
         """
         Run the reactive end-to-end autonomous-driving pipeline.
@@ -1274,6 +1276,11 @@ class ReactiveE2E(nn.Module):
             mode: "train" returns enabled auxiliary predictions.
             return_auxiliary: also return enabled auxiliary predictions during
                 inference, for offline Dashboard artifact generation.
+            return_planner_bev: return the fused BEV that enters the planner as
+                ``aux["planner_bev"]`` for feature losses during training.
+            planner_bev_noise: add unit Gaussian noise to the planner BEV in
+                training mode, the fixed-variance bottleneck whose KL to N(0,1)
+                is ``0.5 * planner_bev**2``.
 
         Returns:
             trajectory (B, num_timesteps * num_signals), or
@@ -1566,6 +1573,10 @@ class ReactiveE2E(nn.Module):
                 self.RouteReconstructionHead(route_contribution)
             )
 
+        if return_planner_bev:
+            aux_outputs["planner_bev"] = fused_features
+        if planner_bev_noise and self.training:
+            fused_features = fused_features + torch.randn_like(fused_features)
         planner_features = (
             self.FusedFeaturePooling(fused_features)
             if self.FusedFeaturePooling is not None

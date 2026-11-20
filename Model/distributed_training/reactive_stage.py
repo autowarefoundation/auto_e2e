@@ -368,6 +368,27 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
             raise ValueError(
                 f"{name} must be finite and between zero and 1000"
             )
+    from training.lateral_recovery import LATERAL_RECOVERY_METHODS
+
+    if config.get("lateral_recovery_method", "projection") not in (
+        LATERAL_RECOVERY_METHODS
+    ):
+        raise ValueError(
+            f"lateral_recovery_method must be one of {LATERAL_RECOVERY_METHODS}"
+        )
+    lateral_recovery_probability = float(
+        config.get("lateral_recovery_probability", 0.0)
+    )
+    if not 0.0 <= lateral_recovery_probability <= 1.0:
+        raise ValueError("lateral_recovery_probability must be in [0, 1]")
+    if (
+        float(config.get("feature_consistency_weight", 0.0)) > 0.0
+        and lateral_recovery_probability == 0.0
+    ):
+        raise ValueError(
+            "feature consistency compares shifted samples and needs "
+            "lateral_recovery_probability above zero"
+        )
     if training_scope is ReactiveTrainingScope.BEV_ONLY and (
         stage is not ReactiveTrainingStage.NUPLAN_FULL
         or float(config["trajectory_weight"]) != 0.0
@@ -1959,10 +1980,19 @@ def _train_fixed_steps(
     performance_log_interval_steps: int = (
         REACTIVE_PERFORMANCE_LOG_INTERVAL_STEPS
     ),
+    lateral_recovery_method: str = "projection",
+    lateral_recovery_probability: float = 0.0,
 ) -> dict[str, float]:
     import torch
     import torch.distributed as dist
 
+    from navigation.geometry import AUTOE2E_NAVIGATION_GEOMETRY
+    from training.lateral_recovery import (
+        aligned_clean_planner_bev,
+        apply_lateral_recovery,
+        preserved_batch_norm_statistics,
+        sample_lateral_shift,
+    )
     from training.reactive_stage_runner import (
         apply_reactive_egomotion_policy,
         reactive_training_policy,
@@ -1995,7 +2025,61 @@ def _train_fixed_steps(
         "bev_segmentation_bce",
         "bev_segmentation_dice",
         "route_reconstruction",
+        "feature_consistency",
+        "feature_bottleneck",
     )
+    feature_consistency = objective.feature_consistency_weight > 0.0
+    feature_bottleneck = objective.feature_bottleneck_weight > 0.0
+    feature_options = {}
+    if feature_consistency or feature_bottleneck:
+        feature_options = {
+            "return_planner_bev": True,
+            "planner_bev_noise": feature_bottleneck,
+        }
+
+    def resolve_inputs(batch, fallback_projection, fallback_geometry_type):
+        projection, geometry_type = resolve_reactive_batch_projection(
+            batch,
+            fallback_projection,
+            fallback_geometry_type,
+            device=device,
+        )
+        camera_history_tiles, history_projections = (
+            resolve_reactive_camera_history(
+                batch,
+                geometry_type,
+                device=device,
+                required=require_reactive_camera_context,
+            )
+        )
+        return {
+            "projection": projection,
+            "geometry_type": geometry_type,
+            "front_projection": resolve_reactive_front_projection(
+                batch,
+                geometry_type,
+                device=device,
+                required=require_reactive_camera_context,
+            ),
+            "camera_history_tiles": camera_history_tiles,
+            "history_projections": history_projections,
+        }
+
+    def forward(network, batch, inputs, **options):
+        return network(
+            batch["visual_tiles"],
+            batch["map_context"],
+            batch["visual_history"],
+            batch["egomotion_history"],
+            route_mask=batch["route_mask"],
+            map_valid=batch["map_valid"],
+            route_valid=batch["route_valid"],
+            front_camera_tile=batch.get("front_camera_tile"),
+            mode="train",
+            **inputs,
+            **options,
+        )
+
     if resume_rank_state is None:
         totals = torch.zeros(
             len(term_names),
@@ -2206,6 +2290,23 @@ def _train_fixed_steps(
             )
             phase_started = time.perf_counter()
             batch = _batch_to_device(raw_batch, device)
+            clean_batch = None
+            if lateral_recovery_probability > 0.0:
+                lateral_shift = sample_lateral_shift(
+                    batch,
+                    lateral_recovery_probability,
+                )
+                if feature_consistency:
+                    clean_batch = apply_reactive_egomotion_policy(
+                        batch,
+                        trajectory_training_policy,
+                    )
+                batch = apply_lateral_recovery(
+                    batch,
+                    lateral_shift,
+                    method=lateral_recovery_method,
+                    geometry=AUTOE2E_NAVIGATION_GEOMETRY,
+                )
             batch = apply_reactive_egomotion_policy(
                 batch,
                 trajectory_training_policy,
@@ -2218,27 +2319,10 @@ def _train_fixed_steps(
             )
             consumed_samples += int(batch["visual_tiles"].shape[0])
             phase_started = time.perf_counter()
-            projection, geometry_type = (
-                resolve_reactive_batch_projection(
-                    batch,
-                    fallback_projection,
-                    fallback_geometry_type,
-                    device=device,
-                )
-            )
-            front_projection = resolve_reactive_front_projection(
+            inputs = resolve_inputs(
                 batch,
-                geometry_type,
-                device=device,
-                required=require_reactive_camera_context,
-            )
-            camera_history_tiles, history_projections = (
-                resolve_reactive_camera_history(
-                    batch,
-                    geometry_type,
-                    device=device,
-                    required=require_reactive_camera_context,
-                )
+                fallback_projection,
+                fallback_geometry_type,
             )
             record_performance_phase(
                 capture_performance,
@@ -2268,21 +2352,33 @@ def _train_fixed_steps(
                     dtype=torch.bfloat16,
                     enabled=precision == "bf16",
                 ):
-                    output = model(
-                        batch["visual_tiles"],
-                        batch["map_context"],
-                        batch["visual_history"],
-                        batch["egomotion_history"],
-                        route_mask=batch["route_mask"],
-                        map_valid=batch["map_valid"],
-                        route_valid=batch["route_valid"],
-                        projection=projection,
-                        geometry_type=geometry_type,
-                        camera_history_tiles=camera_history_tiles,
-                        history_projections=history_projections,
-                        front_camera_tile=batch.get("front_camera_tile"),
-                        front_projection=front_projection,
-                        mode="train",
+                    clean_planner_bev = None
+                    if clean_batch is not None:
+                        with torch.no_grad(), preserved_batch_norm_statistics(
+                            model
+                        ):
+                            _, clean_auxiliary = forward(
+                                _base_model(model),
+                                clean_batch,
+                                resolve_inputs(
+                                    clean_batch,
+                                    fallback_projection,
+                                    fallback_geometry_type,
+                                ),
+                                compute_bev_segmentation=False,
+                                compute_route_reconstruction=False,
+                                return_planner_bev=True,
+                            )
+                        clean_planner_bev = aligned_clean_planner_bev(
+                            clean_auxiliary["planner_bev"],
+                            lateral_shift,
+                            AUTOE2E_NAVIGATION_GEOMETRY,
+                        )
+                    output = forward(
+                        model,
+                        batch,
+                        inputs,
+                        **feature_options,
                         compute_bev_segmentation=(
                             objective.compute_bev_segmentation
                         ),
@@ -2298,6 +2394,11 @@ def _train_fixed_steps(
                             "Reactive DDP model omitted auxiliary outputs"
                         )
                     predicted_controls, auxiliary = output
+                    if clean_planner_bev is not None:
+                        (
+                            auxiliary["clean_planner_bev"],
+                            auxiliary["clean_planner_bev_mask"],
+                        ) = clean_planner_bev
                     terms = objective(
                         predicted_controls,
                         auxiliary,
@@ -2585,6 +2686,8 @@ def _train_fixed_steps(
         "route_reconstruction": float(
             packed[5].item() / denominator
         ),
+        "feature_consistency": float(packed[6].item() / denominator),
+        "feature_bottleneck": float(packed[7].item() / denominator),
         "consumed_samples": float(packed[consumed_offset].item()),
         "loader_restarts": float(packed[consumed_offset + 1].item()),
         "local_consumed_samples": float(consumed_samples),
@@ -4715,6 +4818,12 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         route_weight=float(config["route_weight"]),
         corridor_pos_weight=float(config["corridor_pos_weight"]),
         training_scope=training_scope,
+        feature_consistency_weight=float(
+            config.get("feature_consistency_weight", 0.0)
+        ),
+        feature_bottleneck_weight=float(
+            config.get("feature_bottleneck_weight", 0.0)
+        ),
     ).to(device)
 
     ddp_model_state_sha256 = _assert_ddp_model_state_consistent(model)
@@ -5038,6 +5147,18 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "trajectory_weight": float(config["trajectory_weight"]),
         "bev_weight": float(config["bev_weight"]),
         "route_weight": float(config["route_weight"]),
+        "lateral_recovery_method": str(
+            config.get("lateral_recovery_method", "projection")
+        ),
+        "lateral_recovery_probability": float(
+            config.get("lateral_recovery_probability", 0.0)
+        ),
+        "feature_consistency_weight": float(
+            config.get("feature_consistency_weight", 0.0)
+        ),
+        "feature_bottleneck_weight": float(
+            config.get("feature_bottleneck_weight", 0.0)
+        ),
         "training_scope": training_scope.value,
         "bev_encoder_learning_rate": bev_encoder_learning_rate,
         "optimizer_identity": (
@@ -5303,6 +5424,18 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
         "trajectory_weight": float(config["trajectory_weight"]),
         "bev_weight": float(config["bev_weight"]),
         "route_weight": float(config["route_weight"]),
+        "lateral_recovery_method": str(
+            config.get("lateral_recovery_method", "projection")
+        ),
+        "lateral_recovery_probability": float(
+            config.get("lateral_recovery_probability", 0.0)
+        ),
+        "feature_consistency_weight": float(
+            config.get("feature_consistency_weight", 0.0)
+        ),
+        "feature_bottleneck_weight": float(
+            config.get("feature_bottleneck_weight", 0.0)
+        ),
         "training_scope": training_scope.value,
         "bev_encoder_learning_rate": bev_encoder_learning_rate,
         "optimizer_identity": (
@@ -5666,6 +5799,12 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             performance_log_interval_steps=(
                 performance_log_interval_steps
             ),
+            lateral_recovery_method=str(
+                config.get("lateral_recovery_method", "projection")
+            ),
+            lateral_recovery_probability=float(
+                config.get("lateral_recovery_probability", 0.0)
+            ),
         )
         if (
             (
@@ -6021,6 +6160,12 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
                 ],
                 "train_route_reconstruction": train_metrics[
                     "route_reconstruction"
+                ],
+                "train_feature_consistency": train_metrics[
+                    "feature_consistency"
+                ],
+                "train_feature_bottleneck": train_metrics[
+                    "feature_bottleneck"
                 ],
                 "train_total": train_metrics["total"],
                 "train_trajectory": train_metrics["trajectory"],

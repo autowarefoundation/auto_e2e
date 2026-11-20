@@ -21,6 +21,10 @@ from navigation.geometry import (
     MAP_CHANNEL_COUNT,
     ROUTE_CHANNEL_COUNT,
 )
+from training.lateral_recovery import (
+    feature_bottleneck_kl,
+    feature_consistency_kl,
+)
 from reactive_training_contracts import (
     REACTIVE_CAMERA_IMAGE_SIZE,
     REACTIVE_FRONT_CAMERA_IMAGE_SIZE,
@@ -261,12 +265,16 @@ class ReactiveMultitaskObjective(nn.Module):
         training_scope: ReactiveTrainingScope | str = (
             ReactiveTrainingScope.MULTITASK
         ),
+        feature_consistency_weight: float = 0.0,
+        feature_bottleneck_weight: float = 0.0,
     ) -> None:
         super().__init__()
         task_weights = {
             "trajectory_weight": trajectory_weight,
             "bev_weight": bev_weight,
             "route_weight": route_weight,
+            "feature_consistency_weight": feature_consistency_weight,
+            "feature_bottleneck_weight": feature_bottleneck_weight,
         }
         for name, value in task_weights.items():
             if not math.isfinite(value) or not 0.0 <= value <= 1_000.0:
@@ -285,11 +293,15 @@ class ReactiveMultitaskObjective(nn.Module):
         self.trajectory_weight = float(trajectory_weight)
         self.bev_weight = float(bev_weight)
         self.route_weight = float(route_weight)
+        self.feature_consistency_weight = float(feature_consistency_weight)
+        self.feature_bottleneck_weight = float(feature_bottleneck_weight)
         if self.training_scope is ReactiveTrainingScope.BEV_ONLY and (
             stage is not ReactiveTrainingStage.NUPLAN_FULL
             or self.trajectory_weight != 0.0
             or self.bev_weight <= 0.0
             or self.route_weight != 0.0
+            or self.feature_consistency_weight != 0.0
+            or self.feature_bottleneck_weight != 0.0
         ):
             raise ValueError(
                 "BEV-only objective requires nuPlan full with only BEV loss"
@@ -402,10 +414,22 @@ class ReactiveMultitaskObjective(nn.Module):
             bev = bev_components["total"]
             bev_bce = bev_components["bce"]
             bev_dice = bev_components["dice"]
+        consistency = zero
+        if self.feature_consistency_weight > 0.0:
+            consistency = feature_consistency_kl(
+                auxiliary["planner_bev"],
+                auxiliary["clean_planner_bev"],
+                auxiliary["clean_planner_bev_mask"],
+            )
+        bottleneck = zero
+        if self.feature_bottleneck_weight > 0.0:
+            bottleneck = feature_bottleneck_kl(auxiliary["planner_bev"])
         total = (
             self.trajectory_weight * trajectory
             + self.bev_weight * bev
             + self.route_weight * route
+            + self.feature_consistency_weight * consistency
+            + self.feature_bottleneck_weight * bottleneck
         )
         return {
             "total": total,
@@ -414,4 +438,6 @@ class ReactiveMultitaskObjective(nn.Module):
             "bev_segmentation_bce": bev_bce,
             "bev_segmentation_dice": bev_dice,
             "route_reconstruction": route,
+            "feature_consistency": consistency,
+            "feature_bottleneck": bottleneck,
         }
