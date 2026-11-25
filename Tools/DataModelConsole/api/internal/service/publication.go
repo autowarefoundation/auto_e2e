@@ -37,6 +37,13 @@ type publicationArtifact struct {
 	SHA256 string `json:"sha256"`
 }
 
+// publicationPartition is one source scene partition of a publication. A
+// partition without samples has no shard, so partitions can outnumber shards.
+type publicationPartition struct {
+	PartitionID string `json:"partition_id"`
+	SampleCount int    `json:"sample_count"`
+}
+
 type publicationGeoArtifacts struct {
 	SummaryKey    string  `json:"summary_key"`
 	HeatmapKey    string  `json:"heatmap_key"`
@@ -68,6 +75,7 @@ type publicationManifest struct {
 	HasGPS        bool `json:"has_gps"`
 
 	ShardEntries []publicationShardEntry  `json:"shard_entries"`
+	Partitions   []publicationPartition   `json:"partitions"`
 	GeoArtifacts *publicationGeoArtifacts `json:"geo_artifacts"`
 
 	SHA256      string                           `json:"-"`

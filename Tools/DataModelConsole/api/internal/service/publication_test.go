@@ -380,10 +380,26 @@ func (f *fakePublicationS3) ListObjectsV2(
 	prefix := aws.ToString(input.Prefix)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	delimiter := aws.ToString(input.Delimiter)
 	objects := make([]s3types.Object, 0)
+	commonPrefixes := make([]s3types.CommonPrefix, 0)
+	seenPrefixes := make(map[string]bool)
 	for key, object := range f.objects {
 		if !strings.HasPrefix(key, prefix) {
 			continue
+		}
+		if delimiter != "" {
+			rest := strings.TrimPrefix(key, prefix)
+			if index := strings.Index(rest, delimiter); index >= 0 {
+				common := prefix + rest[:index+len(delimiter)]
+				if !seenPrefixes[common] {
+					seenPrefixes[common] = true
+					commonPrefixes = append(commonPrefixes, s3types.CommonPrefix{
+						Prefix: aws.String(common),
+					})
+				}
+				continue
+			}
 		}
 		objects = append(objects, s3types.Object{
 			Key:          aws.String(key),
@@ -392,9 +408,10 @@ func (f *fakePublicationS3) ListObjectsV2(
 		})
 	}
 	return &s3.ListObjectsV2Output{
-		Contents:    objects,
-		IsTruncated: aws.Bool(false),
-		KeyCount:    aws.Int32(int32(len(objects))),
+		Contents:       objects,
+		CommonPrefixes: commonPrefixes,
+		IsTruncated:    aws.Bool(false),
+		KeyCount:       aws.Int32(int32(len(objects))),
 	}, nil
 }
 
