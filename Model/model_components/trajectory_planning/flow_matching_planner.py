@@ -2,6 +2,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .base import BasePlanner
 from .reasoning_coupling import ReasoningCoupling
@@ -353,3 +354,48 @@ class FlowMatchingPlanner(BasePlanner):
                               horizon_tokens=reasoning_horizon_tokens)
             x = x + dt * v
         return x
+
+    def compute_planner_loss(
+        self,
+        bev_features,
+        visual_history,
+        egomotion_history,
+        trajectory_target,
+        *,
+        loss_fn=None,
+        reasoning_latent=None,
+        reasoning_horizon_tokens=None,
+        **kwargs,
+    ):
+        """Compute the conditional flow-matching velocity MSE objective.
+
+        Samples ``(u_t, t, target_velocity)`` along the linear path and
+        regresses ``_v_theta`` against ``x_1 - x_0`` in a single pass without
+        running the inference Euler solver.
+        """
+        self._validate_inputs(visual_history, egomotion_history)
+        B = bev_features.shape[0]
+        self._validate_trajectory_target(
+            trajectory_target, B, bev_features.device,
+        )
+        u_t, t, target_velocity = self.construct_training_data(
+            trajectory_target,
+        )
+        bev_seq = self._project_bev(bev_features)
+        mod_cond = self._modulation_conditioning(
+            visual_history,
+            egomotion_history,
+            reasoning_latent=reasoning_latent,
+        )
+        predicted_velocity = self._v_theta(
+            u_t,
+            t,
+            bev_seq,
+            mod_cond,
+            horizon_tokens=reasoning_horizon_tokens,
+        )
+        velocity_mse = F.mse_loss(predicted_velocity, target_velocity)
+        return {
+            "loss": velocity_mse,
+            "velocity_mse": velocity_mse,
+        }
