@@ -166,3 +166,51 @@ class BezierPlanner(BasePlanner):
         )
         return trajectory
 
+    def _compute_loss_and_trajectory(
+        self,
+        bev_features,
+        visual_history,
+        egomotion_history,
+        trajectory_target,
+        *,
+        loss_fn=None,
+        reasoning_latent=None,
+        reasoning_horizon_tokens=None,
+        **kwargs,
+    ):
+        return self._compute_imitation_loss_and_trajectory(
+            bev_features,
+            visual_history,
+            egomotion_history,
+            trajectory_target,
+            loss_fn=loss_fn,
+            reasoning_latent=reasoning_latent,
+            reasoning_horizon_tokens=reasoning_horizon_tokens,
+            **kwargs,
+        )
+
+    def compute_planner_loss(
+        self,
+        bev_features,
+        visual_history,
+        egomotion_history,
+        trajectory_target,
+        *,
+        loss_fn=None,
+        reasoning_latent=None,
+        reasoning_horizon_tokens=None,
+        **kwargs,
+    ):
+        """Compute trajectory imitation loss on the Bezier rollout."""
+        loss_dict, _ = self._compute_loss_and_trajectory(
+            bev_features,
+            visual_history,
+            egomotion_history,
+            trajectory_target,
+            loss_fn=loss_fn,
+            reasoning_latent=reasoning_latent,
+            reasoning_horizon_tokens=reasoning_horizon_tokens,
+            **kwargs,
+        )
+        return loss_dict
+

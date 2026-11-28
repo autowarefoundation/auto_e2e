@@ -182,6 +182,8 @@ class AutoE2E(nn.Module):
                 compute_bev_segmentation=True,
                 compute_route_reconstruction=True,
                 bev_only=False,
+                return_planner_loss=False,
+                planner_loss_fn=None,
                 **kwargs):
         """
         Run the full autonomous-driving pipeline.
@@ -325,6 +327,8 @@ class AutoE2E(nn.Module):
             compute_route_reconstruction=compute_route_reconstruction,
             bev_only=bev_only,
             trajectory_target=trajectory_target,
+            return_planner_loss=return_planner_loss,
+            planner_loss_fn=planner_loss_fn,
             **kwargs,
         )
         reactive_aux = {}

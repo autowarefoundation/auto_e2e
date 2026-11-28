@@ -1,9 +1,16 @@
+import ast
+from pathlib import Path
+import warnings
+
 import pytest
 import torch
+import torch.nn.functional as F
 
 from model_components.trajectory_planning import (
+    BasePlanner,
     BezierPlanner,
     FlowMatchingPlanner,
+    GRUPlanner,
     build_planner,
     PLANNER_REGISTRY,
 )
@@ -403,3 +410,242 @@ class TestAutoE2EWithFlowMatching:
         bezier_traj = bezier_model(visual, map_input, vis_hist, ego, mode="infer")
         fm_traj = fm_model(visual, map_input, vis_hist, ego, mode="infer")
         assert bezier_traj.shape == fm_traj.shape == (2, 128)
+
+
+class TestPlannerLossContract:
+    def test_base_planner_requires_compute_planner_loss(self):
+        class _IncompletePlanner(BasePlanner):
+            def forward(
+                self, bev_features, visual_history, egomotion_history, **kwargs,
+            ):
+                return torch.zeros(bev_features.shape[0], 128)
+
+        with pytest.raises(TypeError, match="compute_planner_loss"):
+            _IncompletePlanner()
+
+    def test_build_flow_matching_emits_no_runtime_warning(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            planner = build_planner("flow_matching", embed_dim=256)
+        assert isinstance(planner, FlowMatchingPlanner)
+        runtime_warnings = [
+            w for w in caught if issubclass(w.category, RuntimeWarning)
+        ]
+        assert not runtime_warnings
+
+    def test_flow_matching_compute_planner_loss_skips_euler_and_matches_velocity_mse(
+        self, device, monkeypatch,
+    ):
+        torch.manual_seed(0)
+        planner = FlowMatchingPlanner(embed_dim=256, num_inference_steps=4).to(device)
+        bev = torch.randn(2, 256, 8, 8, device=device, requires_grad=True)
+        vis_hist = torch.randn(2, 896, device=device, requires_grad=True)
+        ego = torch.randn(2, 256, device=device, requires_grad=True)
+        target = torch.randn(2, 128, device=device)
+
+        def _forbid_forward(*args, **kwargs):
+            raise AssertionError("compute_planner_loss must not invoke Euler forward()")
+
+        monkeypatch.setattr(planner, "forward", _forbid_forward)
+
+        u_t = torch.randn(2, 128, device=device)
+        t = torch.tensor([0.25, 0.75], device=device)
+        target_velocity = torch.randn(2, 128, device=device)
+        monkeypatch.setattr(
+            planner,
+            "construct_training_data",
+            lambda _target: (u_t, t, target_velocity),
+        )
+
+        out = planner.compute_planner_loss(bev, vis_hist, ego, target)
+        assert set(out.keys()) == {"loss", "velocity_mse"}
+        assert torch.equal(out["loss"], out["velocity_mse"])
+
+        bev_seq = planner._project_bev(bev)
+        mod_cond = planner._modulation_conditioning(vis_hist, ego)
+        expected_v = planner._v_theta(u_t, t, bev_seq, mod_cond)
+        expected_mse = F.mse_loss(expected_v, target_velocity)
+        assert torch.allclose(out["loss"], expected_mse)
+
+        out["loss"].backward()
+        assert bev.grad is not None and bev.grad.abs().max() > 0
+        assert vis_hist.grad is not None and vis_hist.grad.abs().max() > 0
+        assert ego.grad is not None and ego.grad.abs().max() > 0
+
+    def test_bezier_and_gru_compute_planner_loss(self, device):
+        torch.manual_seed(0)
+        bezier = BezierPlanner(embed_dim=256).to(device)
+        bev_pooled = torch.randn(2, 75 * 50, device=device, requires_grad=True)
+        vis_hist = torch.randn(2, 896, device=device, requires_grad=True)
+        ego = torch.randn(2, 256, device=device, requires_grad=True)
+        target = torch.randn(2, 128, device=device)
+
+        expected_traj = bezier(bev_pooled, vis_hist, ego)
+        expected_loss = F.smooth_l1_loss(expected_traj, target)
+        bezier_out = bezier.compute_planner_loss(bev_pooled, vis_hist, ego, target)
+        assert set(bezier_out.keys()) == {"loss"}
+        assert torch.allclose(bezier_out["loss"], expected_loss)
+        bezier_out["loss"].backward()
+        assert bev_pooled.grad is not None and bev_pooled.grad.abs().max() > 0
+
+        gru = GRUPlanner(embed_dim=256).to(device)
+        bev_spatial = torch.randn(2, 256, 8, 8, device=device, requires_grad=True)
+        vis_hist_g = torch.randn(2, 896, device=device, requires_grad=True)
+        ego_g = torch.randn(2, 256, device=device, requires_grad=True)
+        custom_loss = torch.nn.MSELoss()
+        expected_gru_loss = custom_loss(gru(bev_spatial, vis_hist_g, ego_g), target)
+        gru_out = gru.compute_planner_loss(
+            bev_spatial, vis_hist_g, ego_g, target, loss_fn=custom_loss,
+        )
+        assert set(gru_out.keys()) == {"loss"}
+        assert torch.allclose(gru_out["loss"], expected_gru_loss)
+        gru_out["loss"].backward()
+        assert bev_spatial.grad is not None and bev_spatial.grad.abs().max() > 0
+
+    def test_autoe2e_return_planner_loss_for_flow_matching(
+        self, build_mock_model, device, monkeypatch,
+    ):
+        model = build_mock_model(
+            num_views=8,
+            device=device,
+            planner_mode="flow_matching",
+            planner_kwargs={"num_inference_steps": 4},
+        )
+        model.train()
+        visual, map_input, vis_hist, ego = make_inputs(2, 8, device)
+        target = torch.randn(2, 128, device=device)
+
+        def _forbid_forward(*args, **kwargs):
+            raise AssertionError(
+                "return_planner_loss=True must not run Euler forward()"
+            )
+
+        monkeypatch.setattr(
+            model.Reactive_E2E.TrajectoryPlanner, "forward", _forbid_forward,
+        )
+
+        _, aux = model(
+            visual,
+            map_input,
+            vis_hist,
+            ego,
+            mode="train",
+            trajectory_target=target,
+            return_planner_loss=True,
+        )
+        assert "planner_loss" in aux
+        assert "velocity_mse" in aux["planner_loss"]
+        loss = aux["planner_loss"]["loss"]
+        assert torch.isfinite(loss)
+        loss.backward()
+
+        backbone_grad = any(
+            p.grad is not None and p.grad.abs().max() > 0
+            for n, p in model.named_parameters()
+            if n.startswith("Reactive_E2E.Backbone.")
+        )
+        planner_grad = any(
+            p.grad is not None and p.grad.abs().max() > 0
+            for n, p in model.named_parameters()
+            if n.startswith("Reactive_E2E.TrajectoryPlanner.")
+        )
+        assert backbone_grad and planner_grad
+
+    def test_train_il_wires_planner_mode_and_compute_planner_loss(self):
+        workflows_path = (
+            Path(__file__).resolve().parents[2]
+            / "Platform"
+            / "pipelines"
+            / "workflows.py"
+        )
+        tree = ast.parse(workflows_path.read_text(encoding="utf-8"))
+        train_il_fn = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "train_il"
+        )
+        arg_names = [arg.arg for arg in train_il_fn.args.args]
+        assert "planner_mode" in arg_names
+
+        autoe2e_call = next(
+            node
+            for node in ast.walk(train_il_fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "AutoE2E"
+        )
+        assert "planner_mode" in {kw.arg for kw in autoe2e_call.keywords}
+
+        model_calls = [
+            node
+            for node in ast.walk(train_il_fn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "model"
+        ]
+        train_call = next(
+            call
+            for call in model_calls
+            if any(kw.arg == "trajectory_target" for kw in call.keywords)
+        )
+        train_kw = {kw.arg for kw in train_call.keywords}
+        assert "return_planner_loss" in train_kw
+        assert "planner_loss_fn" in train_kw
+
+    def test_autoe2e_return_planner_loss_for_bezier_reuses_single_rollout(
+        self, build_mock_model, device,
+    ):
+        from model_components.losses import TrajectoryImitationLoss
+
+        model = build_mock_model(
+            num_views=8,
+            device=device,
+            planner_mode="bezier",
+        )
+        model.train()
+        visual, map_input, vis_hist, ego = make_inputs(2, 8, device)
+        target = torch.randn(2, 128, device=device)
+        loss_fn = TrajectoryImitationLoss(loss_type="smooth_l1").to(device)
+
+        traj, aux = model(
+            visual,
+            map_input,
+            vis_hist,
+            ego,
+            mode="train",
+            trajectory_target=target,
+            return_planner_loss=True,
+            planner_loss_fn=loss_fn,
+        )
+        assert traj.shape == (2, 128)
+        assert torch.allclose(aux["planner_loss"]["loss"], loss_fn(traj, target))
+
+    @pytest.mark.parametrize("mode", ["pooled_latent", "horizon_cross_attention"])
+    def test_flow_matching_compute_planner_loss_threads_reasoning(self, device, mode):
+        torch.manual_seed(0)
+        planner = FlowMatchingPlanner(
+            embed_dim=256, num_inference_steps=3, reasoning_mode=mode,
+        ).to(device)
+        planner.reasoning_coupling.alpha.data.fill_(1.0)
+        planner.reasoning_coupling.reason_proj[-1].weight.data.normal_()
+
+        bev = torch.randn(2, 256, 8, 8, device=device)
+        vis_hist = torch.randn(2, 896, device=device)
+        ego = torch.randn(2, 256, device=device)
+        target = torch.randn(2, 128, device=device)
+        latent = torch.randn(2, 256, device=device, requires_grad=True)
+        tokens = torch.randn(2, 5, 256, device=device, requires_grad=True)
+
+        out = planner.compute_planner_loss(
+            bev,
+            vis_hist,
+            ego,
+            target,
+            reasoning_latent=latent,
+            reasoning_horizon_tokens=tokens,
+        )
+        out["loss"].backward()
+        if mode == "pooled_latent":
+            assert latent.grad is not None and latent.grad.abs().max() > 0
+        else:
+            assert tokens.grad is not None and tokens.grad.abs().max() > 0

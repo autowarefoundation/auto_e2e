@@ -138,3 +138,51 @@ class GRUPlanner(BasePlanner):
             _, hidden = self.gru(attended.unsqueeze(0), hidden)
             controls.append(self.control_head(hidden.squeeze(0)))
         return torch.cat(controls, dim=1)
+
+    def _compute_loss_and_trajectory(
+        self,
+        bev_features: torch.Tensor,
+        visual_history: torch.Tensor,
+        egomotion_history: torch.Tensor,
+        trajectory_target: torch.Tensor,
+        *,
+        loss_fn=None,
+        reasoning_latent: torch.Tensor | None = None,
+        reasoning_horizon_tokens: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        return self._compute_imitation_loss_and_trajectory(
+            bev_features,
+            visual_history,
+            egomotion_history,
+            trajectory_target,
+            loss_fn=loss_fn,
+            reasoning_latent=reasoning_latent,
+            reasoning_horizon_tokens=reasoning_horizon_tokens,
+            **kwargs,
+        )
+
+    def compute_planner_loss(
+        self,
+        bev_features: torch.Tensor,
+        visual_history: torch.Tensor,
+        egomotion_history: torch.Tensor,
+        trajectory_target: torch.Tensor,
+        *,
+        loss_fn=None,
+        reasoning_latent: torch.Tensor | None = None,
+        reasoning_horizon_tokens: torch.Tensor | None = None,
+        **kwargs,
+    ) -> dict[str, torch.Tensor]:
+        """Compute trajectory imitation loss on the GRU rollout."""
+        loss_dict, _ = self._compute_loss_and_trajectory(
+            bev_features,
+            visual_history,
+            egomotion_history,
+            trajectory_target,
+            loss_fn=loss_fn,
+            reasoning_latent=reasoning_latent,
+            reasoning_horizon_tokens=reasoning_horizon_tokens,
+            **kwargs,
+        )
+        return loss_dict

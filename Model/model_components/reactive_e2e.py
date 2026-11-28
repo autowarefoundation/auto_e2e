@@ -1237,6 +1237,9 @@ class ReactiveE2E(nn.Module):
                 compute_bev_segmentation=True,
                 compute_route_reconstruction=True,
                 bev_only=False,
+                trajectory_target=None,
+                return_planner_loss=False,
+                planner_loss_fn=None,
                 **kwargs):
         """
         Run the reactive end-to-end autonomous-driving pipeline.
@@ -1479,6 +1482,14 @@ class ReactiveE2E(nn.Module):
             aux_outputs["bev_segmentation_logits"] = (
                 self.BEVSegmentationHead(image_bev)
             )
+        if bev_only and return_planner_loss:
+            raise ValueError(
+                "BEV-only forward cannot compute planner loss"
+            )
+        if return_planner_loss and trajectory_target is None:
+            raise ValueError(
+                "trajectory_target is required when return_planner_loss=True"
+            )
         if bev_only:
             if (
                 not emit_auxiliary
@@ -1588,12 +1599,40 @@ class ReactiveE2E(nn.Module):
             reasoning_horizon_tokens = reasoning_pred.horizon_tokens
 
         # --- Trajectory Prediction ---
-        trajectory = self.TrajectoryPlanner(
-            planner_features, visual_ctx, ego_ctx,
-            reasoning_latent=reasoning_latent,
-            reasoning_horizon_tokens=reasoning_horizon_tokens,
-            **kwargs,
-        )
+        if return_planner_loss:
+            if hasattr(self.TrajectoryPlanner, "_compute_loss_and_trajectory"):
+                planner_loss, trajectory = (
+                    self.TrajectoryPlanner._compute_loss_and_trajectory(
+                        planner_features,
+                        visual_ctx,
+                        ego_ctx,
+                        trajectory_target,
+                        loss_fn=planner_loss_fn,
+                        reasoning_latent=reasoning_latent,
+                        reasoning_horizon_tokens=reasoning_horizon_tokens,
+                        **kwargs,
+                    )
+                )
+            else:
+                planner_loss = self.TrajectoryPlanner.compute_planner_loss(
+                    planner_features,
+                    visual_ctx,
+                    ego_ctx,
+                    trajectory_target,
+                    loss_fn=planner_loss_fn,
+                    reasoning_latent=reasoning_latent,
+                    reasoning_horizon_tokens=reasoning_horizon_tokens,
+                    **kwargs,
+                )
+                trajectory = planner_features.new_zeros((B, 0))
+            aux_outputs["planner_loss"] = planner_loss
+        else:
+            trajectory = self.TrajectoryPlanner(
+                planner_features, visual_ctx, ego_ctx,
+                reasoning_latent=reasoning_latent,
+                reasoning_horizon_tokens=reasoning_horizon_tokens,
+                **kwargs,
+            )
         if reasoning_pred is not None and mode == "train":
             aux_outputs["reasoning_pred"] = reasoning_pred
         result = (trajectory, aux_outputs) if aux_outputs else trajectory

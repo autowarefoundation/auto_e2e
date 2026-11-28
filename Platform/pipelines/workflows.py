@@ -393,6 +393,12 @@ class MapFusion(enum.Enum):
     DEFORMABLE = "deformable"
 
 
+class PlannerMode(enum.Enum):
+    BEZIER = "bezier"
+    FLOW_MATCHING = "flow_matching"
+    GRU = "gru"
+
+
 def _row_decode_worker_count(dataset: Dataset, row_count: int) -> int:
     """Bound row decoders by each parser's per-process memory footprint."""
     # Each KITScenes child reparses the scene's Lanelet2 map and calibration.
@@ -3793,6 +3799,7 @@ def train_il(
     resume_from: Optional[FlyteFile] = None,
     early_stopping_patience: int = 5,
     allow_resume_policy_transition: bool = False,
+    planner_mode: PlannerMode = PlannerMode.BEZIER,
 ) -> TrainOutput:
     """Train AutoE2E model on pre-extracted WebDataset shards.
 
@@ -3942,6 +3949,12 @@ def train_il(
     )
     bb, fm = backbone.value, FUSION_LABEL
     mfm = map_fusion_mode.value
+    pm = planner_mode.value
+    if (enable_route_consistency or objective_v2) and pm == "flow_matching":
+        raise ValueError(
+            "route consistency and rollout-aligned objectives require a "
+            "deterministic trajectory planner, not 'flow_matching'"
+        )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     training_policy = training_policy_for_dataset(
         dataset.value,
@@ -3953,6 +3966,7 @@ def train_il(
 
     print(f"Training: backbone={bb} fusion={fm} epochs={epochs} bs={batch_size} device={device}")
     print(f"Map BEV fusion: {mfm}")
+    print(f"Planner mode: {pm}")
 
     # Merged DataLoader over all provided shard dirs. Each dataset keeps its own
     # geometry/num_views; batches are same-dataset, interleaved across datasets,
@@ -4567,6 +4581,7 @@ def train_il(
         route_channels=route_channels,
         enable_route_conditioning=enable_route_conditioning,
         map_fusion_mode=mfm,
+        planner_mode=pm,
         enable_reasoning=enable_reasoning, reasoning_mode=reasoning_mode,
         enable_world_model=enable_world_model,
     ).to(device)
@@ -4684,6 +4699,7 @@ def train_il(
         # _model_kwargs feeds this dict into AutoE2E(**config); without the key a
         # non-default run would be rebuilt with the constructor default.
         "map_fusion_mode": mfm,
+        "planner_mode": pm,
         "embed_dim": 256,
         "num_views": num_views,
         "view_fusion_kwargs": view_fusion_kwargs,
@@ -5505,11 +5521,16 @@ def train_il(
                             route_valid=route_valid,
                             projection=proj_dev, geometry_type=batch_geom,
                             mode="train", trajectory_target=target,
-                            history_frames=history_frames, future_frames=future_frames)
+                            history_frames=history_frames, future_frames=future_frames,
+                            return_planner_loss=True, planner_loss_fn=loss_fn)
                 # Train mode returns (trajectory, aux) when a branch (reasoning /
-                # world model) is on; otherwise just the trajectory tensor.
+                # world model / planner loss) is on; otherwise trajectory only.
                 trajectory, aux = out if isinstance(out, tuple) else (out, {})
-                traj_loss = loss_fn(trajectory, target)
+                planner_loss = aux.get("planner_loss")
+                if planner_loss is not None:
+                    traj_loss = planner_loss["loss"]
+                else:
+                    traj_loss = loss_fn(trajectory, target)
                 loss = traj_loss
                 initial_speed = ego_hist.reshape(
                     ego_hist.shape[0],
